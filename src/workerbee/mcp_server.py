@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from workerbee.agent import runbook_markdown
 from workerbee.contract import protect
 from workerbee.daemon import WorkerBeeDaemon
 from workerbee.manifests import (
@@ -54,20 +55,61 @@ def serve_mcp(
         return protect("Capabilities", None, daemon.capabilities)
 
     @mcp.tool()
+    def workerbee_v1_session_start(
+        cwd: str,
+        goal: str | None = None,
+        project: str | None = None,
+        open_dashboard: bool = False,
+    ) -> dict[str, Any]:
+        """Bootstrap an agent session and return project scope plus workflow guidance."""
+        return protect(
+            "SessionStart",
+            project,
+            lambda: daemon.session_start(
+                cwd=cwd,
+                goal=goal,
+                project=project,
+                open_dashboard=open_dashboard,
+            ),
+        )
+
+    @mcp.tool()
     def workerbee_v1_projects() -> dict[str, Any]:
         """Return all project-scoped WorkerBee stacks known to this MCP daemon."""
         return protect("Projects", None, daemon.projects)
 
     @mcp.tool()
-    def workerbee_v1_project_start(project: str = "default") -> dict[str, Any]:
+    def workerbee_v1_project_mode_get(project: str = "default") -> dict[str, Any]:
+        """Return persisted WorkerBee mode for a project."""
+        return protect("ProjectModeGet", project, lambda: daemon.project_mode_get(project))
+
+    @mcp.tool()
+    def workerbee_v1_project_mode_set(
+        mode: str,
+        project: str = "default",
+        open_dashboard: bool = False,
+    ) -> dict[str, Any]:
+        """Persist project mode: start, lazy, or stop."""
+        return protect(
+            "ProjectModeSet",
+            project,
+            lambda: daemon.project_mode_set(
+                project=project,
+                mode=mode,
+                open_dashboard=open_dashboard,
+            ),
+        )
+
+    @mcp.tool()
+    def workerbee_v1_project_start(
+        project: str = "default",
+        open_dashboard: bool = False,
+    ) -> dict[str, Any]:
         """Start or return a project-local WorkerBee k1s stack."""
         return protect(
             "ProjectStart",
             project,
-            lambda: daemon.with_project(
-                project,
-                lambda supervisor: supervisor.start().public_dict(),
-            ),
+            lambda: daemon.project_start(project=project, open_dashboard=open_dashboard),
         )
 
     @mcp.tool()
@@ -93,7 +135,11 @@ def serve_mcp(
         return protect(
             "ProjectReset",
             project,
-            lambda: daemon.with_project(project, lambda supervisor: supervisor.reset()),
+            lambda: daemon.with_project(
+                project,
+                lambda supervisor: supervisor.reset(),
+                require_active=True,
+            ),
         )
 
     @mcp.tool()
@@ -109,6 +155,7 @@ def serve_mcp(
             lambda: daemon.with_project(
                 project,
                 lambda supervisor: supervisor.logs(app=app, tail=tail),
+                require_active=True,
             ),
         )
 
@@ -125,6 +172,34 @@ def serve_mcp(
             lambda: daemon.with_project(
                 project,
                 lambda supervisor: supervisor.run_exec(app, command),
+                require_active=True,
+            ),
+        )
+
+    @mcp.tool()
+    def workerbee_v1_ingress_probe(
+        project: str = "default",
+        url: str | None = None,
+        host: str | None = None,
+        path: str = "/",
+        method: str = "GET",
+        expected_status: int | None = None,
+        body_contains: str | None = None,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        """Probe a WorkerBee-managed local HTTPS ingress URL with the WorkerBee CA."""
+        return protect(
+            "IngressProbe",
+            project,
+            lambda: daemon.ingress_probe(
+                project=project,
+                url=url,
+                host=host,
+                path=path,
+                method=method,
+                expected_status=expected_status,
+                body_contains=body_contains,
+                timeout=timeout,
             ),
         )
 
@@ -190,6 +265,9 @@ def serve_mcp(
                     namespace=namespace,
                     timeout=timeout,
                 ),
+                require_active=True,
+                autostart=True,
+                start_reason="manifest_deploy_local",
             ),
         )
 
@@ -216,6 +294,7 @@ def serve_mcp(
                     namespace=namespace,
                     timeout=timeout,
                 ),
+                require_not_stopped=True,
             ),
         )
 
@@ -274,6 +353,27 @@ def serve_mcp(
             "TrustUninstall",
             None,
             lambda: trust_uninstall(daemon.state_root, target=target),
+        )
+
+    @mcp.resource(
+        "workerbee://runbook/v1",
+        name="workerbee-runbook-v1",
+        title="WorkerBee Cloud-Native Loop",
+        description="Agent workflow guidance for using WorkerBee as a local k1s workbench.",
+        mime_type="text/markdown",
+    )
+    def workerbee_runbook_resource() -> str:
+        return runbook_markdown()
+
+    @mcp.prompt(
+        name="workerbee_cloud_native_loop",
+        title="Use WorkerBee Cloud-Native Loop",
+        description="Inject WorkerBee's recommended build/deploy/test/export workflow.",
+    )
+    def workerbee_cloud_native_loop(cwd: str, goal: str = "") -> str:
+        return (
+            f"Use WorkerBee for this cloud-native task.\n\ncwd: {cwd}\n"
+            f"goal: {goal or '(not provided)'}\n\n{runbook_markdown()}"
         )
 
     mcp.run(transport="streamable-http")

@@ -10,13 +10,17 @@ from typing import Any
 API_VERSION = "workerbee.mcp/v1"
 MCP_TOOL_NAMES = [
     "workerbee_v1_capabilities",
+    "workerbee_v1_session_start",
     "workerbee_v1_projects",
+    "workerbee_v1_project_mode_get",
+    "workerbee_v1_project_mode_set",
     "workerbee_v1_project_start",
     "workerbee_v1_project_status",
     "workerbee_v1_project_stop",
     "workerbee_v1_project_reset",
     "workerbee_v1_logs",
     "workerbee_v1_exec",
+    "workerbee_v1_ingress_probe",
     "workerbee_v1_image_build",
     "workerbee_v1_manifest_prepare",
     "workerbee_v1_manifest_validate",

@@ -10,16 +10,20 @@ The representative app stack is deployed through native k1s manifests, not Helm.
 - `api`: backend service that calls `store`, consumes config and secret projections, exposes health and app-check endpoints, declares ingress, and uses resource/security settings.
 - `frontend`: HTTP frontend that calls `api`, exposes health and UI endpoints, and declares ingress paths.
 
-The POC flow builds local images with Podman or Docker, applies the native k1s manifests, queries native k1s status, fetches logs, validates the live app chain, checks API shim pod visibility, and exports Kubernetes YAML artifacts.
+The POC flow builds local images with Podman, Docker, or explicit direct containerd, applies the native k1s manifests, queries native k1s status, fetches logs, validates the live app chain, checks API shim pod visibility, and exports Kubernetes YAML artifacts.
 
 ## Extended MCP/Ingress Scope
 
 WorkerBee now has the planned shared MCP shape:
 
-- A single local MCP server can serve multiple clients. Each tool accepts a `project` value, allowing two Codex sessions in different working trees to share one MCP daemon while keeping k1s state, runtime networks, generated manifests, and app ingress separated by project name.
-- The MCP daemon starts a global dashboard immediately and prints the URL before serving MCP traffic. The dashboard lists all known project-scoped stacks under the daemon state root.
+- A single background local MCP daemon can serve multiple clients. Each tool accepts a `project` value, allowing two Codex sessions in different working trees to share one MCP daemon while keeping k1s state, runtime networks, generated manifests, and app ingress separated by project name.
+- Agents bootstrap each repo with `workerbee_v1_session_start`, which derives a stable project id from the Git repo name, branch, and cwd hash, persists that cwd for later tool calls, and returns the cloud-native build/deploy/test/export runbook.
+- Per-project mode is persisted as `lazy`, `start`, or `stop`. `lazy` is the default, `start` launches the stack during bootstrap, and `stop` provides a persistent user-controlled off switch that returns `PROJECT_STOPPED` for runtime operations.
+- `workerbee mcp start` starts the background daemon, `workerbee mcp stop` stops it, and `workerbee mcp serve` remains the foreground/debug path.
+- The MCP daemon starts a global dashboard immediately and prints the URL before serving MCP traffic. The dashboard lists all known project-scoped stacks under the daemon state root, including branch metadata when available.
 - A global Caddy edge is started for local HTTPS. Project app hosts are scoped as `app.<project>.workerbee.localhost` and `api.<project>.workerbee.localhost`, with Caddy using its internal local CA.
 - Native k1s manifest deploys and the POC stack return browser-ready ingress URLs when the MCP daemon provides ingress configuration.
+- `workerbee_v1_ingress_probe` gives agents a Caddy-CA-aware HTTPS probe restricted to WorkerBee-managed localhost hosts, so TLS trust setup is not required for automated smoke checks.
 - CA trust remains explicit. `workerbee trust status` reports the generated Caddy CA path, and `workerbee trust install` performs the OS/user trust-store install only when requested.
 - The wheelhouse flow can package `k1s-workerbee` plus `k1s-workerbee-runtime`, so users only need the WorkerBee wheelhouse and a supported container runtime.
 
@@ -28,7 +32,7 @@ WorkerBee now has the planned shared MCP shape:
 The immediate v0.1 hardening work should turn the POC into a reliable distributable local agent workbench:
 
 - MCP contract: register v1-only `workerbee_v1_*` tool names, stable result envelopes, stable errors, version/capabilities reporting, and dashboard URL notification semantics.
-- Runtime support: harden Podman rootless, Podman rootful, Docker Linux, and Docker Desktop behavior, especially Caddy host reachability and port cleanup.
+- Runtime support: harden Podman rootless, Podman rootful, Docker Linux, Docker Desktop, and explicit direct containerd behavior, especially Caddy host reachability and port cleanup.
 - Lifecycle safety: prevent two independent MCP daemons from mutating the same state root, clean stale processes, avoid port drift, support purge/reset, and never expose bearer tokens in tool results.
 - Deployment inputs: support staged native k1s manifests as the primary path, practical Kubernetes YAML apply through `ae apply --k8s`, image build contexts, and simple generated app templates. Kubernetes input is intentionally limited to one workload plus optional Service/Ingress per file for v0.1; native k1s input is required for native k1s bundle export.
 - Observability: defer richer resource summaries/events/ingress health to k1s-side work and track it through `docs/rfcs/k1s-workerbee-observability.md`.

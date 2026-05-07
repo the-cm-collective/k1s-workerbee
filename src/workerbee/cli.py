@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from workerbee import __version__
+from workerbee.agent import derive_session_project
 from workerbee.daemon import WorkerBeeDaemon
 from workerbee.k1s_runtime import resolve_k1s_runtime
 from workerbee.manifests import (
@@ -20,6 +21,13 @@ from workerbee.manifests import (
     export_bundle,
     prepare_stage,
     validate_stage,
+)
+from workerbee.mcp_daemon import (
+    config_from_args,
+    mcp_daemon_status,
+    restart_mcp_daemon,
+    start_mcp_daemon,
+    stop_mcp_daemon,
 )
 from workerbee.mcp_server import serve_mcp
 from workerbee.paths import default_state_root
@@ -30,7 +38,8 @@ from workerbee.trust import trust_install, trust_status, trust_uninstall
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="workerbee")
     parser.add_argument("--version", action="version", version=f"workerbee {__version__}")
-    parser.add_argument("--project", default="default", help="WorkerBee project name")
+    parser.add_argument("--project", default=None, help="WorkerBee project name")
+    parser.add_argument("--cwd", type=Path, default=None, help="Project working directory hint")
     parser.add_argument("--state-dir", type=Path, default=None, help="Override state directory")
     parser.add_argument(
         "--state-root",
@@ -41,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--runtime",
         default="auto",
-        choices=["auto", "podman", "docker"],
+        choices=["auto", "podman", "docker", "containerd"],
         help="Container runtime backend",
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON output")
@@ -57,6 +66,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("status", help="Show WorkerBee stack status")
     sub.add_parser("projects", help="List WorkerBee daemon projects")
+    project = sub.add_parser("project", help="Manage daemon project policy")
+    project_sub = project.add_subparsers(dest="project_cmd", required=True)
+    project_mode = project_sub.add_parser("mode", help="Set project mode: start, lazy, or stop")
+    project_mode.add_argument("mode", choices=["start", "lazy", "stop"])
+    project_mode.add_argument("--cwd", dest="project_cwd", type=Path, default=None)
+    project_mode.add_argument("--project", dest="project_name", default=None)
+    project_mode.add_argument("--open", action="store_true", help="Open the project dashboard")
+    project_status = project_sub.add_parser("status", help="Show project mode and status")
+    project_status.add_argument("--cwd", dest="project_cwd", type=Path, default=None)
+    project_status.add_argument("--project", dest="project_name", default=None)
     sub.add_parser("global-dashboard", help="Show WorkerBee global dashboard status")
     ingress = sub.add_parser("ingress", help="Inspect WorkerBee global ingress")
     ingress_sub = ingress.add_subparsers(dest="ingress_cmd", required=True)
@@ -130,9 +149,23 @@ def build_parser() -> argparse.ArgumentParser:
 
     mcp = sub.add_parser("mcp", help="Run the MCP server")
     mcp_sub = mcp.add_subparsers(dest="mcp_cmd", required=True)
+    def add_mcp_bind_flags(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--host", default="127.0.0.1")
+        command.add_argument("--port", type=int, default=8765)
+
+    start_mcp = mcp_sub.add_parser("start", help="Start WorkerBee MCP in the background")
+    add_mcp_bind_flags(start_mcp)
+    start_mcp.add_argument("--timeout", type=float, default=45.0)
+    stop_mcp = mcp_sub.add_parser("stop", help="Stop the background WorkerBee MCP daemon")
+    add_mcp_bind_flags(stop_mcp)
+    stop_mcp.add_argument("--timeout", type=float, default=10.0)
+    restart_mcp = mcp_sub.add_parser("restart", help="Restart WorkerBee MCP in the background")
+    add_mcp_bind_flags(restart_mcp)
+    restart_mcp.add_argument("--timeout", type=float, default=45.0)
+    status_mcp = mcp_sub.add_parser("status", help="Show background WorkerBee MCP status")
+    add_mcp_bind_flags(status_mcp)
     serve = mcp_sub.add_parser("serve", help="Serve WorkerBee over Streamable HTTP MCP")
-    serve.add_argument("--host", default="127.0.0.1")
-    serve.add_argument("--port", type=int, default=8765)
+    add_mcp_bind_flags(serve)
     return parser
 
 
@@ -143,23 +176,63 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "doctor":
             return _print(_doctor(), json_out=args.json)
         if args.cmd == "mcp":
-            serve_mcp(
-                project=args.project,
+            if args.mcp_cmd == "serve":
+                serve_mcp(
+                    project=args.project or "default",
+                    runtime=args.runtime,
+                    host=args.host,
+                    port=args.port,
+                    state_dir=args.state_dir,
+                    state_root=args.state_root,
+                )
+                return 0
+            if args.state_dir is not None and args.state_root is not None:
+                raise RuntimeError("use either --state-dir or --state-root, not both")
+            config = config_from_args(
+                state_root=args.state_root or args.state_dir,
                 runtime=args.runtime,
+                project=args.project or "default",
                 host=args.host,
                 port=args.port,
-                state_dir=args.state_dir,
-                state_root=args.state_root,
             )
+            if args.mcp_cmd == "start":
+                return _print(start_mcp_daemon(config, timeout=args.timeout), json_out=args.json)
+            if args.mcp_cmd == "stop":
+                return _print(stop_mcp_daemon(config, timeout=args.timeout), json_out=args.json)
+            if args.mcp_cmd == "restart":
+                return _print(restart_mcp_daemon(config, timeout=args.timeout), json_out=args.json)
+            if args.mcp_cmd == "status":
+                return _print(mcp_daemon_status(config), json_out=args.json)
             return 0
         if args.cmd == "projects":
-            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime)
+            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime, cwd=args.cwd)
             return _print(daemon.projects(), json_out=args.json)
+        if args.cmd == "project":
+            cwd = args.project_cwd or args.cwd or Path.cwd()
+            project = args.project_name or args.project or derive_session_project(cwd)
+            daemon = WorkerBeeDaemon(
+                state_root=args.state_root,
+                runtime=args.runtime,
+                default_project=project,
+                cwd=cwd,
+            )
+            if args.project_cmd == "mode":
+                return _print(
+                    daemon.project_mode_set(
+                        project=project,
+                        mode=args.mode,
+                        cwd=cwd,
+                        open_dashboard=args.open,
+                    ),
+                    json_out=args.json,
+                )
+            if args.project_cmd == "status":
+                return _print(daemon.project_mode_get(project), json_out=args.json)
         if args.cmd == "global-dashboard":
-            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime)
+            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime, cwd=args.cwd)
             return _print(daemon.global_dashboard(), json_out=args.json)
         if args.cmd == "ingress":
-            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime)
+            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime, cwd=args.cwd)
             return _print(daemon.global_dashboard(), json_out=args.json)
         if args.cmd == "trust":
             root = (args.state_root or default_state_root()).resolve()
@@ -170,15 +243,16 @@ def main(argv: list[str] | None = None) -> int:
             if args.trust_cmd == "uninstall":
                 return _print(trust_uninstall(root, target=args.target), json_out=args.json)
         if args.cmd == "cleanup":
-            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime)
+            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime, cwd=args.cwd)
             return _print(
                 daemon.cleanup(execute=args.execute, purge_images=args.purge_images),
                 json_out=args.json,
             )
         sup = WorkerBeeSupervisor(
-            project=args.project,
+            project=args.project or "default",
             runtime=args.runtime,
             state_dir=args.state_dir,
+            cwd=args.cwd,
         )
         if args.cmd == "manifest":
             if args.manifest_cmd == "prepare":
@@ -271,6 +345,18 @@ def _print(payload: dict[str, Any], *, json_out: bool) -> int:
     if json_out:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
+    if payload.get("user_message"):
+        print(payload["user_message"])
+        if payload.get("dashboard_url"):
+            print(f"dashboard: {payload['dashboard_url']}")
+        return 0
+    if "mcp_url" in payload:
+        print(f"mcp: {payload['mcp_url']}")
+        if payload.get("dashboard_url"):
+            print(f"dashboard: {payload['dashboard_url']}")
+        print(f"running: {payload.get('running')}")
+        print(f"state: {payload.get('state_root')}")
+        return 0
     if "dashboard_url" in payload:
         print(f"dashboard: {payload['dashboard_url']}")
         print(f"controller: {payload.get('controller_url')}")
@@ -286,6 +372,8 @@ def _doctor() -> dict[str, Any]:
         "python": sys.version.split()[0],
         "podman": shutil.which("podman"),
         "docker": shutil.which("docker"),
+        "nerdctl": shutil.which("nerdctl"),
+        "buildctl": shutil.which("buildctl"),
     }
     try:
         runtime = resolve_k1s_runtime()
@@ -333,6 +421,6 @@ def _doctor() -> dict[str, Any]:
     checks["ok"] = (
         bool(checks.get("ae_import"))
         and bool(checks.get("apishim_env_helper"))
-        and bool(checks.get("podman") or checks.get("docker"))
+        and bool(checks.get("podman") or checks.get("docker") or checks.get("nerdctl"))
     )
     return checks

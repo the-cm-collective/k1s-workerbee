@@ -1,0 +1,215 @@
+"""Agent-facing WorkerBee session policy and runbook helpers."""
+
+from __future__ import annotations
+
+import hashlib
+import subprocess
+import webbrowser
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Any
+
+from workerbee.contract import WorkerBeeError
+from workerbee.supervisor import project_slug
+
+PROJECT_MODES = {"start", "lazy", "stop"}
+DEFAULT_PROJECT_MODE = "lazy"
+
+
+@dataclass(frozen=True, slots=True)
+class SessionProjectInfo:
+    project: str
+    cwd: Path
+    git_root: Path | None
+    git_branch: str | None
+    explicit_project: bool
+
+    def public_dict(self) -> dict[str, Any]:
+        data = asdict(self)
+        data["cwd"] = str(self.cwd)
+        data["git_root"] = str(self.git_root) if self.git_root else None
+        return data
+
+
+def derive_session_project(cwd: Path | str, project: str | None = None) -> str:
+    """Return a stable project id for a local agent checkout."""
+    return derive_session_project_info(cwd, project=project).project
+
+
+def derive_session_project_info(cwd: Path | str, project: str | None = None) -> SessionProjectInfo:
+    """Return a stable project id plus Git metadata for a local agent checkout."""
+    root = Path(cwd).expanduser().resolve()
+    git_root = _git_root(root)
+    git_branch = _git_branch(root) if git_root else None
+    if project:
+        return SessionProjectInfo(
+            project=project_slug(project),
+            cwd=root,
+            git_root=git_root,
+            git_branch=git_branch,
+            explicit_project=True,
+        )
+    base_root = git_root or root
+    base = project_slug(base_root.name or root.name or "workspace")
+    if git_branch:
+        base = project_slug(f"{base}-{git_branch}")
+    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:10]
+    return SessionProjectInfo(
+        project=project_slug(f"{base}-{digest}"),
+        cwd=root,
+        git_root=git_root,
+        git_branch=git_branch,
+        explicit_project=False,
+    )
+
+
+def _git_root(cwd: Path) -> Path | None:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse", "--show-toplevel"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    raw = proc.stdout.strip()
+    if proc.returncode != 0 or not raw:
+        return None
+    return Path(raw).resolve()
+
+
+def _git_branch(cwd: Path) -> str | None:
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), "symbolic-ref", "--quiet", "--short", "HEAD"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except Exception:
+        return None
+    raw = proc.stdout.strip()
+    if proc.returncode != 0 or not raw or raw == "HEAD":
+        return None
+    return project_slug(raw)
+
+
+def normalize_project_mode(mode: str | None) -> str:
+    value = (mode or DEFAULT_PROJECT_MODE).strip().lower()
+    if value not in PROJECT_MODES:
+        raise WorkerBeeError(
+            code="INVALID_PROJECT_MODE",
+            message="project mode must be one of: start, lazy, stop",
+            details={"mode": mode, "allowed": sorted(PROJECT_MODES)},
+            remediation="Use `workerbee project mode start|lazy|stop`.",
+        )
+    return value
+
+
+def runbook_markdown() -> str:
+    return """# WorkerBee Cloud-Native Loop
+
+Use WorkerBee when the task involves containers, services, manifests, ingress, databases,
+queues, or integration behavior that benefits from a running local stack.
+
+1. Call `workerbee_v1_session_start` with the absolute repo cwd and task goal.
+2. Use the returned `project` value on every WorkerBee MCP tool call.
+3. Use the local shell for repo edits, ordinary build scripts, unit tests, and temporary helper
+   scripts. Put one-off helper scripts in `/tmp` or WorkerBee state unless the task requires a
+   committed repo script.
+4. Use WorkerBee MCP to build local images, prepare or stage manifests, validate manifests, deploy
+   locally, inspect status/logs, probe HTTPS ingress, and export k1s/Kubernetes/Helm artifacts.
+5. In lazy mode, do not start the stack until deployment or an explicit project start is needed.
+6. If WorkerBee reports `PROJECT_STOPPED`, tell the user WorkerBee is disabled for this project
+   and show `workerbee project mode start --project <project>`.
+7. Iterate against the live app through status, logs, exec, and `workerbee_v1_ingress_probe` until
+   the requested behavior is verified.
+8. Export artifacts with `workerbee_v1_bundle_export` when the implementation is ready to hand off.
+"""
+
+
+def runbook_payload() -> dict[str, Any]:
+    return {
+        "title": "WorkerBee Cloud-Native Loop",
+        "summary": (
+            "Codex should keep editing and running repo-local commands normally, while using "
+            "WorkerBee MCP for the local k1s runtime, image builds, manifest deploys, logs, "
+            "HTTPS ingress probes, dashboards, lifecycle mode, cleanup, and exports."
+        ),
+        "default_mode": DEFAULT_PROJECT_MODE,
+        "mode_semantics": {
+            "lazy": "Reserve the project and wait until deploy/start before launching k1s.",
+            "start": "Start the project stack during session bootstrap and future Codex sessions.",
+            "stop": "Stop the project stack and block implicit WorkerBee starts/deploys.",
+        },
+        "loop": [
+            "Call workerbee_v1_session_start(cwd, goal) and keep the returned project.",
+            "Build images with local shell scripts or workerbee_v1_image_build.",
+            "Prepare/stage manifests, validate them, deploy locally, then inspect status/logs.",
+            "Probe WorkerBee HTTPS ingress through workerbee_v1_ingress_probe.",
+            "Iterate until the running app is correct, then export k1s/k8s/helm artifacts.",
+        ],
+        "temporary_files": (
+            "Use /tmp or WorkerBee state for one-off helper scripts unless the user asked for "
+            "durable repo scripts."
+        ),
+    }
+
+
+def next_actions_for_mode(mode: str, *, running: bool) -> list[str]:
+    mode = normalize_project_mode(mode)
+    if mode == "stop":
+        return [
+            "Report that WorkerBee is disabled for this project.",
+            "Use `workerbee project mode start --project <project>` to re-enable it.",
+        ]
+    if running:
+        return [
+            "Use workerbee_v1_project_status to inspect the stack.",
+            "Deploy or probe the app through WorkerBee when runtime validation is needed.",
+        ]
+    if mode == "start":
+        return [
+            "The stack should be starting now; inspect project status and dashboards.",
+        ]
+    return [
+        "Keep WorkerBee lazy until deployment/runtime validation is needed.",
+        "Call workerbee_v1_manifest_deploy_local or workerbee_v1_project_start to start the stack.",
+    ]
+
+
+def user_message_for_session(
+    *,
+    project: str,
+    mode: str,
+    running: bool,
+    dashboard_url: str | None,
+) -> str:
+    if mode == "stop":
+        return (
+            f"WorkerBee is disabled for project `{project}`. It will not start or deploy until "
+            f"the user runs `workerbee project mode start --project {project}` or asks the agent "
+            "to switch modes."
+        )
+    if running and dashboard_url:
+        return f"WorkerBee project `{project}` is running. Dashboard: {dashboard_url}"
+    if running:
+        return f"WorkerBee project `{project}` is running."
+    if mode == "start":
+        return f"WorkerBee project `{project}` is configured to start immediately."
+    return (
+        f"WorkerBee project `{project}` is in lazy mode. The stack will start only when deploy "
+        "or explicit start is requested."
+    )
+
+
+def open_browser(url: str | None) -> bool:
+    if not url:
+        return False
+    try:
+        return bool(webbrowser.open(url))
+    except Exception:
+        return False

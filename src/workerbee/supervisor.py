@@ -27,7 +27,17 @@ from workerbee.poc import (
     write_stack_files,
 )
 from workerbee.ports import choose_port
-from workerbee.runtime_support import resolve_runtime, workerbee_runtime_labels
+from workerbee.runtime_support import (
+    CONTAINERD_RUNTIME,
+    build_image_with_runtime,
+    containerd_address,
+    containerd_data_root,
+    containerd_namespace,
+    resolve_runtime,
+    runtime_command_args,
+    workerbee_runtime_labels,
+    write_containerd_cli_wrapper,
+)
 
 
 @dataclass(slots=True)
@@ -85,6 +95,9 @@ class WorkerBeeSupervisor:
     def start(self) -> StackInfo:
         existing = self.load_stack()
         if existing and self._controller_healthy(existing) and self._apishim_healthy(existing):
+            if self.ingress:
+                existing.ingress = self.ingress.public_dict()
+                self._write_stack(existing)
             return existing
         if existing:
             self.stop(purge=False)
@@ -259,34 +272,22 @@ class WorkerBeeSupervisor:
         if not build_context.is_dir():
             raise FileNotFoundError(f"image build context not found: {build_context}")
         image_tag = tag or f"workerbee-{self.project}-{_slug(build_context.name)}:dev"
-        cmd = [runtime, "build", "-t", image_tag]
-        for label in workerbee_runtime_labels(
+        labels = workerbee_runtime_labels(
             state_root=self.state_dir.parent.parent,
             project=self.project,
-        ):
-            cmd.extend(["--label", label])
-        cmd.append(str(build_context))
-        proc = subprocess.run(
-            cmd,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            timeout=300,
+        )
+        result = build_image_with_runtime(
+            runtime=runtime,
+            state_root=self.state_dir.parent.parent,
+            project=self.project,
+            context=build_context,
+            tag=image_tag,
+            labels=labels,
         )
         result = {
-            "ok": proc.returncode == 0,
+            **result,
             "project": self.project,
-            "runtime": runtime,
-            "tag": image_tag,
-            "context": str(build_context),
-            "labels": workerbee_runtime_labels(
-                state_root=self.state_dir.parent.parent,
-                project=self.project,
-            ),
-            "stdout": proc.stdout,
         }
-        if proc.returncode != 0:
-            raise RuntimeError(json.dumps(result, indent=2))
         return result
 
     def deploy_manifest(
@@ -636,6 +637,30 @@ class WorkerBeeSupervisor:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                 )
+        elif runtime == CONTAINERD_RUNTIME:
+            state_root = self.state_dir.parent.parent
+            exists = subprocess.run(
+                runtime_command_args(
+                    runtime,
+                    state_root=state_root,
+                    project=self.project,
+                    args=["network", "inspect", network],
+                ),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            if exists.returncode != 0:
+                subprocess.run(
+                    runtime_command_args(
+                        runtime,
+                        state_root=state_root,
+                        project=self.project,
+                        args=["network", "create", network],
+                    ),
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
         else:
             exists = subprocess.run(
                 ["docker", "network", "inspect", network],
@@ -652,10 +677,21 @@ class WorkerBeeSupervisor:
 
     def _base_env(self, info: StackInfo) -> dict[str, str]:
         env = self.k1s_runtime.apply_env(os.environ.copy())
+        state_root = self.state_dir.parent.parent
+        container_cli = info.runtime
+        if info.runtime == CONTAINERD_RUNTIME:
+            container_cli = str(
+                write_containerd_cli_wrapper(
+                    self.state_dir / "bin" / "nerdctl-workerbee",
+                    state_root=state_root,
+                    project=self.project,
+                    system_container=self.ingress.caddy_container if self.ingress else None,
+                )
+            )
         env.update(
             {
                 "AE_RUNTIME_BACKEND": info.runtime,
-                "AE_CONTAINER_CLI": info.runtime,
+                "AE_CONTAINER_CLI": container_cli,
                 "AE_NETWORK_NAME": info.network,
                 "AE_STATE_DB": str(self.state_dir / "controller.db"),
                 "AE_STATE_BACKEND": "sqlite",
@@ -681,6 +717,18 @@ class WorkerBeeSupervisor:
                 "AE_ALLOW_PLAINTEXT_SECRETS": "1",
             }
         )
+        if info.runtime == CONTAINERD_RUNTIME:
+            env.update(
+                {
+                    "AE_CONTAINERD_ADDRESS": containerd_address(),
+                    "AE_CRI_ENDPOINT": containerd_address(),
+                    "AE_CONTAINERD_NAMESPACE": containerd_namespace(self.project),
+                    "AE_CONTAINERD_DATA_ROOT": str(
+                        containerd_data_root(state_root, project=self.project)
+                    ),
+                    "AE_CONTAINERD_NETWORK": info.network,
+                }
+            )
         if self.ingress:
             env.update(
                 {
@@ -693,7 +741,7 @@ class WorkerBeeSupervisor:
             )
         if info.runtime == "podman":
             env["AE_PODMAN_NETWORK"] = info.network
-        else:
+        elif info.runtime == "docker":
             env["AE_DOCKER_NETWORK"] = info.network
         return env
 
@@ -867,6 +915,46 @@ class WorkerBeeSupervisor:
                     stderr=subprocess.DEVNULL,
                 )
             return
+        if info.runtime == CONTAINERD_RUNTIME:
+            state_root = self.state_dir.parent.parent
+            ids = _split_lines(
+                subprocess.run(
+                    runtime_command_args(
+                        info.runtime,
+                        state_root=state_root,
+                        project=self.project,
+                        args=["ps", "-aq", "--filter", f"label={namespace_filter}"],
+                    ),
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                ).stdout
+            )
+            if ids:
+                subprocess.run(
+                    runtime_command_args(
+                        info.runtime,
+                        state_root=state_root,
+                        project=self.project,
+                        args=["rm", "-f", *ids],
+                    ),
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            if purge:
+                subprocess.run(
+                    runtime_command_args(
+                        info.runtime,
+                        state_root=state_root,
+                        project=self.project,
+                        args=["network", "rm", info.network],
+                    ),
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            return
 
         ids = _split_lines(
             subprocess.run(
@@ -900,6 +988,13 @@ class WorkerBeeSupervisor:
         ]
         if info.runtime == "podman":
             cmd = ["podman", "ps", "-q", *filters]
+        elif info.runtime == CONTAINERD_RUNTIME:
+            cmd = runtime_command_args(
+                info.runtime,
+                state_root=self.state_dir.parent.parent,
+                project=self.project,
+                args=["ps", "-q", *filters],
+            )
         else:
             cmd = ["docker", "ps", "-q", *filters]
         proc = subprocess.run(
@@ -919,7 +1014,12 @@ class WorkerBeeSupervisor:
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
         for cid in ids:
-            cmd = [info.runtime, "logs", "--tail", str(tail), cid]
+            cmd = runtime_command_args(
+                info.runtime,
+                state_root=self.state_dir.parent.parent,
+                project=self.project,
+                args=["logs", "--tail", str(tail), cid],
+            )
             proc = subprocess.run(
                 cmd,
                 text=True,
@@ -932,7 +1032,12 @@ class WorkerBeeSupervisor:
                 raise RuntimeError(proc.stderr.strip() or f"{info.runtime} logs failed")
         return {
             "source": info.runtime,
-            "cmd": [info.runtime, "logs", "--tail", str(tail), *ids],
+            "cmd": runtime_command_args(
+                info.runtime,
+                state_root=self.state_dir.parent.parent,
+                project=self.project,
+                args=["logs", "--tail", str(tail), *ids],
+            ),
             "returncode": 0,
             "stdout": "".join(stdout_parts),
             "stderr": "".join(stderr_parts),
@@ -942,7 +1047,12 @@ class WorkerBeeSupervisor:
         ids = self._runtime_container_ids(info, app)
         if not ids:
             raise RuntimeError(f"no running POC container found for app {app!r}")
-        cmd = [info.runtime, "exec", ids[0], *command]
+        cmd = runtime_command_args(
+            info.runtime,
+            state_root=self.state_dir.parent.parent,
+            project=self.project,
+            args=["exec", ids[0], *command],
+        )
         proc = subprocess.run(
             cmd,
             text=True,

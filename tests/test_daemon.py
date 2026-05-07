@@ -39,6 +39,18 @@ def test_global_ingress_project_config_is_localhost_scoped(tmp_path: Path) -> No
     assert config.sites_dir == tmp_path / "projects" / "alpha" / "caddy"
 
 
+def test_global_ingress_containerd_uses_loopback_host_alias(tmp_path: Path) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="containerd",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    config = ingress.project_config("alpha")
+
+    assert config.host_alias == "127.0.0.1"
+
+
 def test_global_ingress_writes_explicit_project_imports(tmp_path: Path) -> None:
     ingress = GlobalIngress(
         state_root=tmp_path,
@@ -54,3 +66,19 @@ def test_global_ingress_writes_explicit_project_imports(tmp_path: Path) -> None:
     assert "import /etc/caddy/projects/alpha/caddy/*.caddy" in text
     assert "import /etc/caddy/projects/beta/caddy/*.caddy" in text
     assert "import /etc/caddy/projects/*/caddy/*.caddy" not in text
+
+
+def test_global_ingress_containerd_writes_host_network_https_port(tmp_path: Path) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="containerd",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    ingress.global_dir.mkdir(parents=True)
+
+    ingress._write_caddyfile(["alpha"])  # noqa: SLF001
+    text = ingress.caddy_file.read_text(encoding="utf-8")
+
+    assert "https_port 19443" in text
+    assert "default_bind 127.0.0.1" in text

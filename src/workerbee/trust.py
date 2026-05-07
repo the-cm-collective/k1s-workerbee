@@ -36,7 +36,7 @@ def trust_install(state_root: Path, *, target: str = "all") -> dict[str, Any]:
     ca = Path(str(ca_raw or ""))
     if not ca.is_file():
         raise FileNotFoundError(
-            "WorkerBee Caddy CA not found; start `workerbee mcp serve` and open the "
+            "WorkerBee Caddy CA not found; start `workerbee mcp start` and open the "
             "global dashboard once so Caddy creates its local root"
         )
     installed: list[str] = []
