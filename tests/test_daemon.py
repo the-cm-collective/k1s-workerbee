@@ -3,7 +3,12 @@ import os
 from pathlib import Path
 from types import SimpleNamespace
 
-from workerbee.daemon import WorkerBeeDaemon
+from workerbee.daemon import (
+    DASHBOARD_BACKGROUND_PATH,
+    WorkerBeeDaemon,
+    _dashboard_static_asset,
+    _render_dashboard,
+)
 from workerbee.ingress import GlobalIngress, GlobalIngressInfo, global_ingress_status
 from workerbee.k1s_runtime import K1sRuntime
 
@@ -40,6 +45,49 @@ def test_global_ingress_project_config_is_localhost_scoped(tmp_path: Path) -> No
         "https://app.alpha.workerbee.localhost:19443/"
     )
     assert config.sites_dir == tmp_path / "projects" / "alpha" / "caddy"
+
+
+def test_global_dashboard_uses_k1s_visual_style() -> None:
+    html = _render_dashboard(
+        {
+            "projects": [
+                {
+                    "project": "alpha",
+                    "mode": "eager",
+                    "running": True,
+                    "git_branch": "dev",
+                    "dashboard_url": "http://127.0.0.1:19108/dashboard",
+                    "ingress": {
+                        "global_dashboard_url": "https://app.alpha.workerbee.localhost:19443/"
+                    },
+                    "state_dir": "/var/lib/workerbee/projects/alpha",
+                }
+            ],
+            "global_dashboard": {"enabled": True, "runtime": "containerd"},
+        }
+    )
+
+    assert "WorkerBee Projects" in html
+    assert "brand-accent" in html
+    assert 'class="card"' in html
+    assert DASHBOARD_BACKGROUND_PATH in html
+    assert "alpha" in html
+    assert "eager / running" in html
+    assert "https://app.alpha.workerbee.localhost:19443/" in html
+    assert "&quot;runtime&quot;: &quot;containerd&quot;" in html
+
+
+def test_global_dashboard_static_background_asset_is_packaged() -> None:
+    asset = _dashboard_static_asset(DASHBOARD_BACKGROUND_PATH)
+
+    assert asset is not None
+    body, content_type = asset
+    assert content_type == "image/png"
+    assert body.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_global_dashboard_static_asset_rejects_unknown_path() -> None:
+    assert _dashboard_static_asset("/static/dash-assets/missing.png") is None
 
 
 def test_global_ingress_containerd_uses_loopback_host_alias(tmp_path: Path) -> None:

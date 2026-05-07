@@ -8,8 +8,10 @@ import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from importlib.resources import files
 from pathlib import Path
 from typing import Any, TypeVar
+from urllib.parse import urlsplit
 
 from workerbee.agent import (
     DEFAULT_PROJECT_MODE,
@@ -40,6 +42,8 @@ from workerbee.runtime_support import (
 from workerbee.supervisor import WorkerBeeSupervisor, project_slug
 
 T = TypeVar("T")
+
+DASHBOARD_BACKGROUND_PATH = "/static/dash-assets/page-background-1920x1080.png"
 
 
 @dataclass(slots=True)
@@ -625,6 +629,15 @@ class WorkerBeeDaemon:
                 if self.path.startswith("/api/projects"):
                     _send_json(self, daemon.projects())
                     return
+                path = urlsplit(self.path).path
+                if path.startswith("/static/"):
+                    asset = _dashboard_static_asset(path)
+                    if asset is None:
+                        _send_not_found(self)
+                        return
+                    body, content_type = asset
+                    _send_bytes(self, body, content_type)
+                    return
                 _send_html(self, _render_dashboard(daemon.projects()))
 
             def log_message(self, _format: str, *_args: Any) -> None:
@@ -653,6 +666,24 @@ def _send_html(handler: BaseHTTPRequestHandler, html: str) -> None:
     body = html.encode()
     handler.send_response(200)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _send_bytes(handler: BaseHTTPRequestHandler, body: bytes, content_type: str) -> None:
+    handler.send_response(200)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Cache-Control", "public, max-age=3600")
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
+def _send_not_found(handler: BaseHTTPRequestHandler) -> None:
+    body = b"not found\n"
+    handler.send_response(404)
+    handler.send_header("Content-Type", "text/plain; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
@@ -704,10 +735,13 @@ def _render_dashboard(payload: dict[str, Any]) -> str:
         if not isinstance(item, dict):
             continue
         ingress = item.get("ingress") if isinstance(item.get("ingress"), dict) else {}
+        running = bool(item.get("running"))
+        status = "running" if running else "stopped"
+        status_class = "ok" if running else "idle"
         rows.append(
             "<tr>"
             f"<td>{_esc(item.get('project'))}</td>"
-            f"<td>{_esc(item.get('mode'))} / {'running' if item.get('running') else 'stopped'}</td>"
+            f'<td><span class="pill {status_class}">{_esc(item.get("mode"))} / {status}</span></td>'
             f"<td>{_esc(item.get('git_branch'))}</td>"
             f"<td>{_link(item.get('dashboard_url'))}</td>"
             f"<td>{_link(ingress.get('global_dashboard_url'))}</td>"
@@ -715,36 +749,204 @@ def _render_dashboard(payload: dict[str, Any]) -> str:
             f"<td>{_esc(item.get('state_dir'))}</td>"
             "</tr>"
         )
+    if not rows:
+        rows.append('<tr><td class="muted" colspan="7">No WorkerBee projects registered.</td></tr>')
     global_dash = payload.get("global_dashboard")
     ingress_json = json.dumps(global_dash, indent=2, sort_keys=True)
     return f"""<!doctype html>
 <html>
   <head>
     <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>WorkerBee Projects</title>
     <style>
-      body {{ font-family: ui-sans-serif, system-ui; margin: 2rem; }}
+      :root {{
+        color-scheme: dark;
+        --header-h: 60px;
+        --k1s-brand-gold: #fbc02d;
+        --k1s-brand-graphite: #404040;
+        --panel-edge: #8884;
+        --text: #f2f5f8;
+        --muted: #c4ccd5;
+      }}
+      * {{ box-sizing: border-box; }}
+      body {{
+        margin: 0;
+        min-height: 100vh;
+        color: var(--text);
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        overflow-x: hidden;
+        background-color: #0b0f14;
+        background-image:
+          linear-gradient(rgba(7, 10, 14, 0.72), rgba(7, 10, 14, 0.72)),
+          url('{DASHBOARD_BACKGROUND_PATH}');
+        background-size: 100% 100%, cover;
+        background-position: center, center top;
+        background-repeat: no-repeat, no-repeat;
+      }}
+      header {{
+        min-height: var(--header-h);
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+        padding: 10px 14px;
+        background: #0a0a0a10;
+        position: sticky;
+        top: 0;
+        backdrop-filter: blur(4px);
+        -webkit-backdrop-filter: blur(4px);
+        z-index: 40;
+        border-bottom: 1px solid var(--panel-edge);
+      }}
+      header::after {{
+        content: "";
+        position: absolute;
+        left: 14px;
+        right: 14px;
+        bottom: 0;
+        height: 2px;
+        border-radius: 999px;
+        background: linear-gradient(90deg, transparent, var(--k1s-brand-gold), transparent);
+        opacity: .5;
+        pointer-events: none;
+      }}
+      .brand-title {{ display: flex; align-items: center; gap: 10px; }}
+      .brand-mark {{
+        display: inline-grid;
+        place-items: center;
+        width: 34px;
+        height: 34px;
+        border: 1px solid color-mix(in srgb, var(--k1s-brand-gold), transparent 28%);
+        border-radius: 999px;
+        color: var(--k1s-brand-gold);
+        background: rgba(7, 10, 14, 0.52);
+        box-shadow: 0 6px 14px rgba(0, 0, 0, .2);
+        font-size: 12px;
+        font-weight: 800;
+        letter-spacing: .02em;
+      }}
+      h1 {{ margin: 0; font-size: 18px; letter-spacing: .01em; }}
+      h2 {{ font-size: 14px; margin: 0 0 8px; opacity: .9; }}
+      .brand-accent {{ color: var(--k1s-brand-gold); }}
+      .caption {{ color: var(--muted); font-size: 13px; }}
+      main {{
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+        width: min(1440px, 100%);
+        margin: 0 auto;
+        padding: 12px 12px 48px;
+      }}
+      .card {{
+        border: 1px solid var(--panel-edge);
+        border-radius: 8px;
+        padding: 10px;
+        min-width: 0;
+        max-width: 100%;
+        overflow: hidden;
+        position: relative;
+        background-color: rgba(7, 10, 14, 0.18);
+        background-image: linear-gradient(135deg, rgba(25, 30, 36, 0.35), rgba(25, 30, 36, 0.45));
+        background-size: 100% 100%;
+        background-position: center;
+        background-repeat: no-repeat;
+        backdrop-filter: blur(6px);
+        -webkit-backdrop-filter: blur(6px);
+      }}
+      .card::before {{
+        content: "";
+        position: absolute;
+        inset: 0;
+        background-image: url('{DASHBOARD_BACKGROUND_PATH}');
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+        opacity: 0.12;
+        filter: saturate(0.28) brightness(0.5);
+        pointer-events: none;
+      }}
+      .card > * {{ position: relative; z-index: 1; }}
+      .table-wrap {{ overflow-x: auto; }}
       table {{ border-collapse: collapse; width: 100%; }}
-      th, td {{ border-bottom: 1px solid #ddd; padding: .5rem; text-align: left; }}
-      code, pre {{ background: #f6f6f6; padding: .25rem; }}
+      th, td {{
+        border-bottom: 1px solid var(--panel-edge);
+        padding: 6px;
+        text-align: left;
+        font-size: 13px;
+      }}
+      th {{ color: var(--k1s-brand-gold); font-weight: 650; }}
+      a {{ color: #ffe082; text-decoration: none; }}
+      a:hover {{ text-decoration: underline; }}
+      code, pre {{
+        background: rgba(0, 0, 0, .24);
+        border: 1px solid var(--panel-edge);
+        border-radius: 4px;
+      }}
+      pre {{ margin: 0; padding: 10px; overflow-x: auto; color: #e7edf4; }}
+      .pill {{
+        display: inline-flex;
+        align-items: center;
+        border: 1px solid var(--panel-edge);
+        border-radius: 999px;
+        padding: 2px 8px;
+        background: rgba(0, 0, 0, .2);
+        white-space: nowrap;
+      }}
+      .pill.ok {{ border-color: rgba(76, 175, 80, .55); color: #b9f6ca; }}
+      .pill.idle {{ border-color: rgba(251, 192, 45, .45); color: #ffe082; }}
+      .muted {{ color: var(--muted); }}
+      @media (max-width: 720px) {{
+        header {{ align-items: flex-start; flex-direction: column; }}
+        .caption {{ font-size: 12px; }}
+      }}
     </style>
   </head>
   <body>
-    <h1>WorkerBee Projects</h1>
-    <table>
-      <thead>
-        <tr>
-          <th>Project</th><th>Mode / Status</th><th>Git Branch</th><th>k1s Dashboard</th>
-          <th>Global</th><th>Error</th><th>State</th>
-        </tr>
-      </thead>
-      <tbody>{''.join(rows)}</tbody>
-    </table>
-    <h2>Ingress</h2>
-    <pre>{_esc(ingress_json)}</pre>
+    <header>
+      <div class="brand-title">
+        <span class="brand-mark">k1s</span>
+        <h1><span class="brand-accent">WorkerBee</span> Projects</h1>
+      </div>
+      <div class="caption">Global dashboard</div>
+    </header>
+    <main>
+      <section class="card">
+        <h2>Projects</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Project</th><th>Mode / Status</th><th>Git Branch</th><th>k1s Dashboard</th>
+                <th>Global</th><th>Error</th><th>State</th>
+              </tr>
+            </thead>
+            <tbody>{''.join(rows)}</tbody>
+          </table>
+        </div>
+      </section>
+      <section class="card">
+        <h2>Ingress</h2>
+        <pre>{_esc(ingress_json)}</pre>
+      </section>
+    </main>
   </body>
 </html>
 """
+
+
+def _dashboard_static_asset(path: str) -> tuple[bytes, str] | None:
+    if path != DASHBOARD_BACKGROUND_PATH:
+        return None
+    try:
+        body = (
+            files("workerbee.assets")
+            .joinpath("dashboard", "page-background-1920x1080.png")
+            .read_bytes()
+        )
+    except FileNotFoundError:
+        return None
+    return body, "image/png"
 
 
 def _link(raw: object) -> str:
