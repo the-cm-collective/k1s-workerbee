@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from workerbee.http import request, wait_for_http
+from workerbee.ingress import ProjectIngressConfig
 from workerbee.k1s_runtime import resolve_k1s_runtime
 from workerbee.paths import default_state_dir
 from workerbee.poc import (
@@ -48,6 +50,7 @@ class StackInfo:
     controller_pid: int | None = None
     apishim_pid: int | None = None
     service_ports: dict[str, int] = field(default_factory=dict)
+    ingress: dict[str, Any] = field(default_factory=dict)
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -65,6 +68,7 @@ class WorkerBeeSupervisor:
         k1s_root: Path | None = None,
         runtime: str = "auto",
         cwd: Path | None = None,
+        ingress: ProjectIngressConfig | None = None,
     ) -> None:
         self.project = _slug(project)
         self.cwd = (cwd or Path.cwd()).resolve()
@@ -73,6 +77,7 @@ class WorkerBeeSupervisor:
         self.k1s_root = self.k1s_runtime.k1s_root
         self.python_executable = self.k1s_runtime.python_executable
         self.runtime_requested = runtime
+        self.ingress = ingress
         self.stack_file = self.state_dir / "stack.json"
 
     # Lifecycle -----------------------------------------------------
@@ -122,6 +127,7 @@ class WorkerBeeSupervisor:
             read_token=read_token,
             apishim_token=apishim_token,
             service_ports=service_ports,
+            ingress=self.ingress.public_dict() if self.ingress else {"enabled": False},
         )
 
         self._write_stack(info)
@@ -211,6 +217,7 @@ class WorkerBeeSupervisor:
             project=self.project,
             image_tags=image_tags,
             service_ports=info.service_ports,
+            ingress_domain=self.ingress.domain if self.ingress else None,
         )
 
         apply_results = []
@@ -240,6 +247,7 @@ class WorkerBeeSupervisor:
             "manifests": [str(p) for p in artifacts.manifests],
             "images": artifacts.image_tags,
             "urls": artifacts.urls,
+            "ingress_urls": self._ingress_urls_for_paths(artifacts.manifests),
             "apply": apply_results,
             "validation": validation,
         }
@@ -300,6 +308,7 @@ class WorkerBeeSupervisor:
             "project": self.project,
             "manifest": str(path),
             "namespace": namespace,
+            "ingress_urls": self._ingress_urls_for_paths([path]),
             "apply": result,
         }
 
@@ -424,6 +433,23 @@ class WorkerBeeSupervisor:
         info = self.start()
         return self._runtime_exec(info, app=app, command=command)
 
+    def _ingress_urls_for_paths(self, manifests: list[Path]) -> list[str]:
+        if not self.ingress:
+            return []
+        urls: list[str] = []
+        seen: set[str] = set()
+        for manifest in manifests:
+            try:
+                text = manifest.read_text(encoding="utf-8")
+            except OSError:
+                continue
+            for match in re.finditer(r"(?m)^\s*host:\s*([A-Za-z0-9_.-]+)\s*$", text):
+                host = match.group(1).strip()
+                if host and host not in seen:
+                    seen.add(host)
+                    urls.append(self.ingress.url(host))
+        return urls
+
     # k1s command helpers ------------------------------------------
     def run_ae(
         self,
@@ -460,13 +486,14 @@ class WorkerBeeSupervisor:
             data.setdefault("k1s_runtime_source", self.k1s_runtime.source)
             data.setdefault("python_executable", self.python_executable)
             data.setdefault("ae_origin", self.k1s_runtime.ae_origin)
+            data.setdefault("ingress", {"enabled": False})
             return StackInfo(**data)
         except Exception:
             return None
 
     # Internal ------------------------------------------------------
     def _ensure_dirs(self) -> None:
-        for rel in ("logs", "specs", "pids", "artifacts"):
+        for rel in ("logs", "specs", "pids", "artifacts", "caddy"):
             (self.state_dir / rel).mkdir(parents=True, exist_ok=True)
 
     def _write_stack(self, info: StackInfo) -> None:
@@ -545,6 +572,16 @@ class WorkerBeeSupervisor:
                 "AE_ALLOW_PLAINTEXT_SECRETS": "1",
             }
         )
+        if self.ingress:
+            env.update(
+                {
+                    "AE_CADDY_SITES": str(self.ingress.sites_dir),
+                    "AE_CADDY_CONTAINER": self.ingress.caddy_container,
+                    "AE_CADDY_FILE": self.ingress.caddy_file,
+                    "AE_CADDY_HOST_ALIAS": self.ingress.host_alias,
+                    "AE_CADDY_RELOAD_TIMEOUT": "10",
+                }
+            )
         if info.runtime == "podman":
             env["AE_PODMAN_NETWORK"] = info.network
         else:
@@ -819,6 +856,10 @@ def _slug(value: str) -> str:
     out = "".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
     out = "-".join(part for part in out.split("-") if part)
     return out or "default"
+
+
+def project_slug(value: str) -> str:
+    return _slug(value)
 
 
 def _env_int(name: str) -> int | None:

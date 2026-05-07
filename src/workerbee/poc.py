@@ -62,6 +62,7 @@ def write_stack_files(
     project: str,
     image_tags: dict[str, str],
     service_ports: dict[str, int],
+    ingress_domain: str | None = None,
 ) -> POCArtifacts:
     spec_dir = state_dir / "specs"
     data_dir = state_dir / "poc-data"
@@ -95,6 +96,10 @@ def write_stack_files(
             f"http://host.docker.internal:{service_ports['api']}",
             urls["api"],
         ]
+    )
+    api_ingress_host = f"api.{ingress_domain}" if ingress_domain else "api.workerbee.local"
+    frontend_ingress_host = (
+        f"app.{ingress_domain}" if ingress_domain else "app.workerbee.local"
     )
 
     manifests: dict[str, str] = {
@@ -203,7 +208,7 @@ def write_stack_files(
                 - name: work
                   mountPath: /work
               ingress:
-                host: api.workerbee.local
+                host: {api_ingress_host}
                 path: /
               resources:
                 requests:
@@ -251,7 +256,7 @@ def write_stack_files(
                   initialDelaySeconds: 3
                   periodSeconds: 5
               ingress:
-                host: app.workerbee.local
+                host: {frontend_ingress_host}
                 paths:
                   - /
                   - /api
@@ -302,6 +307,7 @@ def validate_poc_urls(urls: dict[str, str], *, timeout_seconds: float = 90.0) ->
             api_resp = request(f"{urls['api']}/api/check", timeout=4.0)
             frontend_resp = request(f"{urls['frontend']}/", timeout=4.0)
             if api_resp.status == 200 and frontend_resp.status == 200:
+                result["ok"] = True
                 result["api_check"] = api_resp.json()
                 result["frontend"] = frontend_resp.text[:300]
                 return result

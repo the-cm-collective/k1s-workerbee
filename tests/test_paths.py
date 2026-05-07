@@ -1,12 +1,18 @@
 from pathlib import Path
 
 from workerbee.k1s_runtime import K1sRuntime
-from workerbee.paths import default_state_dir
+from workerbee.paths import daemon_project_state_dir, default_state_dir, default_state_root
 from workerbee.supervisor import WorkerBeeSupervisor
 
 
 def test_default_state_dir_is_project_scoped(tmp_path: Path) -> None:
     assert default_state_dir("demo", cwd=tmp_path) == tmp_path / ".workerbee" / "demo"
+
+
+def test_default_state_root_honors_workerbee_home(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("WORKERBEE_HOME", str(tmp_path / "home"))
+    assert default_state_root() == tmp_path / "home"
+    assert daemon_project_state_dir("demo") == tmp_path / "home" / "projects" / "demo"
 
 
 def test_project_slug_and_state_dir(tmp_path: Path, monkeypatch) -> None:

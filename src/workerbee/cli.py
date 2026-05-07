@@ -12,9 +12,12 @@ from pathlib import Path
 from typing import Any
 
 from workerbee import __version__
+from workerbee.daemon import WorkerBeeDaemon
 from workerbee.k1s_runtime import resolve_k1s_runtime
 from workerbee.mcp_server import serve_mcp
+from workerbee.paths import default_state_root
 from workerbee.supervisor import WorkerBeeSupervisor
+from workerbee.trust import trust_install, trust_status
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -22,6 +25,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"workerbee {__version__}")
     parser.add_argument("--project", default="default", help="WorkerBee project name")
     parser.add_argument("--state-dir", type=Path, default=None, help="Override state directory")
+    parser.add_argument(
+        "--state-root",
+        type=Path,
+        default=None,
+        help="Override WorkerBee daemon state root",
+    )
     parser.add_argument(
         "--runtime",
         default="auto",
@@ -40,6 +49,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Remove WorkerBee state and runtime network",
     )
     sub.add_parser("status", help="Show WorkerBee stack status")
+    sub.add_parser("projects", help="List WorkerBee daemon projects")
+    sub.add_parser("global-dashboard", help="Show WorkerBee global dashboard status")
+    ingress = sub.add_parser("ingress", help="Inspect WorkerBee global ingress")
+    ingress_sub = ingress.add_subparsers(dest="ingress_cmd", required=True)
+    ingress_sub.add_parser("status", help="Show global ingress status")
+    trust = sub.add_parser("trust", help="Manage explicit local CA trust")
+    trust_sub = trust.add_subparsers(dest="trust_cmd", required=True)
+    trust_sub.add_parser("status", help="Show local CA trust status")
+    trust_sub.add_parser("install", help="Install WorkerBee Caddy CA into local trust")
     sub.add_parser("tls-info", help="Show local API shim TLS paths")
     sub.add_parser("reset", help="Reset WorkerBee project workloads and artifacts")
     sub.add_parser("poc-status", help="Show POC app status through the native k1s API")
@@ -82,8 +100,24 @@ def main(argv: list[str] | None = None) -> int:
                 host=args.host,
                 port=args.port,
                 state_dir=args.state_dir,
+                state_root=args.state_root,
             )
             return 0
+        if args.cmd == "projects":
+            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime)
+            return _print(daemon.projects(), json_out=args.json)
+        if args.cmd == "global-dashboard":
+            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime)
+            return _print(daemon.global_dashboard(), json_out=args.json)
+        if args.cmd == "ingress":
+            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime)
+            return _print(daemon.global_dashboard(), json_out=args.json)
+        if args.cmd == "trust":
+            root = (args.state_root or default_state_root()).resolve()
+            if args.trust_cmd == "status":
+                return _print(trust_status(root), json_out=args.json)
+            if args.trust_cmd == "install":
+                return _print(trust_install(root), json_out=args.json)
         sup = WorkerBeeSupervisor(
             project=args.project,
             runtime=args.runtime,

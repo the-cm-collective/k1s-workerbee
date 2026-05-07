@@ -15,6 +15,20 @@ def default_state_dir(project: str, *, cwd: Path | None = None) -> Path:
     return repo_root_from_cwd(cwd) / ".workerbee" / project
 
 
+def default_state_root() -> Path:
+    override = os.getenv("WORKERBEE_HOME")
+    if override:
+        return Path(override).expanduser().resolve()
+    xdg = os.getenv("XDG_DATA_HOME")
+    if xdg:
+        return (Path(xdg).expanduser() / "workerbee").resolve()
+    return (Path.home() / ".local" / "share" / "workerbee").resolve()
+
+
+def daemon_project_state_dir(project: str, *, state_root: Path | None = None) -> Path:
+    return (state_root or default_state_root()).resolve() / "projects" / project
+
+
 def find_k1s_root(cwd: Path | None = None) -> Path | None:
     override = os.getenv("WORKERBEE_K1S_ROOT")
     candidates = []

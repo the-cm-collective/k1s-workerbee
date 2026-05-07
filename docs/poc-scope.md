@@ -12,19 +12,29 @@ The representative app stack is deployed through native k1s manifests, not Helm.
 
 The POC flow builds local images with Podman or Docker, applies the native k1s manifests, queries native k1s status, fetches logs, validates the live app chain, checks API shim pod visibility, and exports Kubernetes YAML artifacts.
 
+## Extended MCP/Ingress Scope
+
+WorkerBee now has the planned shared MCP shape:
+
+- A single local MCP server can serve multiple clients. Each tool accepts a `project` value, allowing two Codex sessions in different working trees to share one MCP daemon while keeping k1s state, runtime networks, generated manifests, and app ingress separated by project name.
+- The MCP daemon starts a global dashboard immediately and prints the URL before serving MCP traffic. The dashboard lists all known project-scoped stacks under the daemon state root.
+- A global Caddy edge is started for local HTTPS. Project app hosts are scoped as `app.<project>.workerbee.localhost` and `api.<project>.workerbee.localhost`, with Caddy using its internal local CA.
+- Native k1s manifest deploys and the POC stack return browser-ready ingress URLs when the MCP daemon provides ingress configuration.
+- CA trust remains explicit. `workerbee trust status` reports the generated Caddy CA path, and `workerbee trust install` performs the OS/user trust-store install only when requested.
+- The wheelhouse flow can package `k1s-workerbee` plus `k1s-workerbee-runtime`, so users only need the WorkerBee wheelhouse and a supported container runtime.
+
 ## v0.1 Scope
 
-The next phase should turn the POC into a distributable local agent workbench:
+The immediate v0.1 hardening work should turn the POC into a reliable distributable local agent workbench:
 
-- Package install path: publish a Python package with console scripts, clear k1s checkout resolution, and repeatable dependency installation.
-- Wheelhouse runtime: build a local wheelhouse containing `k1s-workerbee` and the k1s-side `k1s-workerbee-runtime` wheel so runtime does not require a sibling k1s checkout.
-- MCP contract: stabilize tool names, result schemas, error payloads, and dashboard URL notification semantics.
-- Runtime support: harden Podman rootless, Podman rootful, Docker Linux, and Docker Desktop behavior.
-- Lifecycle safety: isolate projects, clean stale processes, avoid port drift, support purge/reset, and never expose bearer tokens in tool results.
-- Deployment inputs: support native k1s manifests, Kubernetes YAML through the shim/apply path where feasible, image build contexts, and simple generated app templates.
-- Observability: provide status, logs, events, exported artifacts, dashboard links, and structured validation results as first-class MCP tools.
-- TLS/dev CA: expose generated CA bundle paths, add guided trust-store installation commands by OS, and keep local plaintext modes explicit.
+- MCP contract: freeze tool names, default arguments, result schemas, error payloads, and dashboard URL notification semantics.
+- Runtime support: harden Podman rootless, Podman rootful, Docker Linux, and Docker Desktop behavior, especially Caddy host reachability and port cleanup.
+- Lifecycle safety: prevent two independent MCP daemons from mutating the same state root, clean stale processes, avoid port drift, support purge/reset, and never expose bearer tokens in tool results.
+- Deployment inputs: support native k1s manifests as the primary path, Kubernetes YAML through the shim/apply path where feasible, image build contexts, and simple generated app templates.
+- Observability: add events, richer resource summaries, app ingress health, Caddy route status, and structured validation results as first-class MCP tools and dashboard data.
+- TLS/dev CA: complete guided trust-store handling across Linux, macOS, Windows, Firefox/NSS, and containerized browser cases.
 - Artifact handoff: export Kubernetes YAML, Helm chart skeletons where useful, and image metadata suitable for pushing to an external registry.
+- Packaging: publish repeatable wheels/wheelhouses, document the single-wheel runtime expectation, and provide source-development fallbacks without requiring k1s project edits.
 
 ## Later Phase
 
@@ -33,6 +43,8 @@ After v0.1, the larger product scope is to make WorkerBee an agent-native cloud-
 - Multi-stack test scenarios with seeded databases, queues, object stores, and failure injection.
 - Reproducible ephemeral environments per agent task, branch, or namespace.
 - Policy/safety controls for image builds, host mounts, network egress, and command execution.
-- Optional Caddy ingress and local DNS integration for browser-realistic testing.
+- DNS options beyond `*.localhost`, including private dev domains, wildcard local DNS, and team-shared smoke-test tunnels where explicitly enabled.
+- Stronger global dashboard UX with resource graphs, logs, events, app links, and per-project cleanup controls.
+- MCP server auth and explicit network exposure modes for cases where the server is not bound only to loopback.
 - CI mode for headless POC validation and artifact export.
 - Plugin-like extension points for project-specific app stacks and verification recipes.
