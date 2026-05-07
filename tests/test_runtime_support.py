@@ -8,6 +8,7 @@ from workerbee.runtime_support import (
     build_image_with_runtime,
     cleanup_runtime,
     containerd_base_args,
+    containerd_cni_bin_dir,
     containerd_cni_conf_dir,
     containerd_data_root,
     containerd_namespace,
@@ -145,6 +146,24 @@ def test_containerd_probe_uses_workerbee_helper_even_when_socket_inaccessible(
 
     assert result["ok"] is True
     assert result["namespaces"] == ["k8s.io", "moby"]
+
+
+def test_containerd_cni_bin_dir_detects_complete_path(tmp_path: Path, monkeypatch) -> None:
+    for name in ("WORKERBEE_CONTAINERD_CNI_BIN_DIR", "AE_CONTAINERD_CNI_BIN_DIR", "CNI_PATH"):
+        monkeypatch.delenv(name, raising=False)
+    plugins = tmp_path / "cni"
+    plugins.mkdir()
+
+    def fake_which(name: str) -> str:
+        return str(plugins / name)
+
+    def fake_complete(path: Path) -> bool:
+        return path == plugins
+
+    monkeypatch.setattr("workerbee.runtime_support.shutil.which", fake_which)
+    monkeypatch.setattr("workerbee.runtime_support._cni_dir_complete", fake_complete)
+
+    assert containerd_cni_bin_dir() == str(plugins)
 
 
 def test_containerd_cleanup_does_not_target_reserved_namespaces(

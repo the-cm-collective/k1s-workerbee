@@ -1,6 +1,7 @@
 from pathlib import Path
 from typing import Any
 
+from workerbee import poc
 from workerbee.poc import POC_NAMESPACE, validate_poc_urls, write_stack_files
 
 
@@ -47,6 +48,15 @@ def test_write_stack_files_can_scope_ingress_hosts(tmp_path: Path) -> None:
     text = "\n".join(path.read_text(encoding="utf-8") for path in artifacts.manifests)
     assert "host: api.alpha.workerbee.localhost" in text
     assert "host: app.alpha.workerbee.localhost" in text
+
+
+def test_containerd_poc_images_use_localhost_registry() -> None:
+    assert poc._poc_image_tag(runtime="containerd", name="api", project="demo") == (  # noqa: SLF001
+        "localhost/workerbee-poc-api:demo"
+    )
+    assert poc._poc_image_tag(runtime="podman", name="api", project="demo") == (  # noqa: SLF001
+        "workerbee-poc-api:demo"
+    )
 
 
 def test_validate_poc_urls_returns_top_level_ok(monkeypatch) -> None:

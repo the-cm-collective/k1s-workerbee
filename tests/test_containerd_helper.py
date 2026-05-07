@@ -204,5 +204,17 @@ def test_validate_helper_argv_allows_namespace_ls_diagnostic(tmp_path: Path) -> 
     assert result["diagnostic"] is True
 
 
+def test_validate_helper_argv_allows_version_diagnostic_without_socket_args(
+    tmp_path: Path,
+) -> None:
+    result = validate_helper_argv(
+        ["--version"],
+        state_root=tmp_path,
+        address="unix:///run/containerd/containerd.sock",
+    )
+
+    assert result["diagnostic"] is True
+
+
 def _state_hash(path: Path) -> str:
     return hashlib.sha1(str(path.resolve()).encode("utf-8")).hexdigest()[:12]  # noqa: S324

@@ -396,10 +396,14 @@ def validate_helper_argv(
     values = parsed["values"]
     expected_address = address or containerd_address()
     if command is None:
+        if _is_nerdctl_version_diagnostic(argv):
+            return {"ok": True, "command": "version", "diagnostic": True}
         raise WorkerBeeError(
             code="CONTAINERD_HELPER_EMPTY_COMMAND",
             message="containerd helper received no nerdctl command",
         )
+    if _is_nerdctl_version_diagnostic(argv):
+        return {"ok": True, "command": command, "diagnostic": True}
     if values.get("address") != expected_address:
         raise WorkerBeeError(
             code="CONTAINERD_HELPER_ADDRESS_DENIED",
@@ -675,6 +679,11 @@ def _parse_nerdctl_argv(argv: list[str]) -> dict[str, Any]:
     command = argv[i] if i < len(argv) else None
     command_args = argv[i + 1 :] if command is not None else []
     return {"values": values, "command": command, "command_args": command_args}
+
+
+def _is_nerdctl_version_diagnostic(argv: list[str]) -> bool:
+    compact = [item for item in argv if item != "--"]
+    return compact in (["--version"], ["-v"], ["version"])
 
 
 def _helper_env(state_root: Path) -> dict[str, str]:

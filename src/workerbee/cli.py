@@ -15,8 +15,11 @@ from workerbee import __version__
 from workerbee.agent import derive_session_project
 from workerbee.containerd_access import release_containerd_socket_access
 from workerbee.containerd_helper import (
+    containerd_privilege_env,
     containerd_privilege_status,
+    ensure_containerd_privilege,
     stop_containerd_helper,
+    temporary_containerd_privilege_env,
 )
 from workerbee.daemon import WorkerBeeDaemon
 from workerbee.k1s_runtime import resolve_k1s_runtime
@@ -286,10 +289,16 @@ def main(argv: list[str] | None = None) -> int:
                 return _print(trust_uninstall(root, target=args.target), json_out=args.json)
         if args.cmd == "cleanup":
             daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime, cwd=args.cwd)
-            return _print(
-                daemon.cleanup(execute=args.execute, purge_images=args.purge_images),
-                json_out=args.json,
+            privilege = ensure_containerd_privilege(
+                state_root=args.state_root or default_state_root(),
+                runtime=args.runtime,
+                mode=containerd_privilege,
             )
+            with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
+                return _print(
+                    daemon.cleanup(execute=args.execute, purge_images=args.purge_images),
+                    json_out=args.json,
+                )
         if args.cmd == "containerd-privilege":
             root = (args.state_root or default_state_root()).resolve()
             if args.containerd_privilege_cmd == "status":

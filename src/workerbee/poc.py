@@ -12,7 +12,11 @@ from pathlib import Path
 from typing import Any
 
 from workerbee.http import request
-from workerbee.runtime_support import build_image_with_runtime, workerbee_runtime_labels
+from workerbee.runtime_support import (
+    CONTAINERD_RUNTIME,
+    build_image_with_runtime,
+    workerbee_runtime_labels,
+)
 
 POC_NAMESPACE = "workerbee-poc"
 POC_APPS = ("store", "api", "frontend")
@@ -48,7 +52,7 @@ def build_images(*, runtime: str, state_dir: Path, project: str) -> dict[str, st
     for name in POC_APPS:
         ctx = build_root / name
         _copy_asset_tree(name, ctx)
-        tag = f"workerbee-poc-{name}:{project}"
+        tag = _poc_image_tag(runtime=runtime, name=name, project=project)
         build_image_with_runtime(
             runtime=runtime,
             state_root=state_root,
@@ -59,6 +63,13 @@ def build_images(*, runtime: str, state_dir: Path, project: str) -> dict[str, st
         )
         tags[name] = tag
     return tags
+
+
+def _poc_image_tag(*, runtime: str, name: str, project: str) -> str:
+    tag = f"workerbee-poc-{name}:{project}"
+    if runtime == CONTAINERD_RUNTIME:
+        return f"localhost/{tag}"
+    return tag
 
 
 def write_stack_files(

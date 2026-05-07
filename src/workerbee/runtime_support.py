@@ -18,6 +18,7 @@ from workerbee.contract import WorkerBeeError
 WORKERBEE_LABEL = "workerbee.managed=true"
 CONTAINERD_RUNTIME = "containerd"
 CONTAINERD_RESERVED_NAMESPACES = frozenset({"ae", "k8s.io", "moby", "default"})
+CONTAINERD_REQUIRED_CNI_PLUGINS = ("bridge", "host-local", "loopback", "portmap")
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,12 +306,38 @@ def containerd_nerdctl_probe(address: str | None = None) -> dict[str, Any]:
 
 
 def containerd_cni_bin_dir() -> str:
-    return (
+    configured = (
         os.getenv("WORKERBEE_CONTAINERD_CNI_BIN_DIR")
         or os.getenv("AE_CONTAINERD_CNI_BIN_DIR")
         or os.getenv("CNI_PATH")
-        or "/opt/cni/bin"
     )
+    if configured:
+        return configured
+    return str(_detect_containerd_cni_bin_dir())
+
+
+def _detect_containerd_cni_bin_dir() -> Path:
+    candidates = [
+        Path("/opt/cni/bin"),
+        Path("/usr/lib/cni"),
+        Path("/usr/libexec/cni"),
+        Path("/run/current-system/sw/bin"),
+    ]
+    for name in CONTAINERD_REQUIRED_CNI_PLUGINS:
+        found = shutil.which(name)
+        if found:
+            candidates.append(Path(found).resolve().parent)
+    for candidate in candidates:
+        if _cni_dir_complete(candidate):
+            return candidate
+    return Path("/opt/cni/bin")
+
+
+def _cni_dir_complete(path: Path) -> bool:
+    try:
+        return all(path.joinpath(name).exists() for name in CONTAINERD_REQUIRED_CNI_PLUGINS)
+    except OSError:
+        return False
 
 
 def containerd_namespace(
@@ -796,7 +823,12 @@ def _container_build_file_args(context: Path) -> list[str]:
 
 
 def _ids(raw: str) -> list[str]:
-    return [line.strip() for line in raw.splitlines() if line.strip()]
+    ids = []
+    for line in raw.splitlines():
+        item = line.strip()
+        if len(item) >= 12 and all(ch in "0123456789abcdef" for ch in item.lower()):
+            ids.append(item)
+    return ids
 
 
 def _runtime_version(name: str) -> dict[str, Any]:
