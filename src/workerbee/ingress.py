@@ -13,6 +13,7 @@ from typing import Any
 
 from workerbee.http import wait_for_http
 from workerbee.ports import choose_port
+from workerbee.runtime_support import workerbee_runtime_labels
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +212,8 @@ https://dashboard.workerbee.localhost {{
             "-d",
             "--name",
             self.container,
+            "--label",
+            "workerbee.component=ingress",
             "-p",
             f"127.0.0.1:{self.https_port}:443",
             "-v",
@@ -220,6 +223,8 @@ https://dashboard.workerbee.localhost {{
             "-v",
             f"{self.caddy_data}:/data",
         ]
+        for label in workerbee_runtime_labels(state_root=self.state_root):
+            cmd.extend(["--label", label])
         if self.runtime == "docker":
             cmd.extend(["--add-host", "host.docker.internal:host-gateway"])
         cmd.extend(

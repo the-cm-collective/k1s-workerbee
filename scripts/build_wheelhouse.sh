@@ -57,7 +57,9 @@ Install WorkerBee from this wheelhouse:
   python -m pip install --no-index --find-links ${OUT_DIR} k1s-workerbee
 
 Runtime requirements not bundled in wheels:
-  - Linux with Podman available on PATH
+  - Podman or Docker available on PATH
 EOF
 
 echo "wheelhouse: ${OUT_DIR}"
+tar -C "$(dirname "$OUT_DIR")" -czf "$(dirname "$OUT_DIR")/workerbee-wheelhouse.tar.gz" "$(basename "$OUT_DIR")"
+echo "archive: $(dirname "$OUT_DIR")/workerbee-wheelhouse.tar.gz"

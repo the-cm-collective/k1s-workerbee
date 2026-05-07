@@ -27,14 +27,14 @@ WorkerBee now has the planned shared MCP shape:
 
 The immediate v0.1 hardening work should turn the POC into a reliable distributable local agent workbench:
 
-- MCP contract: freeze tool names, default arguments, result schemas, error payloads, and dashboard URL notification semantics.
+- MCP contract: register v1-only `workerbee_v1_*` tool names, stable result envelopes, stable errors, version/capabilities reporting, and dashboard URL notification semantics.
 - Runtime support: harden Podman rootless, Podman rootful, Docker Linux, and Docker Desktop behavior, especially Caddy host reachability and port cleanup.
 - Lifecycle safety: prevent two independent MCP daemons from mutating the same state root, clean stale processes, avoid port drift, support purge/reset, and never expose bearer tokens in tool results.
-- Deployment inputs: support native k1s manifests as the primary path, Kubernetes YAML through the shim/apply path where feasible, image build contexts, and simple generated app templates.
-- Observability: add events, richer resource summaries, app ingress health, Caddy route status, and structured validation results as first-class MCP tools and dashboard data.
-- TLS/dev CA: complete guided trust-store handling across Linux, macOS, Windows, Firefox/NSS, and containerized browser cases.
-- Artifact handoff: export Kubernetes YAML, Helm chart skeletons where useful, and image metadata suitable for pushing to an external registry.
-- Packaging: publish repeatable wheels/wheelhouses, document the single-wheel runtime expectation, and provide source-development fallbacks without requiring k1s project edits.
+- Deployment inputs: support staged native k1s manifests as the primary path, practical Kubernetes YAML apply through `ae apply --k8s`, image build contexts, and simple generated app templates. Kubernetes input is intentionally limited to one workload plus optional Service/Ingress per file for v0.1; native k1s input is required for native k1s bundle export.
+- Observability: defer richer resource summaries/events/ingress health to k1s-side work and track it through `docs/rfcs/k1s-workerbee-observability.md`.
+- TLS/dev CA: complete guided trust-store handling across NixOS, Debian/Fedora, macOS, Windows, Firefox/NSS, and containerized browser cases.
+- Artifact handoff: export native k1s bundles, Kubernetes YAML, Helm chart skeletons, and image metadata suitable for registry handoff.
+- Packaging: publish repeatable wheels/wheelhouses, ship a one-line installer, document active-venv versus standalone install behavior, and provide source-development fallbacks without requiring k1s project edits.
 
 ## Later Phase
 

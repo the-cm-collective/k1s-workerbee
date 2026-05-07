@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shutil
 import threading
 import time
 from collections.abc import Callable
@@ -13,8 +12,10 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from workerbee.ingress import GlobalIngress, GlobalIngressInfo, ProjectIngressConfig
+from workerbee.locks import FileLock, project_lock_path, state_root_lock_path
 from workerbee.paths import daemon_project_state_dir, default_state_root
 from workerbee.ports import choose_port
+from workerbee.runtime_support import cleanup_runtime, resolve_runtime, runtime_diagnostics
 from workerbee.supervisor import WorkerBeeSupervisor, project_slug
 
 T = TypeVar("T")
@@ -49,10 +50,14 @@ class WorkerBeeDaemon:
         self._dashboard: ThreadingHTTPServer | None = None
         self._dashboard_thread: threading.Thread | None = None
         self.ingress: GlobalIngress | None = None
+        self._state_lock: FileLock | None = None
 
-    def start(self) -> GlobalIngressInfo:
+    def start(self, *, mcp_bind_url: str | None = None) -> GlobalIngressInfo:
         self.state_root.mkdir(parents=True, exist_ok=True)
         self.projects_dir.mkdir(parents=True, exist_ok=True)
+        if self._state_lock is None:
+            self._state_lock = FileLock(state_root_lock_path(self.state_root), label="state root")
+            self._state_lock.acquire(metadata={"mcp_bind_url": mcp_bind_url})
         dashboard_port = self._start_dashboard_server()
         self._register_project(self.default_project, cwd_hint=str(self.cwd))
         self.ingress = GlobalIngress(
@@ -90,10 +95,12 @@ class WorkerBeeDaemon:
     ) -> T:
         name = project_slug(project or self.default_project)
         with self._project_lock(name):
-            sup = self.supervisor(name)
-            result = fn(sup)
-            self._register_project(name, cwd_hint=str(sup.cwd))
-            return result
+            file_lock = FileLock(project_lock_path(self.state_root, name), label=f"project {name}")
+            with file_lock:
+                sup = self.supervisor(name)
+                result = fn(sup)
+                self._register_project(name, cwd_hint=str(sup.cwd))
+                return result
 
     def projects(self) -> dict[str, Any]:
         records = self._read_registry()
@@ -139,6 +146,45 @@ class WorkerBeeDaemon:
 
     def project_status(self, project: str) -> dict[str, Any]:
         return self.with_project(project, lambda sup: sup.status())
+
+    def capabilities(self) -> dict[str, Any]:
+        from workerbee import __version__
+        from workerbee.contract import API_VERSION, MCP_TOOL_NAMES
+
+        return {
+            "api_version": API_VERSION,
+            "workerbee_version": __version__,
+            "state_root": str(self.state_root),
+            "default_project": self.default_project,
+            "mcp_tools": MCP_TOOL_NAMES,
+            "templates": ["frontend-api", "frontend-api-store", "stateless-web"],
+            "manifest_inputs": {
+                "native-k1s": {
+                    "deploy_local": True,
+                    "deploy_remote_k1s": True,
+                    "export_formats": ["k1s", "k8s", "helm"],
+                },
+                "kubernetes": {
+                    "deploy_local": True,
+                    "deploy_remote_k1s": True,
+                    "export_formats": ["k8s", "helm"],
+                    "v0_1_constraint": (
+                        "one Deployment/StatefulSet/DaemonSet/Job plus optional "
+                        "Service/Ingress per file"
+                    ),
+                },
+            },
+            "bundle_formats": ["k1s", "k8s", "helm"],
+            "runtime": runtime_diagnostics(self.runtime_requested),
+        }
+
+    def cleanup(self, *, execute: bool = False, purge_images: bool = False) -> dict[str, Any]:
+        return cleanup_runtime(
+            state_root=self.state_root,
+            runtime=self.runtime_requested,
+            execute=execute,
+            purge_images=purge_images,
+        )
 
     def global_dashboard(self) -> dict[str, Any]:
         if self.ingress is not None:
@@ -210,15 +256,7 @@ class WorkerBeeDaemon:
         return {}
 
     def _resolve_runtime(self) -> str:
-        requested = self.runtime_requested.lower()
-        if requested in {"podman", "docker"}:
-            if shutil.which(requested) is None:
-                raise RuntimeError(f"{requested} not found on PATH")
-            return requested
-        for candidate in ("podman", "docker"):
-            if shutil.which(candidate):
-                return candidate
-        raise RuntimeError("Podman or Docker is required")
+        return resolve_runtime(self.runtime_requested)
 
     def _start_dashboard_server(self) -> int:
         if self._dashboard is not None:

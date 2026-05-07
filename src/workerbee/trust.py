@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import platform
 import shutil
 import subprocess
 from pathlib import Path
@@ -15,16 +17,20 @@ def trust_status(state_root: Path) -> dict[str, Any]:
     info = load_global_ingress_info(state_root)
     ca_raw = str((info or {}).get("ca_bundle") or "")
     ca = Path(ca_raw) if ca_raw else None
+    backend = _trust_backend()
     return {
         "state_root": str(state_root.resolve()),
         "ca_bundle": str(ca) if ca is not None else None,
         "ca_ready": bool(ca and ca.is_file()),
-        "system_trust_backend": _trust_backend(),
+        "ca_sha256": _sha256(ca) if ca and ca.is_file() else None,
+        "system_trust_backend": backend,
         "certutil": shutil.which("certutil"),
+        "targets": _target_status(ca),
+        "nixos_guidance": _nixos_guidance(ca) if backend == "nixos" else None,
     }
 
 
-def trust_install(state_root: Path) -> dict[str, Any]:
+def trust_install(state_root: Path, *, target: str = "all") -> dict[str, Any]:
     status = trust_status(state_root)
     ca_raw = status.get("ca_bundle")
     ca = Path(str(ca_raw or ""))
@@ -35,21 +41,60 @@ def trust_install(state_root: Path) -> dict[str, Any]:
         )
     installed: list[str] = []
     backend = str(status["system_trust_backend"])
-    if backend == "debian":
+    targets = _target_set(target)
+    if "system" in targets and backend == "debian":
         _sudo_install(ca, Path("/usr/local/share/ca-certificates/workerbee-caddy-local.crt"))
         _sudo_run(["update-ca-certificates"])
         installed.append("system:debian")
-    elif backend == "fedora":
+    elif "system" in targets and backend == "fedora":
         _sudo_install(ca, Path("/etc/pki/ca-trust/source/anchors/workerbee-caddy-local.crt"))
         _sudo_run(["update-ca-trust", "extract"])
         installed.append("system:fedora")
-    if shutil.which("certutil"):
+    elif "system" in targets and backend == "macos":
+        _run_security_install(ca)
+        installed.append("system:macos-user")
+    elif "system" in targets and backend == "windows":
+        _run_windows_install(ca)
+        installed.append("system:windows-user")
+    if "nss" in targets and shutil.which("certutil"):
         _install_nss(ca)
         installed.append("nss")
-    return {**status, "installed": installed, "ok": bool(installed)}
+    return {**trust_status(state_root), "installed": installed, "ok": bool(installed)}
+
+
+def trust_uninstall(state_root: Path, *, target: str = "all") -> dict[str, Any]:
+    status = trust_status(state_root)
+    backend = str(status["system_trust_backend"])
+    targets = _target_set(target)
+    removed: list[str] = []
+    if "system" in targets and backend == "debian":
+        _sudo_run(["rm", "-f", "/usr/local/share/ca-certificates/workerbee-caddy-local.crt"])
+        _sudo_run(["update-ca-certificates", "--fresh"])
+        removed.append("system:debian")
+    elif "system" in targets and backend == "fedora":
+        _sudo_run(["rm", "-f", "/etc/pki/ca-trust/source/anchors/workerbee-caddy-local.crt"])
+        _sudo_run(["update-ca-trust", "extract"])
+        removed.append("system:fedora")
+    elif "system" in targets and backend == "macos":
+        _run_security_uninstall()
+        removed.append("system:macos-user")
+    elif "system" in targets and backend == "windows":
+        _run_windows_uninstall()
+        removed.append("system:windows-user")
+    if "nss" in targets and shutil.which("certutil"):
+        _uninstall_nss()
+        removed.append("nss")
+    return {**trust_status(state_root), "removed": removed, "ok": bool(removed)}
 
 
 def _trust_backend() -> str:
+    system = platform.system().lower()
+    if system == "darwin":
+        return "macos"
+    if system == "windows":
+        return "windows"
+    if Path("/etc/NIXOS").exists() or Path("/run/current-system/sw/bin/nixos-rebuild").exists():
+        return "nixos"
     if shutil.which("update-ca-certificates"):
         return "debian"
     if shutil.which("update-ca-trust"):
@@ -85,4 +130,102 @@ def _install_nss(ca: Path) -> None:
     subprocess.run(
         [certutil, "-d", f"sql:{nssdb}", "-A", "-t", "C,,", "-n", nickname, "-i", str(ca)],
         check=True,
+    )
+
+
+def _uninstall_nss() -> None:
+    certutil = shutil.which("certutil")
+    if certutil is None:
+        return
+    nssdb = Path.home() / ".pki" / "nssdb"
+    nickname = "WorkerBee Caddy Local Root"
+    subprocess.run([certutil, "-d", f"sql:{nssdb}", "-D", "-n", nickname], check=False)
+
+
+def _target_set(target: str) -> set[str]:
+    raw = target.lower().strip()
+    if raw == "all":
+        return {"system", "nss"}
+    if raw in {"system", "nss", "user"}:
+        return {"nss"} if raw == "user" else {raw}
+    raise ValueError("trust target must be one of: all, system, nss, user")
+
+
+def _target_status(ca: Path | None) -> dict[str, Any]:
+    return {
+        "system": {"backend": _trust_backend(), "installed": _system_installed()},
+        "nss": {"available": shutil.which("certutil") is not None, "installed": None},
+        "ca_present": bool(ca and ca.is_file()),
+    }
+
+
+def _system_installed() -> bool | None:
+    backend = _trust_backend()
+    if backend == "debian":
+        return Path("/usr/local/share/ca-certificates/workerbee-caddy-local.crt").is_file()
+    if backend == "fedora":
+        return Path("/etc/pki/ca-trust/source/anchors/workerbee-caddy-local.crt").is_file()
+    return None
+
+
+def _nixos_guidance(ca: Path | None) -> str:
+    if ca is None:
+        return (
+            "Start WorkerBee MCP first, then add the generated Caddy CA to "
+            "security.pki.certificates."
+        )
+    return (
+        "NixOS system trust is declarative. Add the contents of "
+        f"{ca} to `security.pki.certificates`, rebuild, or use NSS/user trust for browsers."
+    )
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _run_security_install(ca: Path) -> None:
+    security = shutil.which("security")
+    if security is None:
+        raise RuntimeError("macOS `security` command not found")
+    keychain = Path.home() / "Library" / "Keychains" / "login.keychain-db"
+    subprocess.run(
+        [
+            security,
+            "add-trusted-cert",
+            "-d",
+            "-r",
+            "trustRoot",
+            "-k",
+            str(keychain),
+            str(ca),
+        ],
+        check=True,
+    )
+
+
+def _run_security_uninstall() -> None:
+    security = shutil.which("security")
+    if security is None:
+        raise RuntimeError("macOS `security` command not found")
+    subprocess.run(
+        [security, "delete-certificate", "-c", "WorkerBee Caddy Local Root"],
+        check=False,
+    )
+
+
+def _run_windows_install(ca: Path) -> None:
+    certutil = shutil.which("certutil")
+    if certutil is None:
+        raise RuntimeError("Windows certutil not found")
+    subprocess.run([certutil, "-user", "-addstore", "Root", str(ca)], check=True)
+
+
+def _run_windows_uninstall() -> None:
+    certutil = shutil.which("certutil")
+    if certutil is None:
+        raise RuntimeError("Windows certutil not found")
+    subprocess.run(
+        [certutil, "-user", "-delstore", "Root", "WorkerBee Caddy Local Root"],
+        check=False,
     )

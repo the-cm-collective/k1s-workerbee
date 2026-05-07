@@ -27,6 +27,7 @@ from workerbee.poc import (
     write_stack_files,
 )
 from workerbee.ports import choose_port
+from workerbee.runtime_support import resolve_runtime, workerbee_runtime_labels
 
 
 @dataclass(slots=True)
@@ -258,8 +259,15 @@ class WorkerBeeSupervisor:
         if not build_context.is_dir():
             raise FileNotFoundError(f"image build context not found: {build_context}")
         image_tag = tag or f"workerbee-{self.project}-{_slug(build_context.name)}:dev"
+        cmd = [runtime, "build", "-t", image_tag]
+        for label in workerbee_runtime_labels(
+            state_root=self.state_dir.parent.parent,
+            project=self.project,
+        ):
+            cmd.extend(["--label", label])
+        cmd.append(str(build_context))
         proc = subprocess.run(
-            [runtime, "build", "-t", image_tag, str(build_context)],
+            cmd,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -271,6 +279,10 @@ class WorkerBeeSupervisor:
             "runtime": runtime,
             "tag": image_tag,
             "context": str(build_context),
+            "labels": workerbee_runtime_labels(
+                state_root=self.state_dir.parent.parent,
+                project=self.project,
+            ),
             "stdout": proc.stdout,
         }
         if proc.returncode != 0:
@@ -309,6 +321,91 @@ class WorkerBeeSupervisor:
             "manifest": str(path),
             "namespace": namespace,
             "ingress_urls": self._ingress_urls_for_paths([path]),
+            "apply": result,
+        }
+
+    def deploy_k8s_manifest(
+        self,
+        manifest: Path,
+        *,
+        namespace: str | None = None,
+        timeout: int = 180,
+    ) -> dict[str, Any]:
+        info = self.start()
+        path = manifest.expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"manifest not found: {path}")
+        args = [
+            "--server",
+            info.controller_url,
+            "--token",
+            info.admin_token,
+            "apply",
+            "--k8s",
+            "-f",
+            str(path),
+        ]
+        if namespace:
+            args.extend(["--force-namespace", "-n", namespace])
+        result = self.run_ae(args, info=info, timeout=timeout)
+        return {
+            "ok": True,
+            "project": self.project,
+            "manifest": str(path),
+            "input_kind": "kubernetes",
+            "namespace": namespace,
+            "ingress_urls": self._ingress_urls_for_paths([path]),
+            "apply": result,
+        }
+
+    def deploy_remote_manifest(
+        self,
+        manifest: Path,
+        *,
+        server: str,
+        token: str,
+        namespace: str | None = None,
+        timeout: int = 180,
+    ) -> dict[str, Any]:
+        path = manifest.expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"manifest not found: {path}")
+        args = ["--server", server, "--token", token, "apply", "-f", str(path)]
+        if namespace:
+            args.extend(["--force-namespace", "-n", namespace])
+        result = self.run_ae_cli(args, timeout=timeout)
+        return {
+            "ok": True,
+            "project": self.project,
+            "server": server,
+            "manifest": str(path),
+            "namespace": namespace,
+            "apply": result,
+        }
+
+    def deploy_remote_k8s_manifest(
+        self,
+        manifest: Path,
+        *,
+        server: str,
+        token: str,
+        namespace: str | None = None,
+        timeout: int = 180,
+    ) -> dict[str, Any]:
+        path = manifest.expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"manifest not found: {path}")
+        args = ["--server", server, "--token", token, "apply", "--k8s", "-f", str(path)]
+        if namespace:
+            args.extend(["--force-namespace", "-n", namespace])
+        result = self.run_ae_cli(args, timeout=timeout)
+        return {
+            "ok": True,
+            "project": self.project,
+            "server": server,
+            "manifest": str(path),
+            "input_kind": "kubernetes",
+            "namespace": namespace,
             "apply": result,
         }
 
@@ -478,6 +575,26 @@ class WorkerBeeSupervisor:
             raise RuntimeError(json.dumps(result, indent=2))
         return result
 
+    def run_ae_cli(self, args: list[str], *, timeout: int = 60) -> dict[str, Any]:
+        env = self.k1s_runtime.apply_env(os.environ.copy())
+        proc = subprocess.run(
+            [self.python_executable, "-m", "ae.cli", *args],
+            cwd=self.cwd,
+            env=env,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+        )
+        result = {
+            "cmd": _mask_sensitive_args([self.python_executable, "-m", "ae.cli", *args]),
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+            "stderr": proc.stderr,
+        }
+        if proc.returncode != 0:
+            raise RuntimeError(json.dumps(result, indent=2))
+        return result
+
     def load_stack(self) -> StackInfo | None:
         if not self.stack_file.exists():
             return None
@@ -503,15 +620,7 @@ class WorkerBeeSupervisor:
         tmp.replace(self.stack_file)
 
     def _resolve_runtime(self) -> str:
-        requested = self.runtime_requested.lower()
-        if requested in {"podman", "docker"}:
-            if shutil.which(requested) is None:
-                raise RuntimeError(f"{requested} not found on PATH")
-            return requested
-        for candidate in ("podman", "docker"):
-            if shutil.which(candidate):
-                return candidate
-        raise RuntimeError("Podman or Docker is required")
+        return resolve_runtime(self.runtime_requested)
 
     def _ensure_network(self, runtime: str, network: str) -> None:
         if runtime == "podman":

@@ -14,10 +14,17 @@ from typing import Any
 from workerbee import __version__
 from workerbee.daemon import WorkerBeeDaemon
 from workerbee.k1s_runtime import resolve_k1s_runtime
+from workerbee.manifests import (
+    deploy_local_stage,
+    deploy_remote_k1s_stage,
+    export_bundle,
+    prepare_stage,
+    validate_stage,
+)
 from workerbee.mcp_server import serve_mcp
 from workerbee.paths import default_state_root
 from workerbee.supervisor import WorkerBeeSupervisor
-from workerbee.trust import trust_install, trust_status
+from workerbee.trust import trust_install, trust_status, trust_uninstall
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,7 +64,21 @@ def build_parser() -> argparse.ArgumentParser:
     trust = sub.add_parser("trust", help="Manage explicit local CA trust")
     trust_sub = trust.add_subparsers(dest="trust_cmd", required=True)
     trust_sub.add_parser("status", help="Show local CA trust status")
-    trust_sub.add_parser("install", help="Install WorkerBee Caddy CA into local trust")
+    trust_install_p = trust_sub.add_parser("install", help="Install WorkerBee Caddy CA")
+    trust_install_p.add_argument(
+        "--target",
+        default="all",
+        choices=["all", "system", "nss", "user"],
+    )
+    trust_uninstall_p = trust_sub.add_parser("uninstall", help="Uninstall WorkerBee Caddy CA")
+    trust_uninstall_p.add_argument(
+        "--target",
+        default="all",
+        choices=["all", "system", "nss", "user"],
+    )
+    cleanup = sub.add_parser("cleanup", help="Inspect or remove stale WorkerBee runtime resources")
+    cleanup.add_argument("--execute", action="store_true", help="Perform cleanup")
+    cleanup.add_argument("--purge-images", action="store_true", help="Also remove WorkerBee images")
     sub.add_parser("tls-info", help="Show local API shim TLS paths")
     sub.add_parser("reset", help="Reset WorkerBee project workloads and artifacts")
     sub.add_parser("poc-status", help="Show POC app status through the native k1s API")
@@ -68,6 +89,34 @@ def build_parser() -> argparse.ArgumentParser:
     deploy_native.add_argument("-f", "--file", type=Path, required=True)
     deploy_native.add_argument("-n", "--namespace", default=None)
     deploy_native.add_argument("--timeout", type=int, default=180)
+    manifest = sub.add_parser("manifest", help="Prepare, validate, and deploy staged manifests")
+    manifest_sub = manifest.add_subparsers(dest="manifest_cmd", required=True)
+    manifest_prepare = manifest_sub.add_parser("prepare", help="Generate editable staged files")
+    manifest_prepare.add_argument("--name", default="app")
+    manifest_prepare.add_argument(
+        "--template",
+        default="frontend-api-store",
+        choices=["stateless-web", "frontend-api", "frontend-api-store"],
+    )
+    manifest_prepare.add_argument("--source", type=Path, default=None)
+    manifest_validate = manifest_sub.add_parser("validate", help="Validate staged files")
+    manifest_validate.add_argument("--stage", type=Path, required=True)
+    manifest_local = manifest_sub.add_parser("deploy-local", help="Deploy staged files locally")
+    manifest_local.add_argument("--stage", type=Path, required=True)
+    manifest_local.add_argument("-n", "--namespace", default=None)
+    manifest_local.add_argument("--timeout", type=int, default=180)
+    manifest_k1s = manifest_sub.add_parser("deploy-k1s", help="Deploy staged files to remote k1s")
+    manifest_k1s.add_argument("--stage", type=Path, required=True)
+    manifest_k1s.add_argument("--server", required=True)
+    manifest_k1s.add_argument("--token", required=True)
+    manifest_k1s.add_argument("-n", "--namespace", default=None)
+    manifest_k1s.add_argument("--timeout", type=int, default=180)
+    bundle = sub.add_parser("bundle", help="Export staged artifacts")
+    bundle_sub = bundle.add_subparsers(dest="bundle_cmd", required=True)
+    bundle_export = bundle_sub.add_parser("export", help="Export k1s, k8s, or Helm bundle")
+    bundle_export.add_argument("--stage", type=Path, required=True)
+    bundle_export.add_argument("--format", choices=["k1s", "k8s", "helm"], default="k1s")
+    bundle_export.add_argument("-n", "--namespace", default=None)
     deploy = sub.add_parser("deploy-poc", help="Build and deploy the representative POC stack")
     deploy.add_argument("--timeout", type=float, default=180.0)
     sub.add_parser("apishim-smoke", help="Inspect POC objects through the k1s API shim")
@@ -117,12 +166,65 @@ def main(argv: list[str] | None = None) -> int:
             if args.trust_cmd == "status":
                 return _print(trust_status(root), json_out=args.json)
             if args.trust_cmd == "install":
-                return _print(trust_install(root), json_out=args.json)
+                return _print(trust_install(root, target=args.target), json_out=args.json)
+            if args.trust_cmd == "uninstall":
+                return _print(trust_uninstall(root, target=args.target), json_out=args.json)
+        if args.cmd == "cleanup":
+            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime)
+            return _print(
+                daemon.cleanup(execute=args.execute, purge_images=args.purge_images),
+                json_out=args.json,
+            )
         sup = WorkerBeeSupervisor(
             project=args.project,
             runtime=args.runtime,
             state_dir=args.state_dir,
         )
+        if args.cmd == "manifest":
+            if args.manifest_cmd == "prepare":
+                return _print(
+                    prepare_stage(
+                        supervisor=sup,
+                        name=args.name,
+                        template=args.template,
+                        source=args.source,
+                    ),
+                    json_out=args.json,
+                )
+            if args.manifest_cmd == "validate":
+                return _print(validate_stage(args.stage), json_out=args.json)
+            if args.manifest_cmd == "deploy-local":
+                return _print(
+                    deploy_local_stage(
+                        supervisor=sup,
+                        stage_dir=args.stage,
+                        namespace=args.namespace,
+                        timeout=args.timeout,
+                    ),
+                    json_out=args.json,
+                )
+            if args.manifest_cmd == "deploy-k1s":
+                return _print(
+                    deploy_remote_k1s_stage(
+                        supervisor=sup,
+                        stage_dir=args.stage,
+                        server=args.server,
+                        token=args.token,
+                        namespace=args.namespace,
+                        timeout=args.timeout,
+                    ),
+                    json_out=args.json,
+                )
+        if args.cmd == "bundle" and args.bundle_cmd == "export":
+            return _print(
+                export_bundle(
+                    supervisor=sup,
+                    stage_dir=args.stage,
+                    fmt=args.format,
+                    namespace=args.namespace,
+                ),
+                json_out=args.json,
+            )
         if args.cmd == "start":
             info = sup.start()
             return _print(info.public_dict(), json_out=args.json)
