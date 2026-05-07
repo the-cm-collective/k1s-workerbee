@@ -12,8 +12,8 @@ from pathlib import Path
 from typing import Any
 
 from workerbee import __version__
+from workerbee.k1s_runtime import resolve_k1s_runtime
 from workerbee.mcp_server import serve_mcp
-from workerbee.paths import resolve_k1s_python, resolve_k1s_root
 from workerbee.supervisor import WorkerBeeSupervisor
 
 
@@ -40,7 +40,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Remove WorkerBee state and runtime network",
     )
     sub.add_parser("status", help="Show WorkerBee stack status")
+    sub.add_parser("tls-info", help="Show local API shim TLS paths")
+    sub.add_parser("reset", help="Reset WorkerBee project workloads and artifacts")
     sub.add_parser("poc-status", help="Show POC app status through the native k1s API")
+    build = sub.add_parser("build-image", help="Build a local image with the configured runtime")
+    build.add_argument("context", type=Path)
+    build.add_argument("--tag", default=None)
+    deploy_native = sub.add_parser("deploy", help="Apply a native k1s manifest")
+    deploy_native.add_argument("-f", "--file", type=Path, required=True)
+    deploy_native.add_argument("-n", "--namespace", default=None)
+    deploy_native.add_argument("--timeout", type=int, default=180)
     deploy = sub.add_parser("deploy-poc", help="Build and deploy the representative POC stack")
     deploy.add_argument("--timeout", type=float, default=180.0)
     sub.add_parser("apishim-smoke", help="Inspect POC objects through the k1s API shim")
@@ -87,8 +96,19 @@ def main(argv: list[str] | None = None) -> int:
             return _print(sup.stop(purge=args.purge), json_out=args.json)
         if args.cmd == "status":
             return _print(sup.status(), json_out=args.json)
+        if args.cmd == "tls-info":
+            return _print(sup.tls_info(), json_out=args.json)
+        if args.cmd == "reset":
+            return _print(sup.reset(), json_out=args.json)
         if args.cmd == "poc-status":
             return _print(sup.poc_status(), json_out=args.json)
+        if args.cmd == "build-image":
+            return _print(sup.build_image(args.context, tag=args.tag), json_out=args.json)
+        if args.cmd == "deploy":
+            return _print(
+                sup.deploy_manifest(args.file, namespace=args.namespace, timeout=args.timeout),
+                json_out=args.json,
+            )
         if args.cmd == "deploy-poc":
             return _print(sup.deploy_poc_stack(timeout_seconds=args.timeout), json_out=args.json)
         if args.cmd == "apishim-smoke":
@@ -132,14 +152,14 @@ def _doctor() -> dict[str, Any]:
         "docker": shutil.which("docker"),
     }
     try:
-        k1s_root = resolve_k1s_root()
-        checks["k1s_root"] = str(k1s_root)
-        python_bin = resolve_k1s_python(k1s_root)
-        checks["k1s_python"] = python_bin
-        env = os.environ.copy()
-        env["PYTHONPATH"] = str(k1s_root / "src")
+        runtime = resolve_k1s_runtime()
+        checks["k1s_runtime_source"] = runtime.source
+        checks["k1s_root"] = str(runtime.k1s_root) if runtime.k1s_root else None
+        checks["k1s_python"] = runtime.python_executable
+        checks["ae_origin"] = runtime.ae_origin
+        env = runtime.apply_env(os.environ.copy())
         proc = subprocess.run(
-            [python_bin, "-m", "ae.cli", "--help"],
+            [runtime.python_executable, "-m", "ae.cli", "--help"],
             env=env,
             text=True,
             stdout=subprocess.DEVNULL,
@@ -149,8 +169,23 @@ def _doctor() -> dict[str, Any]:
         checks["ae_import"] = proc.returncode == 0
         if proc.returncode != 0:
             checks["ae_import_error"] = proc.stderr[-500:]
+        helper = subprocess.run(
+            [
+                runtime.python_executable,
+                "-c",
+                "from ae.apishim.env import ensure_local_apishim_env",
+            ],
+            env=env,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=15,
+        )
+        checks["apishim_env_helper"] = helper.returncode == 0
+        if helper.returncode != 0:
+            checks["apishim_env_helper_error"] = helper.stderr[-500:]
     except Exception as exc:  # noqa: BLE001
-        checks["k1s_root_error"] = str(exc)
+        checks["k1s_runtime_error"] = str(exc)
         checks["ae_import"] = False
     try:
         import mcp  # noqa: F401
@@ -159,7 +194,9 @@ def _doctor() -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         checks["mcp_sdk"] = False
         checks["mcp_sdk_error"] = str(exc)
-    checks["ok"] = bool(checks.get("ae_import")) and bool(
-        checks.get("podman") or checks.get("docker")
+    checks["ok"] = (
+        bool(checks.get("ae_import"))
+        and bool(checks.get("apishim_env_helper"))
+        and bool(checks.get("podman") or checks.get("docker"))
     )
     return checks

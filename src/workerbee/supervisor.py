@@ -9,12 +9,14 @@ import shutil
 import signal
 import subprocess
 import time
+from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
 from workerbee.http import request, wait_for_http
-from workerbee.paths import default_state_dir, resolve_k1s_python, resolve_k1s_root
+from workerbee.k1s_runtime import resolve_k1s_runtime
+from workerbee.paths import default_state_dir
 from workerbee.poc import (
     POC_APPS,
     POC_NAMESPACE,
@@ -29,7 +31,10 @@ from workerbee.ports import choose_port
 class StackInfo:
     project: str
     state_dir: str
-    k1s_root: str
+    k1s_root: str | None
+    k1s_runtime_source: str
+    python_executable: str
+    ae_origin: str | None
     runtime: str
     network: str
     controller_port: int
@@ -64,8 +69,9 @@ class WorkerBeeSupervisor:
         self.project = _slug(project)
         self.cwd = (cwd or Path.cwd()).resolve()
         self.state_dir = (state_dir or default_state_dir(self.project, cwd=self.cwd)).resolve()
-        self.k1s_root = (k1s_root or resolve_k1s_root(self.cwd)).resolve()
-        self.python_executable = resolve_k1s_python(self.k1s_root)
+        self.k1s_runtime = resolve_k1s_runtime(cwd=self.cwd, k1s_root=k1s_root)
+        self.k1s_root = self.k1s_runtime.k1s_root
+        self.python_executable = self.k1s_runtime.python_executable
         self.runtime_requested = runtime
         self.stack_file = self.state_dir / "stack.json"
 
@@ -101,7 +107,10 @@ class WorkerBeeSupervisor:
         info = StackInfo(
             project=self.project,
             state_dir=str(self.state_dir),
-            k1s_root=str(self.k1s_root),
+            k1s_root=str(self.k1s_root) if self.k1s_root else None,
+            k1s_runtime_source=self.k1s_runtime.source,
+            python_executable=self.python_executable,
+            ae_origin=self.k1s_runtime.ae_origin,
             runtime=runtime,
             network=network,
             controller_port=controller_port,
@@ -163,6 +172,31 @@ class WorkerBeeSupervisor:
             "stack": info.public_dict(),
         }
 
+    def tls_info(self) -> dict[str, Any]:
+        info = self.start()
+        return {
+            "ok": True,
+            "project": self.project,
+            "apishim_url": info.apishim_url,
+            "ca_bundle": str(self.state_dir / "apishim.ca.crt"),
+            "server_cert": str(self.state_dir / "apishim.crt"),
+            "server_key": "***",
+            "trust_guidance": (
+                "For v0.1 WorkerBee exposes the local dev CA path but does not install it "
+                "into the OS trust store. Use the CA bundle with client tools that need "
+                "strict TLS verification."
+            ),
+        }
+
+    def reset(self) -> dict[str, Any]:
+        info = self.start()
+        self._reset_poc(info)
+        artifacts = self.state_dir / "artifacts"
+        if artifacts.exists():
+            shutil.rmtree(artifacts)
+        artifacts.mkdir(parents=True, exist_ok=True)
+        return {"ok": True, "project": self.project, "state_dir": str(self.state_dir)}
+
     # POC -----------------------------------------------------------
     def deploy_poc_stack(self, *, timeout_seconds: float = 180.0) -> dict[str, Any]:
         info = self.start()
@@ -208,6 +242,65 @@ class WorkerBeeSupervisor:
             "urls": artifacts.urls,
             "apply": apply_results,
             "validation": validation,
+        }
+
+    def build_image(self, context: Path, *, tag: str | None = None) -> dict[str, Any]:
+        runtime = self._resolve_runtime()
+        build_context = context.expanduser().resolve()
+        if not build_context.is_dir():
+            raise FileNotFoundError(f"image build context not found: {build_context}")
+        image_tag = tag or f"workerbee-{self.project}-{_slug(build_context.name)}:dev"
+        proc = subprocess.run(
+            [runtime, "build", "-t", image_tag, str(build_context)],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=300,
+        )
+        result = {
+            "ok": proc.returncode == 0,
+            "project": self.project,
+            "runtime": runtime,
+            "tag": image_tag,
+            "context": str(build_context),
+            "stdout": proc.stdout,
+        }
+        if proc.returncode != 0:
+            raise RuntimeError(json.dumps(result, indent=2))
+        return result
+
+    def deploy_manifest(
+        self,
+        manifest: Path,
+        *,
+        namespace: str | None = None,
+        timeout: int = 180,
+    ) -> dict[str, Any]:
+        info = self.start()
+        path = manifest.expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"manifest not found: {path}")
+        text = path.read_text(encoding="utf-8")
+        if "apiVersion: ae.dev/v1alpha1" not in text:
+            raise ValueError("v0.1 accepts native ae.dev/v1alpha1 k1s manifests only")
+        args = [
+            "--server",
+            info.controller_url,
+            "--token",
+            info.admin_token,
+            "apply",
+            "-f",
+            str(path),
+        ]
+        if namespace:
+            args.extend(["--force-namespace", "-n", namespace])
+        result = self.run_ae(args, info=info, timeout=timeout)
+        return {
+            "ok": True,
+            "project": self.project,
+            "manifest": str(path),
+            "namespace": namespace,
+            "apply": result,
         }
 
     def export_k8s(self) -> dict[str, Any]:
@@ -346,8 +439,7 @@ class WorkerBeeSupervisor:
             cwd=self.cwd,
             env=env,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=timeout,
         )
         result = {
@@ -365,6 +457,9 @@ class WorkerBeeSupervisor:
             return None
         try:
             data = json.loads(self.stack_file.read_text(encoding="utf-8"))
+            data.setdefault("k1s_runtime_source", self.k1s_runtime.source)
+            data.setdefault("python_executable", self.python_executable)
+            data.setdefault("ae_origin", self.k1s_runtime.ae_origin)
             return StackInfo(**data)
         except Exception:
             return None
@@ -420,13 +515,9 @@ class WorkerBeeSupervisor:
                 )
 
     def _base_env(self, info: StackInfo) -> dict[str, str]:
-        env = os.environ.copy()
-        pythonpath = str(self.k1s_root / "src")
-        if env.get("PYTHONPATH"):
-            pythonpath = f"{pythonpath}{os.pathsep}{env['PYTHONPATH']}"
+        env = self.k1s_runtime.apply_env(os.environ.copy())
         env.update(
             {
-                "PYTHONPATH": pythonpath,
                 "AE_RUNTIME_BACKEND": info.runtime,
                 "AE_CONTAINER_CLI": info.runtime,
                 "AE_NETWORK_NAME": info.network,
@@ -513,9 +604,6 @@ class WorkerBeeSupervisor:
         ca = Path(env["AE_APISHIM_CA_BUNDLE"])
         if cert.exists() and key.exists() and ca.exists():
             return
-        script = self.k1s_root / "scripts" / "ensure_apishim_env.sh"
-        if not script.exists():
-            raise RuntimeError(f"missing apishim env helper: {script}")
         helper_env = env.copy()
         helper_env.update(
             {
@@ -526,20 +614,41 @@ class WorkerBeeSupervisor:
                 "APISHIM_CA_KEY_FILE": str(self.state_dir / "apishim.ca.key"),
             }
         )
-        proc = subprocess.run(
-            [str(script)],
-            cwd=self.k1s_root,
+        proc = self._run_packaged_apishim_env_helper(helper_env)
+        if proc.returncode != 0 and self.k1s_root is not None:
+            script = self.k1s_root / "scripts" / "ensure_apishim_env.sh"
+            if script.exists():
+                proc = subprocess.run(
+                    [str(script)],
+                    cwd=self.k1s_root,
+                    env=helper_env,
+                    check=False,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                )
+        if not cert.exists() or not key.exists():
+            raise RuntimeError(
+                "failed to generate local apishim TLS material\n"
+                + (proc.stdout or "")[-2000:]
+            )
+
+    def _run_packaged_apishim_env_helper(
+        self, helper_env: dict[str, str]
+    ) -> subprocess.CompletedProcess[str]:
+        code = (
+            "from ae.apishim.env import ensure_local_apishim_env; "
+            "ensure_local_apishim_env()"
+        )
+        return subprocess.run(
+            [self.python_executable, "-c", code],
+            cwd=self.cwd,
             env=helper_env,
             check=False,
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
         )
-        if not cert.exists() or not key.exists():
-            raise RuntimeError(
-                "failed to generate local apishim TLS material\n"
-                + (proc.stdout or "")[-2000:]
-            )
 
     def _reset_poc(self, info: StackInfo) -> None:
         spec_dir = self.state_dir / "specs"
@@ -548,7 +657,7 @@ class WorkerBeeSupervisor:
             if spec.exists():
                 spec.unlink()
         for app in reversed(POC_APPS):
-            try:
+            with suppress(Exception):
                 self.run_ae(
                     [
                         "--server",
@@ -564,8 +673,6 @@ class WorkerBeeSupervisor:
                     info=info,
                     timeout=30,
                 )
-            except Exception:
-                pass
         self._cleanup_runtime(info, purge=False)
         time.sleep(0.5)
 
@@ -652,8 +759,7 @@ class WorkerBeeSupervisor:
         proc = subprocess.run(
             cmd,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=10,
         )
         if proc.returncode != 0:
@@ -671,8 +777,7 @@ class WorkerBeeSupervisor:
             proc = subprocess.run(
                 cmd,
                 text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
+                capture_output=True,
                 timeout=30,
             )
             stdout_parts.append(proc.stdout)
@@ -695,8 +800,7 @@ class WorkerBeeSupervisor:
         proc = subprocess.run(
             cmd,
             text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             timeout=45,
         )
         result = {
@@ -770,10 +874,8 @@ def _terminate_pid(pid: int) -> None:
     try:
         os.killpg(pid, signal.SIGKILL)
     except OSError:
-        try:
+        with suppress(OSError):
             os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
 
 
 def _split_lines(raw: str) -> list[str]:

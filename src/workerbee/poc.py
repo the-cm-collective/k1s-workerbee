@@ -14,7 +14,6 @@ from typing import Any
 
 from workerbee.http import request
 
-
 POC_NAMESPACE = "workerbee-poc"
 POC_APPS = ("store", "api", "frontend")
 

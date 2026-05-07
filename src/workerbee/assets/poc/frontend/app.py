@@ -17,7 +17,7 @@ def _api_check() -> tuple[bool, str, str]:
     last = ""
     for base in _api_urls():
         try:
-            with urllib.request.urlopen(f"{base}/api/check", timeout=3) as resp:
+            with urllib.request.urlopen(f"{base}/api/check", timeout=3) as resp:  # noqa: S310
                 return True, base, resp.read().decode("utf-8")
         except Exception as exc:  # noqa: BLE001
             last = f"{base}: {exc}"
@@ -45,7 +45,7 @@ class Handler(BaseHTTPRequestHandler):
     <pre>{html.escape(body[:1000])}</pre>
   </body>
 </html>
-""".encode("utf-8")
+""".encode()
         self.send_response(200 if ok else 503)
         self.send_header("Content-Type", "text/html")
         self.send_header("Content-Length", str(len(content)))
@@ -54,5 +54,4 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
-
+    ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()  # noqa: S104

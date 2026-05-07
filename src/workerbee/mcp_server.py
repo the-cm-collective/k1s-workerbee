@@ -52,9 +52,26 @@ def serve_mcp(
         return supervisor.deploy_poc_stack()
 
     @mcp.tool()
+    def workerbee_build_image(context: str, tag: str | None = None) -> dict[str, Any]:
+        """Build a local image with the configured runtime."""
+        return supervisor.build_image(Path(context), tag=tag)
+
+    @mcp.tool()
+    def workerbee_deploy_manifest(
+        path: str, namespace: str | None = None, timeout: int = 180
+    ) -> dict[str, Any]:
+        """Apply a native ae.dev/v1alpha1 k1s manifest."""
+        return supervisor.deploy_manifest(Path(path), namespace=namespace, timeout=timeout)
+
+    @mcp.tool()
     def workerbee_status() -> dict[str, Any]:
         """Return WorkerBee stack status."""
         return supervisor.status()
+
+    @mcp.tool()
+    def workerbee_tls_info() -> dict[str, Any]:
+        """Return local API shim TLS paths and trust guidance."""
+        return supervisor.tls_info()
 
     @mcp.tool()
     def workerbee_poc_status() -> dict[str, Any]:
@@ -85,5 +102,10 @@ def serve_mcp(
     def workerbee_stop(purge: bool = False) -> dict[str, Any]:
         """Stop WorkerBee-managed processes and optionally purge local state."""
         return supervisor.stop(purge=purge)
+
+    @mcp.tool()
+    def workerbee_reset() -> dict[str, Any]:
+        """Reset WorkerBee project workloads and generated artifacts."""
+        return supervisor.reset()
 
     mcp.run(transport="streamable-http")

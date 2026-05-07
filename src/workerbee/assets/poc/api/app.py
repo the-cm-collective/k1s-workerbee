@@ -31,8 +31,8 @@ def _store_request(path: str, *, data: bytes | None = None) -> tuple[int, str, s
     for base in _urls():
         url = f"{base}{path}"
         try:
-            req = urllib.request.Request(url, data=data, method=method)
-            with urllib.request.urlopen(req, timeout=2.5) as resp:
+            req = urllib.request.Request(url, data=data, method=method)  # noqa: S310
+            with urllib.request.urlopen(req, timeout=2.5) as resp:  # noqa: S310
                 return int(resp.status), resp.read().decode("utf-8"), base
         except Exception as exc:  # noqa: BLE001
             last = f"{base}: {exc}"
@@ -60,7 +60,9 @@ class Handler(BaseHTTPRequestHandler):
                     "mode_file": _read(str(_config_root() / "config" / "mode.txt")),
                     "color_file": _read(str(_config_root() / "config" / "color.txt")),
                     "token_present": bool(_read(str(_config_root() / "secret" / "token"))),
-                    "env_mode": os.getenv("MODE") or os.getenv("mode") or os.getenv("APP_MODE"),
+                    "env_mode": os.getenv("MODE")
+                    or os.getenv("mode")  # noqa: SIM112 - validates k1s env key handling.
+                    or os.getenv("APP_MODE"),
                     "store_body": body[:300],
                 },
             )
@@ -82,4 +84,4 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()
+    ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()  # noqa: S104

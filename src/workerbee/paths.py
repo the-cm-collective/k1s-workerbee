@@ -15,7 +15,7 @@ def default_state_dir(project: str, *, cwd: Path | None = None) -> Path:
     return repo_root_from_cwd(cwd) / ".workerbee" / project
 
 
-def resolve_k1s_root(cwd: Path | None = None) -> Path:
+def find_k1s_root(cwd: Path | None = None) -> Path | None:
     override = os.getenv("WORKERBEE_K1S_ROOT")
     candidates = []
     if override:
@@ -26,7 +26,18 @@ def resolve_k1s_root(cwd: Path | None = None) -> Path:
         root = candidate.expanduser().resolve()
         if (root / "src" / "ae").is_dir() and (root / "pyproject.toml").is_file():
             return root
-    tried = ", ".join(str(p) for p in candidates)
+    return None
+
+
+def resolve_k1s_root(cwd: Path | None = None) -> Path:
+    root = find_k1s_root(cwd)
+    if root is not None:
+        return root
+    override = os.getenv("WORKERBEE_K1S_ROOT")
+    base = repo_root_from_cwd(cwd)
+    tried_paths = [Path(override)] if override else []
+    tried_paths.extend([base.parent / "k1s", base / "k1s"])
+    tried = ", ".join(str(p) for p in tried_paths)
     raise FileNotFoundError(f"could not locate k1s checkout; tried: {tried}")
 
 

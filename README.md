@@ -6,8 +6,20 @@ The current POC wraps a sibling `../k1s` checkout without modifying it. It start
 
 ## Quickstart
 
+Install from a local wheelhouse:
+
 ```bash
-python -m pip install -e .[dev]
+scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse
+python -m venv .venv
+. .venv/bin/activate
+python -m pip install --no-index --find-links dist/workerbee-wheelhouse k1s-workerbee
+workerbee doctor
+```
+
+Source checkout workflow:
+
+```bash
+python -m pip install -e .[dev] --find-links dist/workerbee-wheelhouse
 workerbee doctor
 workerbee start
 workerbee deploy-poc
@@ -23,10 +35,12 @@ Run the MCP server:
 workerbee mcp serve
 ```
 
-By default WorkerBee looks for k1s at `../k1s`. Override with `WORKERBEE_K1S_ROOT=/path/to/k1s`.
+WorkerBee prefers an installed `k1s-workerbee-runtime` package. For source development it
+falls back to a sibling k1s checkout at `../k1s`. Override with
+`WORKERBEE_K1S_ROOT=/path/to/k1s`.
 
 `workerbee start` prints the dashboard URL immediately. The default local URL is
 `http://127.0.0.1:19108/dashboard` when that port is free.
 
-The MCP SDK is installed by the package dependency. In a fresh environment, use
-`python -m pip install -e .` before running `workerbee mcp serve`.
+The MCP SDK is installed by the package dependency. In a source checkout, build the
+wheelhouse first or provide equivalent dependency links before running `workerbee mcp serve`.

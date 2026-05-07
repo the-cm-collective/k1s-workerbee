@@ -17,6 +17,7 @@ The POC flow builds local images with Podman or Docker, applies the native k1s m
 The next phase should turn the POC into a distributable local agent workbench:
 
 - Package install path: publish a Python package with console scripts, clear k1s checkout resolution, and repeatable dependency installation.
+- Wheelhouse runtime: build a local wheelhouse containing `k1s-workerbee` and the k1s-side `k1s-workerbee-runtime` wheel so runtime does not require a sibling k1s checkout.
 - MCP contract: stabilize tool names, result schemas, error payloads, and dashboard URL notification semantics.
 - Runtime support: harden Podman rootless, Podman rootful, Docker Linux, and Docker Desktop behavior.
 - Lifecycle safety: isolate projects, clean stale processes, avoid port drift, support purge/reset, and never expose bearer tokens in tool results.

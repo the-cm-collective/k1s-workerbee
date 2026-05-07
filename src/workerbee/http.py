@@ -44,12 +44,12 @@ def request(
         headers["Content-Type"] = "application/json"
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(url, data=payload, headers=headers, method=method)
+    req = urllib.request.Request(url, data=payload, headers=headers, method=method)  # noqa: S310
     context = None
     if url.startswith("https://") and not verify_tls:
         context = ssl._create_unverified_context()  # noqa: S323 - local dev certs only
     try:
-        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:  # noqa: S310
             return HTTPResult(
                 status=int(resp.status),
                 body=resp.read(),
@@ -86,4 +86,3 @@ def wait_for_http(
     if last is not None:
         raise TimeoutError(f"{url} did not become healthy: last status {last.status}")
     raise TimeoutError(f"{url} did not become healthy")
-
