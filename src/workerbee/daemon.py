@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 import threading
 import time
 from collections.abc import Callable
@@ -11,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, TypeVar
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from workerbee.agent import (
     DEFAULT_PROJECT_MODE,
@@ -44,6 +45,7 @@ from workerbee.supervisor import WorkerBeeSupervisor, project_slug
 T = TypeVar("T")
 
 DASHBOARD_BACKGROUND_PATH = "/static/dash-assets/page-background-1920x1080.png"
+DASHBOARD_LOGO_PATH = "/static/dash-assets/k1s-logo-32.png"
 
 
 @dataclass(slots=True)
@@ -78,8 +80,23 @@ class WorkerBeeDaemon:
         self._locks_guard = threading.Lock()
         self._dashboard: ThreadingHTTPServer | None = None
         self._dashboard_thread: threading.Thread | None = None
+        self.dashboard_action_token = secrets.token_urlsafe(32)
+        self._dashboard_shutdown_callback: Callable[[], None] | None = None
+        self._dashboard_reboot_callback: Callable[[], None] | None = None
+        self._dashboard_scheduler: Callable[[Callable[[], None]], None] | None = None
         self.ingress: GlobalIngress | None = None
         self._state_lock: FileLock | None = None
+
+    def configure_dashboard_lifecycle(
+        self,
+        *,
+        shutdown: Callable[[], None] | None = None,
+        reboot: Callable[[], None] | None = None,
+        scheduler: Callable[[Callable[[], None]], None] | None = None,
+    ) -> None:
+        self._dashboard_shutdown_callback = shutdown
+        self._dashboard_reboot_callback = reboot
+        self._dashboard_scheduler = scheduler
 
     def start(self, *, mcp_bind_url: str | None = None) -> GlobalIngressInfo:
         self.state_root.mkdir(parents=True, exist_ok=True)
@@ -453,9 +470,138 @@ class WorkerBeeDaemon:
         )
 
     def stop_all_projects(self, *, purge: bool = False) -> dict[str, Any]:
+        projects = self._known_projects()
+        if not projects:
+            return _empty_project_action_result(state_root=self.state_root, purge=purge)
+        return self.stop_projects(projects, purge=purge, unregister=False)
+
+    def start_all_projects(self, *, sync_ingress: bool = True) -> dict[str, Any]:
+        projects = self._known_projects()
+        if not projects:
+            return _empty_project_action_result(state_root=self.state_root, purge=False)
+        return self.start_projects(projects, sync_ingress=sync_ingress)
+
+    def start_projects(
+        self,
+        projects: list[str],
+        *,
+        sync_ingress: bool = True,
+    ) -> dict[str, Any]:
         results: list[dict[str, Any]] = []
         errors: list[dict[str, Any]] = []
-        for name in self._known_projects():
+        known = set(self._known_projects())
+        names = _dashboard_project_names({"projects": projects})
+        started: list[str] = []
+        if not names:
+            return {
+                "ok": False,
+                "state_root": str(self.state_root),
+                "purge": False,
+                "unregistered": [],
+                "projects": [],
+                "errors": [{"error": "no WorkerBee projects selected"}],
+            }
+        for name in names:
+            if name not in known:
+                errors.append({"project": name, "error": "unknown WorkerBee project"})
+                continue
+            try:
+                with self._project_lock(name):
+                    file_lock = FileLock(
+                        project_lock_path(self.state_root, name),
+                        label=f"project {name}",
+                    )
+                    with file_lock:
+                        previous_mode = self.project_mode(name)
+                        selected_mode = "start" if previous_mode == "stop" else None
+                        self._register_project(
+                            name,
+                            cwd_hint=str(self._project_cwd(name)),
+                        )
+                        sup = self._build_supervisor(name, ingress=self._project_ingress(name))
+                        was_running = bool(sup.status().get("running"))
+                        info = sup.start()
+                        self._register_project(
+                            name,
+                            cwd_hint=str(sup.cwd),
+                            mode=selected_mode,
+                        )
+                        started.append(name)
+                        results.append(
+                            {
+                                "project": name,
+                                "ok": True,
+                                "started": not was_running,
+                                "mode": self.project_mode(name),
+                                "dashboard_url": info.dashboard_url,
+                                "stack": info.public_dict(),
+                            }
+                        )
+            except Exception as exc:  # noqa: BLE001
+                errors.append({"project": name, "error": str(exc)})
+        ingress_sync: dict[str, Any] | None = None
+        if started:
+            ingress_sync = (
+                self._sync_ingress_projects_result()
+                if sync_ingress
+                else self._schedule_ingress_sync()
+            )
+        failed = [result for result in results if result.get("ok") is False]
+        return {
+            "ok": not errors and not failed,
+            "state_root": str(self.state_root),
+            "purge": False,
+            "unregistered": [],
+            "projects": results,
+            "errors": errors,
+            "ingress_sync": ingress_sync,
+        }
+
+    def delete_all_projects(self, *, sync_ingress: bool = True) -> dict[str, Any]:
+        projects = self._known_projects()
+        if not projects:
+            return _empty_project_action_result(state_root=self.state_root, purge=True)
+        return self.delete_projects(projects, sync_ingress=sync_ingress)
+
+    def delete_projects(
+        self,
+        projects: list[str],
+        *,
+        sync_ingress: bool = True,
+    ) -> dict[str, Any]:
+        return self.stop_projects(
+            projects,
+            purge=True,
+            unregister=True,
+            sync_ingress=sync_ingress,
+        )
+
+    def stop_projects(
+        self,
+        projects: list[str],
+        *,
+        purge: bool = False,
+        unregister: bool = False,
+        sync_ingress: bool = True,
+    ) -> dict[str, Any]:
+        results: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        known = set(self._known_projects())
+        names = _dashboard_project_names({"projects": projects})
+        removed: list[str] = []
+        if not names:
+            return {
+                "ok": False,
+                "state_root": str(self.state_root),
+                "purge": purge,
+                "unregistered": [],
+                "projects": [],
+                "errors": [{"error": "no WorkerBee projects selected"}],
+            }
+        for name in names:
+            if name not in known:
+                errors.append({"project": name, "error": "unknown WorkerBee project"})
+                continue
             try:
                 with self._project_lock(name):
                     file_lock = FileLock(
@@ -464,15 +610,56 @@ class WorkerBeeDaemon:
                     )
                     with file_lock:
                         sup = self._build_supervisor(name, ingress=self._project_ingress(name))
-                        results.append({"project": name, **sup.stop(purge=purge)})
+                        result = {"project": name, **sup.stop(purge=purge)}
+                        results.append(result)
+                        if unregister and result.get("ok") is not False:
+                            removed.append(name)
             except Exception as exc:  # noqa: BLE001
                 errors.append({"project": name, "error": str(exc)})
+        ingress_sync: dict[str, Any] | None = None
+        if unregister and removed:
+            self._unregister_projects(removed)
+            ingress_sync = (
+                self._sync_ingress_projects_result()
+                if sync_ingress
+                else self._schedule_ingress_sync()
+            )
+        failed = [result for result in results if result.get("ok") is False]
         return {
-            "ok": not errors,
+            "ok": not errors and not failed,
             "state_root": str(self.state_root),
             "purge": purge,
+            "unregistered": removed,
             "projects": results,
             "errors": errors,
+            "ingress_sync": ingress_sync,
+        }
+
+    def schedule_mcp_shutdown(self) -> dict[str, Any]:
+        return self._schedule_dashboard_lifecycle("mcp_shutdown", self._dashboard_shutdown_callback)
+
+    def schedule_mcp_reboot(self) -> dict[str, Any]:
+        return self._schedule_dashboard_lifecycle("mcp_reboot", self._dashboard_reboot_callback)
+
+    def _schedule_dashboard_lifecycle(
+        self,
+        action: str,
+        callback: Callable[[], None] | None,
+    ) -> dict[str, Any]:
+        if callback is None:
+            return {
+                "ok": False,
+                "action": action,
+                "scheduled": False,
+                "error": "MCP lifecycle callback is not configured for this daemon",
+            }
+        scheduler = self._dashboard_scheduler or _default_dashboard_scheduler
+        scheduler(callback)
+        return {
+            "ok": True,
+            "action": action,
+            "scheduled": True,
+            "message": f"{action} scheduled",
         }
 
     def stop_global_ingress(self) -> dict[str, Any]:
@@ -527,6 +714,17 @@ class WorkerBeeDaemon:
     def _sync_ingress_projects(self) -> None:
         if self.ingress is not None:
             self.ingress.sync_projects(self._known_projects())
+
+    def _sync_ingress_projects_result(self) -> dict[str, Any]:
+        self._sync_ingress_projects()
+        return {"scheduled": False, "synced": self.ingress is not None}
+
+    def _schedule_ingress_sync(self) -> dict[str, Any]:
+        if self.ingress is None:
+            return {"scheduled": False, "synced": False, "reason": "global ingress is not running"}
+        scheduler = self._dashboard_scheduler or _default_ingress_sync_scheduler
+        scheduler(self._sync_ingress_projects)
+        return {"scheduled": True, "synced": False}
 
     def _raise_if_project_stopped(self, project: str) -> None:
         mode = self.project_mode(project)
@@ -599,6 +797,15 @@ class WorkerBeeDaemon:
         )
         tmp.replace(self.registry_file)
 
+    def _unregister_projects(self, projects: list[str]) -> None:
+        remove = {project_slug(project) for project in projects}
+        if not remove:
+            return
+        records = self._read_registry()
+        for project in remove:
+            records.pop(project, None)
+        self._write_registry(records)
+
     def _read_registry(self) -> dict[str, dict[str, Any]]:
         if not self.registry_file.is_file():
             return {}
@@ -615,6 +822,15 @@ class WorkerBeeDaemon:
             return {}
         return {}
 
+    def _write_registry(self, records: dict[str, dict[str, Any]]) -> None:
+        self.registry_file.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.registry_file.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps({"projects": records}, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+        tmp.replace(self.registry_file)
+
     def _resolve_runtime(self) -> str:
         return resolve_runtime(self.runtime_requested)
 
@@ -626,10 +842,19 @@ class WorkerBeeDaemon:
 
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self) -> None:  # noqa: N802
-                if self.path.startswith("/api/projects"):
+                path = urlsplit(self.path).path
+                if path == "/healthz":
+                    _send_json(
+                        self,
+                        {
+                            "ok": True,
+                            "state_root": str(daemon.state_root),
+                        },
+                    )
+                    return
+                if path.startswith("/api/projects"):
                     _send_json(self, daemon.projects())
                     return
-                path = urlsplit(self.path).path
                 if path.startswith("/static/"):
                     asset = _dashboard_static_asset(path)
                     if asset is None:
@@ -638,7 +863,41 @@ class WorkerBeeDaemon:
                     body, content_type = asset
                     _send_bytes(self, body, content_type)
                     return
-                _send_html(self, _render_dashboard(daemon.projects()))
+                _send_html(
+                    self,
+                    _render_dashboard(
+                        daemon.projects(),
+                        action_token=daemon.dashboard_action_token,
+                    ),
+                )
+
+            def do_POST(self) -> None:  # noqa: N802
+                path = urlsplit(self.path).path
+                if path != "/api/actions":
+                    _send_json(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "unknown dashboard action endpoint",
+                        },
+                        status=404,
+                    )
+                    return
+                if not _dashboard_host_allowed(self):
+                    _send_json(
+                        self,
+                        {
+                            "ok": False,
+                            "error": "dashboard actions require a local WorkerBee host",
+                        },
+                        status=403,
+                    )
+                    return
+                status, payload = _handle_dashboard_action(
+                    daemon,
+                    _read_dashboard_action_payload(self),
+                )
+                _send_json(self, payload, status=status)
 
             def log_message(self, _format: str, *_args: Any) -> None:
                 return
@@ -653,13 +912,18 @@ class WorkerBeeDaemon:
         return port
 
 
-def _send_json(handler: BaseHTTPRequestHandler, payload: dict[str, Any]) -> None:
+def _send_json(
+    handler: BaseHTTPRequestHandler,
+    payload: dict[str, Any],
+    *,
+    status: int = 200,
+) -> None:
     body = json.dumps(payload, indent=2, sort_keys=True).encode()
-    handler.send_response(200)
+    handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
-    handler.wfile.write(body)
+    _write_response_body(handler, body)
 
 
 def _send_html(handler: BaseHTTPRequestHandler, html: str) -> None:
@@ -668,7 +932,7 @@ def _send_html(handler: BaseHTTPRequestHandler, html: str) -> None:
     handler.send_header("Content-Type", "text/html; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
-    handler.wfile.write(body)
+    _write_response_body(handler, body)
 
 
 def _send_bytes(handler: BaseHTTPRequestHandler, body: bytes, content_type: str) -> None:
@@ -677,7 +941,7 @@ def _send_bytes(handler: BaseHTTPRequestHandler, body: bytes, content_type: str)
     handler.send_header("Content-Length", str(len(body)))
     handler.send_header("Cache-Control", "public, max-age=3600")
     handler.end_headers()
-    handler.wfile.write(body)
+    _write_response_body(handler, body)
 
 
 def _send_not_found(handler: BaseHTTPRequestHandler) -> None:
@@ -686,7 +950,147 @@ def _send_not_found(handler: BaseHTTPRequestHandler) -> None:
     handler.send_header("Content-Type", "text/plain; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
-    handler.wfile.write(body)
+    _write_response_body(handler, body)
+
+
+def _write_response_body(handler: BaseHTTPRequestHandler, body: bytes) -> None:
+    try:
+        handler.wfile.write(body)
+    except BrokenPipeError:
+        return
+
+
+def _default_dashboard_scheduler(callback: Callable[[], None]) -> None:
+    timer = threading.Timer(0.25, callback)
+    timer.daemon = True
+    timer.start()
+
+
+def _default_ingress_sync_scheduler(callback: Callable[[], None]) -> None:
+    timer = threading.Timer(1.0, callback)
+    timer.daemon = True
+    timer.start()
+
+
+def _dashboard_host_allowed(handler: BaseHTTPRequestHandler) -> bool:
+    host = _host_name(str(handler.headers.get("Host") or ""))
+    return host in {
+        "dashboard.workerbee.localhost",
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }
+
+
+def _host_name(raw: str) -> str:
+    host = raw.strip().lower()
+    if host.startswith("["):
+        return host[1:].split("]", 1)[0]
+    if ":" in host:
+        return host.rsplit(":", 1)[0]
+    return host
+
+
+def _read_dashboard_action_payload(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
+    try:
+        length = int(handler.headers.get("Content-Length") or "0")
+    except ValueError:
+        length = 0
+    if length <= 0:
+        return {}
+    if length > 64 * 1024:
+        return {"_payload_error": "dashboard action payload is too large"}
+    raw = handler.rfile.read(length)
+    content_type = str(handler.headers.get("Content-Type") or "").split(";", 1)[0].strip()
+    if content_type == "application/json":
+        try:
+            data = json.loads(raw.decode("utf-8"))
+        except json.JSONDecodeError:
+            return {"_payload_error": "invalid JSON payload"}
+        if isinstance(data, dict):
+            return data
+        return {"_payload_error": "JSON payload must be an object"}
+    if content_type == "application/x-www-form-urlencoded":
+        form = parse_qs(raw.decode("utf-8"), keep_blank_values=True)
+        payload: dict[str, Any] = {}
+        for key, values in form.items():
+            payload[key] = values if key == "projects" else (values[-1] if values else "")
+        return payload
+    return {"_payload_error": "unsupported dashboard action content type"}
+
+
+def _handle_dashboard_action(
+    daemon: WorkerBeeDaemon,
+    payload: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    payload_error = payload.get("_payload_error")
+    if payload_error:
+        return 400, {"ok": False, "error": str(payload_error)}
+    token = str(payload.get("token") or "")
+    if not secrets.compare_digest(token, daemon.dashboard_action_token):
+        return 403, {"ok": False, "error": "invalid dashboard action token"}
+    action = str(payload.get("action") or "")
+    if action == "start_projects":
+        result = daemon.start_projects(_dashboard_project_names(payload), sync_ingress=False)
+    elif action == "stop_projects":
+        result = daemon.stop_projects(_dashboard_project_names(payload), purge=False)
+    elif action == "delete_projects":
+        result = daemon.delete_projects(_dashboard_project_names(payload), sync_ingress=False)
+    elif action == "start_all_projects":
+        result = daemon.start_all_projects(sync_ingress=False)
+    elif action == "stop_all_projects":
+        result = daemon.stop_all_projects(purge=False)
+    elif action == "delete_all_projects":
+        result = daemon.delete_all_projects(sync_ingress=False)
+    elif action == "mcp_shutdown":
+        result = daemon.schedule_mcp_shutdown()
+    elif action == "mcp_reboot":
+        result = daemon.schedule_mcp_reboot()
+    else:
+        return 400, {"ok": False, "error": f"unknown dashboard action: {action}"}
+    return 200 if result.get("ok") is not False else 500, {
+        "ok": result.get("ok") is not False,
+        "action": action,
+        "result": result,
+    }
+
+
+def _empty_project_action_result(*, state_root: Path, purge: bool) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "state_root": str(state_root),
+        "purge": purge,
+        "unregistered": [],
+        "projects": [],
+        "errors": [],
+    }
+
+
+def _dashboard_project_names(payload: dict[str, Any]) -> list[str]:
+    raw = payload.get("projects")
+    if raw is None:
+        raw = payload.get("project")
+    values: list[object]
+    if isinstance(raw, list):
+        values = raw
+    elif isinstance(raw, tuple):
+        values = list(raw)
+    elif raw is None:
+        values = []
+    else:
+        values = str(raw).split(",")
+    names: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        name = project_slug(text)
+        if name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return names
 
 
 def _dashboard_url(status: dict[str, Any]) -> str | None:
@@ -728,29 +1132,38 @@ def _safe_project_mode(raw: object) -> str:
         return DEFAULT_PROJECT_MODE
 
 
-def _render_dashboard(payload: dict[str, Any]) -> str:
+def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str:
     projects = payload.get("projects") if isinstance(payload.get("projects"), list) else []
     rows = []
     for item in projects:
         if not isinstance(item, dict):
             continue
         ingress = item.get("ingress") if isinstance(item.get("ingress"), dict) else {}
+        project = _esc(item.get("project"))
         running = bool(item.get("running"))
         status = "running" if running else "stopped"
         status_class = "ok" if running else "idle"
         rows.append(
             "<tr>"
-            f"<td>{_esc(item.get('project'))}</td>"
+            f'<td><input type="checkbox" class="project-select" value="{project}" '
+            f'aria-label="Select {project}"></td>'
+            f"<td>{project}</td>"
             f'<td><span class="pill {status_class}">{_esc(item.get("mode"))} / {status}</span></td>'
             f"<td>{_esc(item.get('git_branch'))}</td>"
             f"<td>{_link(item.get('dashboard_url'))}</td>"
             f"<td>{_link(ingress.get('global_dashboard_url'))}</td>"
             f"<td>{_esc(item.get('error'))}</td>"
             f"<td>{_esc(item.get('state_dir'))}</td>"
+            '<td class="row-actions">'
+            f'<button data-action="start_projects" data-project="{project}">Start</button>'
+            f'<button data-action="stop_projects" data-project="{project}">Stop</button>'
+            f'<button class="danger" data-action="delete_projects" '
+            f'data-project="{project}">Delete</button>'
+            "</td>"
             "</tr>"
         )
     if not rows:
-        rows.append('<tr><td class="muted" colspan="7">No WorkerBee projects registered.</td></tr>')
+        rows.append('<tr><td class="muted" colspan="9">No WorkerBee projects registered.</td></tr>')
     global_dash = payload.get("global_dashboard")
     ingress_json = json.dumps(global_dash, indent=2, sort_keys=True)
     return f"""<!doctype html>
@@ -758,6 +1171,7 @@ def _render_dashboard(payload: dict[str, Any]) -> str:
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="workerbee-action-token" content="{_esc(action_token)}">
     <title>WorkerBee Projects</title>
     <style>
       :root {{
@@ -773,8 +1187,8 @@ def _render_dashboard(payload: dict[str, Any]) -> str:
       body {{
         margin: 0;
         min-height: 100vh;
-        color: var(--text);
         font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+        color: var(--text);
         overflow-x: hidden;
         background-color: #0b0f14;
         background-image:
@@ -811,23 +1225,21 @@ def _render_dashboard(payload: dict[str, Any]) -> str:
         opacity: .5;
         pointer-events: none;
       }}
-      .brand-title {{ display: flex; align-items: center; gap: 10px; }}
-      .brand-mark {{
-        display: inline-grid;
-        place-items: center;
-        width: 34px;
-        height: 34px;
-        border: 1px solid color-mix(in srgb, var(--k1s-brand-gold), transparent 28%);
-        border-radius: 999px;
-        color: var(--k1s-brand-gold);
-        background: rgba(7, 10, 14, 0.52);
-        box-shadow: 0 6px 14px rgba(0, 0, 0, .2);
-        font-size: 12px;
-        font-weight: 800;
-        letter-spacing: .02em;
+      .brand-title {{
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-size: 18px;
+        letter-spacing: .01em;
       }}
-      h1 {{ margin: 0; font-size: 18px; letter-spacing: .01em; }}
-      h2 {{ font-size: 14px; margin: 0 0 8px; opacity: .9; }}
+      .brand-logo {{
+        width: 28px;
+        height: 28px;
+        border-radius: 999px;
+        box-shadow: 0 6px 14px rgba(0, 0, 0, .2);
+      }}
+      h1 {{ margin: 0; font-size: 18px; }}
+      h2 {{ font-size: 14px; margin: 14px 4px 6px; opacity: .9; }}
       .brand-accent {{ color: var(--k1s-brand-gold); }}
       .caption {{ color: var(--muted); font-size: 13px; }}
       main {{
@@ -841,7 +1253,7 @@ def _render_dashboard(payload: dict[str, Any]) -> str:
       .card {{
         border: 1px solid var(--panel-edge);
         border-radius: 8px;
-        padding: 10px;
+        padding: 8px 10px;
         min-width: 0;
         max-width: 100%;
         overflow: hidden;
@@ -884,12 +1296,34 @@ def _render_dashboard(payload: dict[str, Any]) -> str:
         border-radius: 4px;
       }}
       pre {{ margin: 0; padding: 10px; overflow-x: auto; color: #e7edf4; }}
+      button {{
+        border: 1px solid var(--panel-edge);
+        border-radius: 6px;
+        padding: 4px 8px;
+        font: inherit;
+        font-size: 12px;
+        color: var(--text);
+        background: rgba(7, 10, 14, .42);
+        cursor: pointer;
+      }}
+      button:hover {{ border-color: var(--k1s-brand-gold); color: #ffe082; }}
+      button.danger:hover {{ border-color: rgba(244, 67, 54, .7); color: #ffcdd2; }}
+      input[type="checkbox"] {{ accent-color: var(--k1s-brand-gold); }}
+      .actions {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }}
+      .row-actions {{ display: flex; gap: 6px; white-space: nowrap; }}
+      #action-result {{ margin-top: 10px; white-space: pre-wrap; }}
       .pill {{
         display: inline-flex;
         align-items: center;
         border: 1px solid var(--panel-edge);
         border-radius: 999px;
-        padding: 2px 8px;
+        padding: 1px 6px;
+        font-size: 12px;
         background: rgba(0, 0, 0, .2);
         white-space: nowrap;
       }}
@@ -905,20 +1339,40 @@ def _render_dashboard(payload: dict[str, Any]) -> str:
   <body>
     <header>
       <div class="brand-title">
-        <span class="brand-mark">k1s</span>
+        <img class="brand-logo" alt="k1s logo" src="{DASHBOARD_LOGO_PATH}">
         <h1><span class="brand-accent">WorkerBee</span> Projects</h1>
       </div>
       <div class="caption">Global dashboard</div>
     </header>
     <main>
       <section class="card">
+        <h2>Controls</h2>
+        <div class="actions">
+          <button id="start-selected" data-action="start_projects">Start Selected</button>
+          <button id="stop-selected" data-action="stop_projects">Stop Selected</button>
+          <button id="delete-selected" class="danger" data-action="delete_projects">
+            Delete Selected
+          </button>
+          <button id="start-all" data-action="start_all_projects">Start All</button>
+          <button id="stop-all" data-action="stop_all_projects">Stop All</button>
+          <button id="delete-all" class="danger" data-action="delete_all_projects">
+            Delete All
+          </button>
+          <button id="mcp-reboot" data-action="mcp_reboot">Reboot MCP</button>
+          <button id="mcp-shutdown" class="danger" data-action="mcp_shutdown">
+            Shutdown MCP
+          </button>
+        </div>
+        <pre id="action-result" hidden></pre>
+      </section>
+      <section class="card">
         <h2>Projects</h2>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Project</th><th>Mode / Status</th><th>Git Branch</th><th>k1s Dashboard</th>
-                <th>Global</th><th>Error</th><th>State</th>
+                <th>Select</th><th>Project</th><th>Mode / Status</th><th>Git Branch</th>
+                <th>k1s Dashboard</th><th>Global</th><th>Error</th><th>State</th><th>Actions</th>
               </tr>
             </thead>
             <tbody>{''.join(rows)}</tbody>
@@ -930,20 +1384,89 @@ def _render_dashboard(payload: dict[str, Any]) -> str:
         <pre>{_esc(ingress_json)}</pre>
       </section>
     </main>
+    <script>
+      const token = document.querySelector('meta[name="workerbee-action-token"]').content;
+      const resultBox = document.getElementById('action-result');
+
+      function selectedProjects() {{
+        return Array.from(document.querySelectorAll('.project-select:checked'))
+          .map((item) => item.value)
+          .filter(Boolean);
+      }}
+
+      function confirmation(action, projects) {{
+        const count = projects.length || 'all';
+        const messages = {{
+          start_projects: `Start ${{count}} WorkerBee project(s)?`,
+          stop_projects: `Stop ${{count}} WorkerBee project(s)?`,
+          delete_projects: `Delete ${{count}} WorkerBee project(s), including state?`,
+          start_all_projects: 'Start all WorkerBee projects?',
+          stop_all_projects: 'Stop all WorkerBee projects?',
+          delete_all_projects: 'Delete all WorkerBee projects, including state?',
+          mcp_reboot: 'Reboot the WorkerBee MCP server?',
+          mcp_shutdown: 'Shutdown the WorkerBee MCP server?'
+        }};
+        return window.confirm(messages[action] || `Run ${{action}}?`);
+      }}
+
+      async function postAction(action, projects = []) {{
+        if (!confirmation(action, projects)) return;
+        resultBox.hidden = false;
+        resultBox.textContent = `Running ${{action}}...`;
+        try {{
+          const response = await fetch('/api/actions', {{
+            method: 'POST',
+            headers: {{'Content-Type': 'application/json'}},
+            body: JSON.stringify({{action, projects, token}})
+          }});
+          const payload = await response.json();
+          resultBox.textContent = JSON.stringify(payload, null, 2);
+          if (payload.ok && !action.startsWith('mcp_')) {{
+            setTimeout(() => window.location.reload(), 750);
+          }}
+        }} catch (err) {{
+          resultBox.textContent = `${{action}} request was interrupted (${{err.message}}).`;
+          if (!action.startsWith('mcp_')) {{
+            resultBox.textContent += ' Refreshing to verify current state...';
+            setTimeout(() => window.location.reload(), 1000);
+          }}
+        }}
+      }}
+
+      document.querySelectorAll('button[data-action]').forEach((button) => {{
+        button.addEventListener('click', () => {{
+          const action = button.dataset.action;
+          const project = button.dataset.project;
+          let projects = project ? [project] : [];
+          if (
+            action === 'start_projects' ||
+            action === 'stop_projects' ||
+            action === 'delete_projects'
+          ) {{
+            projects = projects.length ? projects : selectedProjects();
+            if (!projects.length) {{
+              window.alert('Select at least one WorkerBee project.');
+              return;
+            }}
+          }}
+          postAction(action, projects);
+        }});
+      }});
+    </script>
   </body>
 </html>
 """
 
 
 def _dashboard_static_asset(path: str) -> tuple[bytes, str] | None:
-    if path != DASHBOARD_BACKGROUND_PATH:
+    if path == DASHBOARD_BACKGROUND_PATH:
+        filename = "page-background-1920x1080.png"
+    elif path == DASHBOARD_LOGO_PATH:
+        filename = "k1s-logo-32.png"
+    else:
         return None
     try:
-        body = (
-            files("workerbee.assets")
-            .joinpath("dashboard", "page-background-1920x1080.png")
-            .read_bytes()
-        )
+        body = files("workerbee.assets").joinpath("dashboard", filename).read_bytes()
     except FileNotFoundError:
         return None
     return body, "image/png"

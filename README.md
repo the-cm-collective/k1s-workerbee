@@ -115,6 +115,13 @@ dashboard/Caddy ingress container. Project stacks remain controlled with
 `workerbee stop`, `workerbee project mode stop`, or the MCP project stop/reset
 tools.
 
+The global dashboard also provides token-protected local controls to start, stop,
+or delete one project, selected projects, or all known projects. Start can bring
+a saved project stack back up outside the original agent session. Delete means
+stop, purge project runtime/state, unregister the project from the global
+dashboard, and resync WorkerBee Caddy imports. The dashboard can also request
+MCP shutdown or an in-place MCP reboot.
+
 Staged deployment workflow:
 
 ```bash

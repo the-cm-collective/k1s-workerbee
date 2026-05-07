@@ -1,14 +1,18 @@
 import json
 import os
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
 from workerbee.daemon import (
     DASHBOARD_BACKGROUND_PATH,
+    DASHBOARD_LOGO_PATH,
     WorkerBeeDaemon,
     _dashboard_static_asset,
+    _handle_dashboard_action,
     _render_dashboard,
 )
+from workerbee.http import request
 from workerbee.ingress import GlobalIngress, GlobalIngressInfo, global_ingress_status
 from workerbee.k1s_runtime import K1sRuntime
 
@@ -64,12 +68,22 @@ def test_global_dashboard_uses_k1s_visual_style() -> None:
                 }
             ],
             "global_dashboard": {"enabled": True, "runtime": "containerd"},
-        }
+        },
+        action_token="test-token",  # noqa: S106
     )
 
     assert "WorkerBee Projects" in html
     assert "brand-accent" in html
     assert 'class="card"' in html
+    assert 'name="workerbee-action-token" content="test-token"' in html
+    assert 'class="project-select"' in html
+    assert 'data-action="start_projects"' in html
+    assert 'data-action="delete_projects"' in html
+    assert 'data-action="start_all_projects"' in html
+    assert 'data-action="mcp_reboot"' in html
+    assert f'class="brand-logo" alt="k1s logo" src="{DASHBOARD_LOGO_PATH}"' in html
+    assert "font-size: 18px" in html
+    assert "font-size: 13px" in html
     assert DASHBOARD_BACKGROUND_PATH in html
     assert "alpha" in html
     assert "eager / running" in html
@@ -77,8 +91,253 @@ def test_global_dashboard_uses_k1s_visual_style() -> None:
     assert "&quot;runtime&quot;: &quot;containerd&quot;" in html
 
 
+def test_dashboard_action_rejects_missing_or_wrong_token(tmp_path: Path) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
+
+    missing_status, missing = _handle_dashboard_action(
+        daemon,
+        {"action": "stop_all_projects"},
+    )
+    wrong_status, wrong = _handle_dashboard_action(
+        daemon,
+        {"action": "stop_all_projects", "token": "wrong"},
+    )
+
+    assert missing_status == 403
+    assert missing["ok"] is False
+    assert wrong_status == 403
+    assert wrong["ok"] is False
+
+
+def test_stop_projects_preserves_registry(tmp_path: Path, monkeypatch) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
+    daemon._register_project("alpha", cwd_hint="/var/lib/workerbee/alpha")  # noqa: SLF001
+    stops: list[tuple[str, bool]] = []
+
+    class FakeSupervisor:
+        def __init__(self, project: str) -> None:
+            self.project = project
+
+        def stop(self, *, purge: bool = False) -> dict[str, object]:
+            stops.append((self.project, purge))
+            return {"ok": True, "purged": purge}
+
+    def fake_build_supervisor(name: str, *, ingress=None) -> FakeSupervisor:
+        _ = ingress
+        return FakeSupervisor(name)
+
+    monkeypatch.setattr(daemon, "_build_supervisor", fake_build_supervisor)
+
+    result = daemon.stop_projects(["alpha"], purge=False)
+
+    assert result["ok"] is True
+    assert stops == [("alpha", False)]
+    assert "alpha" in daemon._read_registry()  # noqa: SLF001
+
+
+def test_delete_projects_purges_and_unregisters_successes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
+    daemon._register_project("alpha", cwd_hint="/var/lib/workerbee/alpha")  # noqa: SLF001
+    daemon._register_project("beta", cwd_hint="/var/lib/workerbee/beta")  # noqa: SLF001
+    synced: list[bool] = []
+
+    class FakeSupervisor:
+        def __init__(self, project: str) -> None:
+            self.project = project
+            self.state_dir = daemon.projects_dir / project
+
+        def stop(self, *, purge: bool = False) -> dict[str, object]:
+            if purge and self.state_dir.exists():
+                shutil.rmtree(self.state_dir)
+            if self.project == "beta":
+                return {"ok": False, "purged": purge, "error": "failed"}
+            return {"ok": True, "purged": purge}
+
+    def fake_build_supervisor(name: str, *, ingress=None) -> FakeSupervisor:
+        _ = ingress
+        return FakeSupervisor(name)
+
+    monkeypatch.setattr(daemon, "_build_supervisor", fake_build_supervisor)
+    monkeypatch.setattr(daemon, "_sync_ingress_projects", lambda: synced.append(True))
+
+    result = daemon.delete_projects(["alpha", "beta"])
+    records = daemon._read_registry()  # noqa: SLF001
+
+    assert result["ok"] is False
+    assert result["unregistered"] == ["alpha"]
+    assert "alpha" not in records
+    assert "beta" in records
+    assert synced == [True]
+
+
+def test_dashboard_start_projects_schedules_ingress_sync_after_response(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
+    daemon._register_project(  # noqa: SLF001
+        "alpha",
+        cwd_hint="/var/lib/workerbee/alpha",
+        mode="stop",
+    )
+    daemon.ingress = object()  # type: ignore[assignment]
+    scheduled: list[object] = []
+    synced: list[bool] = []
+    starts: list[str] = []
+    daemon.configure_dashboard_lifecycle(scheduler=scheduled.append)
+
+    class FakeInfo:
+        dashboard_url = "http://127.0.0.1:19108/dashboard"
+
+        def public_dict(self) -> dict[str, object]:
+            return {"dashboard_url": self.dashboard_url}
+
+    class FakeSupervisor:
+        def __init__(self, project: str) -> None:
+            self.project = project
+            self.cwd = tmp_path / "checkout"
+
+        def status(self) -> dict[str, object]:
+            return {"running": False}
+
+        def start(self) -> FakeInfo:
+            starts.append(self.project)
+            return FakeInfo()
+
+    def fake_build_supervisor(name: str, *, ingress=None) -> FakeSupervisor:
+        _ = ingress
+        return FakeSupervisor(name)
+
+    monkeypatch.setattr(daemon, "_build_supervisor", fake_build_supervisor)
+    monkeypatch.setattr(daemon, "_project_ingress", lambda _name: None)
+    monkeypatch.setattr(daemon, "_sync_ingress_projects", lambda: synced.append(True))
+
+    status, payload = _handle_dashboard_action(
+        daemon,
+        {
+            "action": "start_projects",
+            "projects": ["alpha"],
+            "token": daemon.dashboard_action_token,
+        },
+    )
+
+    assert status == 200
+    assert payload["ok"] is True
+    assert starts == ["alpha"]
+    assert daemon.project_mode("alpha") == "start"
+    assert payload["result"]["ingress_sync"] == {"scheduled": True, "synced": False}
+    assert len(scheduled) == 1
+    assert synced == []
+
+    scheduled[0]()
+
+    assert synced == [True]
+
+
+def test_dashboard_delete_projects_schedules_ingress_sync_after_response(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
+    daemon._register_project("alpha", cwd_hint="/var/lib/workerbee/alpha")  # noqa: SLF001
+    daemon.ingress = object()  # type: ignore[assignment]
+    scheduled: list[object] = []
+    synced: list[bool] = []
+    daemon.configure_dashboard_lifecycle(scheduler=scheduled.append)
+
+    class FakeSupervisor:
+        cwd = tmp_path
+
+        def stop(self, *, purge: bool = False) -> dict[str, object]:
+            return {"ok": True, "purged": purge}
+
+    def fake_build_supervisor(name: str, *, ingress=None) -> FakeSupervisor:
+        _ = (name, ingress)
+        return FakeSupervisor()
+
+    monkeypatch.setattr(daemon, "_build_supervisor", fake_build_supervisor)
+    monkeypatch.setattr(daemon, "_project_ingress", lambda _name: None)
+    monkeypatch.setattr(daemon, "_sync_ingress_projects", lambda: synced.append(True))
+
+    status, payload = _handle_dashboard_action(
+        daemon,
+        {
+            "action": "delete_projects",
+            "projects": ["alpha"],
+            "token": daemon.dashboard_action_token,
+        },
+    )
+
+    assert status == 200
+    assert payload["ok"] is True
+    assert payload["result"]["unregistered"] == ["alpha"]
+    assert payload["result"]["ingress_sync"] == {"scheduled": True, "synced": False}
+    assert len(scheduled) == 1
+    assert synced == []
+
+    scheduled[0]()
+
+    assert synced == [True]
+
+
+def test_dashboard_actions_schedule_mcp_lifecycle_without_running_callbacks(
+    tmp_path: Path,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
+    scheduled: list[object] = []
+    called: list[str] = []
+    daemon.configure_dashboard_lifecycle(
+        shutdown=lambda: called.append("shutdown"),
+        reboot=lambda: called.append("reboot"),
+        scheduler=scheduled.append,
+    )
+
+    shutdown_status, shutdown = _handle_dashboard_action(
+        daemon,
+        {"action": "mcp_shutdown", "token": daemon.dashboard_action_token},
+    )
+    reboot_status, reboot = _handle_dashboard_action(
+        daemon,
+        {"action": "mcp_reboot", "token": daemon.dashboard_action_token},
+    )
+
+    assert shutdown_status == 200
+    assert reboot_status == 200
+    assert shutdown["result"]["scheduled"] is True
+    assert reboot["result"]["scheduled"] is True
+    assert len(scheduled) == 2
+    assert called == []
+
+
+def test_global_dashboard_healthz_is_lightweight(tmp_path: Path) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
+    port = daemon._start_dashboard_server()  # noqa: SLF001
+    try:
+        result = request(f"http://127.0.0.1:{port}/healthz", timeout=2.0)
+    finally:
+        assert daemon._dashboard is not None  # noqa: SLF001
+        daemon._dashboard.shutdown()  # noqa: SLF001
+        daemon._dashboard.server_close()  # noqa: SLF001
+
+    assert result.status == 200
+    assert result.json()["ok"] is True
+    assert result.json()["state_root"] == str(tmp_path.resolve())
+
+
 def test_global_dashboard_static_background_asset_is_packaged() -> None:
     asset = _dashboard_static_asset(DASHBOARD_BACKGROUND_PATH)
+
+    assert asset is not None
+    body, content_type = asset
+    assert content_type == "image/png"
+    assert body.startswith(b"\x89PNG\r\n\x1a\n")
+
+
+def test_global_dashboard_static_logo_asset_is_packaged() -> None:
+    asset = _dashboard_static_asset(DASHBOARD_LOGO_PATH)
 
     assert asset is not None
     body, content_type = asset

@@ -6,6 +6,7 @@ from typing import Any
 
 from workerbee.mcp_daemon import (
     MCPDaemonConfig,
+    _dashboard_health_url,
     _wait_ready,
     mcp_daemon_status,
     start_mcp_daemon,
@@ -113,6 +114,39 @@ def test_wait_ready_raises_when_child_exits(
         assert "exited early" in str(exc)
     else:
         raise AssertionError("expected _wait_ready to fail when child exits")
+
+
+def test_wait_ready_probes_dashboard_health_endpoint(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, runtime="podman", port=9876)
+    urls: list[str] = []
+    monkeypatch.setattr("workerbee.mcp_daemon._raise_if_dead", lambda _config: None)
+    monkeypatch.setattr("workerbee.mcp_daemon._daemon_process_ready", lambda _config: True)
+    monkeypatch.setattr("workerbee.mcp_daemon._tcp_ready", lambda _host, _port: True)
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.load_global_ingress_info",
+        lambda _root: {"dashboard_url": "https://dashboard.workerbee.localhost:19443/"},
+    )
+
+    def fake_request(url: str, **_kwargs):
+        urls.append(url)
+        return object()
+
+    monkeypatch.setattr("workerbee.mcp_daemon.request", fake_request)
+
+    result = _wait_ready(config, timeout=1)
+
+    assert result["dashboard_url"] == "https://dashboard.workerbee.localhost:19443/"
+    assert urls == ["https://dashboard.workerbee.localhost:19443/healthz"]
+
+
+def test_dashboard_health_url_normalizes_trailing_slash() -> None:
+    assert (
+        _dashboard_health_url("https://dashboard.workerbee.localhost:19443/")
+        == "https://dashboard.workerbee.localhost:19443/healthz"
+    )
 
 
 def test_start_mcp_daemon_transfers_containerd_helper_env_to_child(

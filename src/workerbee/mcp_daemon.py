@@ -291,7 +291,7 @@ def _wait_ready(config: MCPDaemonConfig, *, timeout: float) -> dict[str, Any]:
             dashboard_url = str(ingress.get("dashboard_url") or "")
             if dashboard_url:
                 try:
-                    request(dashboard_url, timeout=2.0, verify_tls=False)
+                    request(_dashboard_health_url(dashboard_url), timeout=2.0, verify_tls=False)
                     _raise_if_dead(config)
                     return {
                         "dashboard_url": dashboard_url,
@@ -302,6 +302,10 @@ def _wait_ready(config: MCPDaemonConfig, *, timeout: float) -> dict[str, Any]:
                     pass
         time.sleep(0.25)
     raise TimeoutError(f"WorkerBee MCP did not become ready at {config.mcp_url}")
+
+
+def _dashboard_health_url(dashboard_url: str) -> str:
+    return f"{dashboard_url.rstrip('/')}/healthz"
 
 
 def _raise_if_dead(config: MCPDaemonConfig) -> None:

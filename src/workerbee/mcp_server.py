@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import signal
+import sys
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +59,23 @@ def serve_mcp(
         state_root=state_root or state_dir,
         runtime=runtime,
         default_project=project,
+    )
+    metadata_file = (state_root or state_dir or default_state_root()).resolve() / (
+        "global/mcp-daemon.json"
+    )
+    daemon.configure_dashboard_lifecycle(
+        shutdown=lambda: _request_mcp_shutdown(metadata_file),
+        reboot=lambda: _request_mcp_reboot(
+            _serve_exec_argv(
+                project=project,
+                runtime=runtime,
+                host=host,
+                port=port,
+                state_dir=state_dir,
+                state_root=state_root,
+                containerd_privilege=containerd_privilege,
+            )
+        ),
     )
     try:
         with temporary_containerd_privilege_env(privilege_env):
@@ -421,12 +441,58 @@ def _release_foreground_privilege(
     stop_stacks: bool,
 ) -> None:
     helper = privilege.get("helper") if isinstance(privilege, dict) else None
-    if not isinstance(helper, dict) or not helper.get("started"):
-        return
     with temporary_containerd_privilege_env(privilege_env):
-        if stop_stacks:
+        if stop_stacks and isinstance(helper, dict) and helper.get("started"):
             cleanup = daemon.stop_all_projects(purge=False)
             ingress_cleanup = daemon.stop_global_ingress()
             if not bool(cleanup.get("ok")) or not bool(ingress_cleanup.get("ok")):
                 return
+        elif stop_stacks:
+            daemon.stop_global_ingress()
+        if not isinstance(helper, dict) or not helper.get("started"):
+            return
         stop_containerd_helper(daemon.state_root)
+
+
+def _serve_exec_argv(
+    *,
+    project: str,
+    runtime: str,
+    host: str,
+    port: int,
+    state_dir: Path | None,
+    state_root: Path | None,
+    containerd_privilege: str,
+) -> list[str]:
+    argv = [sys.executable, "-m", "workerbee"]
+    if state_root is not None:
+        argv.extend(["--state-root", str(state_root)])
+    elif state_dir is not None:
+        argv.extend(["--state-dir", str(state_dir)])
+    argv.extend(
+        [
+            "--runtime",
+            runtime,
+            "--containerd-privilege",
+            containerd_privilege,
+            "--project",
+            project,
+            "mcp",
+            "serve",
+            "--host",
+            host,
+            "--port",
+            str(port),
+        ]
+    )
+    return argv
+
+
+def _request_mcp_shutdown(metadata_file: Path) -> None:
+    with suppress(OSError):
+        metadata_file.unlink()
+    os.kill(os.getpid(), signal.SIGINT)
+
+
+def _request_mcp_reboot(argv: list[str]) -> None:
+    os.execvpe(sys.executable, argv, os.environ.copy())  # noqa: S606
