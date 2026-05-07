@@ -109,6 +109,33 @@ def test_containerd_privilege_status_command_parses_global_policy(tmp_path: Path
     assert args.containerd_privilege == "unprivileged"
 
 
+def test_profile_start_parses_direct_containerd_shape(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--state-root",
+            str(tmp_path),
+            "--runtime",
+            "containerd",
+            "--project",
+            "k1s-dev",
+            "profile",
+            "start",
+            "--profile",
+            "k1s-ha-min",
+            "--k1s-root",
+            str(tmp_path / "k1s"),
+            "--timeout",
+            "30",
+        ]
+    )
+
+    assert args.cmd == "profile"
+    assert args.profile_cmd == "start"
+    assert args.profile == "k1s-ha-min"
+    assert args.k1s_root == tmp_path / "k1s"
+    assert args.timeout == 30
+
+
 def test_print_returns_failure_for_structured_error(capsys) -> None:
     rc = cli._print({"ok": False, "error": {"code": "MCP_PORT_IN_USE"}}, json_out=True)
 

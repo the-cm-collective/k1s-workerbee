@@ -2,7 +2,7 @@
 
 WorkerBee is a local MCP workbench for running lightweight k1s stacks while agents build and test cloud-native applications.
 
-The current POC can use an installed `k1s-workerbee-runtime` wheel or a sibling `../k1s` checkout without modifying k1s. It starts host-process controllers and API shims, exposes project dashboards, provides a global MCP dashboard, deploys a representative native k1s app stack, exposes app ingress through local HTTPS, and exports Kubernetes YAML artifacts.
+The current POC can use an installed `k1s-workerbee-runtime` wheel or a sibling `../k1s` checkout without modifying k1s. The default app-stack workflow starts a lightweight local k1s workbench, exposes project dashboards, provides a global MCP dashboard, deploys a representative native k1s app stack, exposes app ingress through local HTTPS, and exports Kubernetes YAML artifacts. Advanced k1s profile workflows are direct-containerd only and containerize every k1s profile component.
 
 ## Quickstart
 
@@ -150,6 +150,27 @@ For container-orchestration development where Podman or Docker would interfere w
 ```bash
 workerbee --runtime containerd --containerd-privilege sudo-helper mcp start
 ```
+
+Containerized k1s profiles are only available in this direct-containerd mode. They are intended for advanced k1s development, not ordinary app-stack use. WorkerBee currently ships these built-in profiles:
+
+```text
+k1s-dev-min-sqlite          1 controller + API shim/dashboard + sqlite
+k1s-dev-etcd-labs           1 controller + API shim/dashboard + etcd
+k1s-single-etcd-containerd  1 controller + API shim/dashboard + etcd + direct containerd workloads
+k1s-ha-min                  3 controllers + API shim/dashboard + shared etcd + shared NATS
+```
+
+No k1s profile starts a k1s controller, API shim, etcd, NATS, or dashboard as a host process. Use:
+
+```bash
+workerbee --runtime containerd profile list
+workerbee --runtime containerd --project k1s-dev profile start --profile k1s-ha-min --k1s-root ../k1s
+workerbee --runtime containerd --project k1s-dev profile status
+workerbee --runtime containerd --project k1s-dev validate --scenario k1s-profile --profile k1s-ha-min --k1s-root ../k1s
+workerbee --runtime containerd --project k1s-dev profile stop --purge
+```
+
+When run through the MCP daemon, profile dashboard/API ingress is published under the project namespace, for example `https://k1s-dash.k1s-dev.workerbee.localhost:19443/dashboard` and `https://k1s-api.k1s-dev.workerbee.localhost:19443/`.
 
 This path uses `nerdctl` against the configured containerd socket, but scopes WorkerBee work into state-root-hashed namespaces such as `workerbee-<state-hash>-system` and `workerbee-<state-hash>-<project>`. It also uses state-local nerdctl data roots, state-local CNI config directories, and state-hash-scoped project networks. WorkerBee must never target reserved namespaces such as `ae`, `k8s.io`, `moby`, or `default`; those may belong to a real k1s/Kubernetes runtime on the same host.
 

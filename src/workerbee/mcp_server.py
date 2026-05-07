@@ -189,6 +189,74 @@ def serve_mcp(
         )
 
     @mcp.tool()
+    def workerbee_v1_profile_list() -> dict[str, Any]:
+        """List built-in direct-containerd k1s profiles."""
+        return protect("ProfileList", None, daemon.profile_list)
+
+    @mcp.tool()
+    def workerbee_v1_profile_start(
+        profile: str,
+        project: str = "default",
+        k1s_root: str | None = None,
+        timeout: float = 180.0,
+    ) -> dict[str, Any]:
+        """Start a containerized k1s profile. Requires WorkerBee direct containerd."""
+        return protect(
+            "ProfileStart",
+            project,
+            lambda: daemon.profile_start(
+                profile=profile,
+                project=project,
+                k1s_root=k1s_root,
+                timeout=timeout,
+            ),
+        )
+
+    @mcp.tool()
+    def workerbee_v1_profile_status(
+        project: str = "default",
+        k1s_root: str | None = None,
+    ) -> dict[str, Any]:
+        """Return status for a containerized k1s profile."""
+        return protect(
+            "ProfileStatus",
+            project,
+            lambda: daemon.profile_status(project=project, k1s_root=k1s_root),
+        )
+
+    @mcp.tool()
+    def workerbee_v1_profile_stop(
+        purge: bool = False,
+        project: str = "default",
+        k1s_root: str | None = None,
+    ) -> dict[str, Any]:
+        """Stop a containerized k1s profile and optionally purge profile state."""
+        return protect(
+            "ProfileStop",
+            project,
+            lambda: daemon.profile_stop(project=project, purge=purge, k1s_root=k1s_root),
+        )
+
+    @mcp.tool()
+    def workerbee_v1_profile_validate(
+        profile: str,
+        project: str = "default",
+        k1s_root: str | None = None,
+        timeout: float = 180.0,
+    ) -> dict[str, Any]:
+        """Run validation for a containerized k1s profile."""
+        return protect(
+            "ProfileValidate",
+            project,
+            lambda: daemon.profile_validate(
+                profile=profile,
+                project=project,
+                k1s_root=k1s_root,
+                timeout=timeout,
+            ),
+        )
+
+    @mcp.tool()
     def workerbee_v1_logs(
         app: str = "api",
         tail: int = 80,

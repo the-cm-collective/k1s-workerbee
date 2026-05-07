@@ -35,6 +35,7 @@ from workerbee.locks import FileLock, project_lock_path, state_root_lock_path
 from workerbee.paths import daemon_project_state_dir, default_state_root
 from workerbee.ports import choose_port
 from workerbee.probe import build_probe_url, probe_workerbee_url
+from workerbee.profiles import K1sProfileRunner, builtin_profiles
 from workerbee.runtime_support import (
     cleanup_runtime,
     resolve_runtime,
@@ -417,6 +418,87 @@ class WorkerBeeDaemon:
         status["mode"] = self.project_mode(name)
         return status
 
+    def profile_list(self) -> dict[str, Any]:
+        return builtin_profiles()
+
+    def profile_start(
+        self,
+        *,
+        profile: str,
+        project: str | None = None,
+        k1s_root: str | Path | None = None,
+        timeout: float = 180.0,
+    ) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+        with self._project_lock(name):
+            file_lock = FileLock(project_lock_path(self.state_root, name), label=f"project {name}")
+            with file_lock:
+                self._register_project(name, cwd_hint=str(self._project_cwd(name)))
+                result = self._profile_runner(name, k1s_root=k1s_root).start(
+                    profile=profile,
+                    timeout=timeout,
+                )
+                ingress_sync = self._sync_ingress_projects_result()
+                self._register_project(name, cwd_hint=str(self._project_cwd(name)))
+                return {
+                    **result,
+                    "project": name,
+                    "ingress_sync": ingress_sync,
+                }
+
+    def profile_status(
+        self,
+        *,
+        project: str | None = None,
+        k1s_root: str | Path | None = None,
+    ) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+        self._register_project(name, cwd_hint=str(self._project_cwd(name)))
+        return self._profile_runner(name, k1s_root=k1s_root).status()
+
+    def profile_stop(
+        self,
+        *,
+        project: str | None = None,
+        purge: bool = False,
+        k1s_root: str | Path | None = None,
+    ) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+        with self._project_lock(name):
+            file_lock = FileLock(project_lock_path(self.state_root, name), label=f"project {name}")
+            with file_lock:
+                result = self._profile_runner(name, k1s_root=k1s_root).stop(purge=purge)
+                ingress_sync = self._sync_ingress_projects_result()
+                return {
+                    **result,
+                    "project": name,
+                    "ingress_sync": ingress_sync,
+                }
+
+    def profile_validate(
+        self,
+        *,
+        profile: str,
+        project: str | None = None,
+        k1s_root: str | Path | None = None,
+        timeout: float = 180.0,
+    ) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+        with self._project_lock(name):
+            file_lock = FileLock(project_lock_path(self.state_root, name), label=f"project {name}")
+            with file_lock:
+                self._register_project(name, cwd_hint=str(self._project_cwd(name)))
+                result = self._profile_runner(name, k1s_root=k1s_root).validate(
+                    profile=profile,
+                    timeout=timeout,
+                )
+                ingress_sync = self._sync_ingress_projects_result()
+                return {
+                    **result,
+                    "project": name,
+                    "ingress_sync": ingress_sync,
+                }
+
     def capabilities(self) -> dict[str, Any]:
         from workerbee import __version__
         from workerbee.contract import API_VERSION, MCP_TOOL_NAMES
@@ -454,6 +536,11 @@ class WorkerBeeDaemon:
                 },
             },
             "bundle_formats": ["k1s", "k8s", "helm"],
+            "k1s_profiles": {
+                "runtime_requirement": "containerd",
+                "host_k1s_processes": False,
+                "profiles": [item["name"] for item in builtin_profiles()["profiles"]],
+            },
             "runtime": runtime_diagnostics(self.runtime_requested, state_root=self.state_root),
             "containerd_privilege": containerd_privilege_status(
                 state_root=self.state_root,
@@ -704,6 +791,22 @@ class WorkerBeeDaemon:
         if self.ingress is None:
             return None
         return self.ingress.project_config(project)
+
+    def _profile_runner(
+        self,
+        project: str,
+        *,
+        k1s_root: str | Path | None = None,
+    ) -> K1sProfileRunner:
+        root = Path(k1s_root).expanduser().resolve() if k1s_root is not None else None
+        return K1sProfileRunner(
+            project=project,
+            state_root=self.state_root,
+            runtime=self.runtime_requested,
+            cwd=self._project_cwd(project),
+            k1s_root=root,
+            ingress=self._project_ingress(project),
+        )
 
     def _known_projects(self) -> list[str]:
         project_names = set(self._read_registry())

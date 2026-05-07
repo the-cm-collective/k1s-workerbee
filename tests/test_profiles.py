@@ -1,0 +1,194 @@
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from workerbee.contract import MCP_TOOL_NAMES, WorkerBeeError
+from workerbee.ingress import ProjectIngressConfig
+from workerbee.profiles import K1sProfileRunner, builtin_profiles
+
+
+def test_builtin_profiles_are_direct_containerd_only() -> None:
+    result = builtin_profiles()
+
+    assert result["runtime_requirement"] == "containerd"
+    assert result["host_k1s_processes"] is False
+    names = {item["name"] for item in result["profiles"]}
+    assert names == {
+        "k1s-dev-min-sqlite",
+        "k1s-dev-etcd-labs",
+        "k1s-single-etcd-containerd",
+        "k1s-ha-min",
+    }
+    assert "workerbee_v1_profile_start" in MCP_TOOL_NAMES
+    assert "workerbee_v1_profile_validate" in MCP_TOOL_NAMES
+
+
+def test_profile_runner_rejects_non_containerd_runtime(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("workerbee.profiles.resolve_runtime", lambda _runtime: "docker")
+    runner = K1sProfileRunner(
+        project="demo",
+        state_root=tmp_path,
+        runtime="docker",
+        k1s_root=tmp_path / "k1s",
+    )
+
+    with pytest.raises(WorkerBeeError) as exc:
+        runner.start(profile="k1s-dev-min-sqlite", timeout=0.01)
+
+    assert exc.value.code == "K1S_PROFILE_REQUIRES_CONTAINERD"
+
+
+def test_ha_min_starts_only_containerized_components(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("workerbee.profiles.resolve_runtime", lambda _runtime: "containerd")
+    ports = iter([12379, 19608, 18645])
+    monkeypatch.setattr("workerbee.profiles.choose_port", lambda *_args, **_kwargs: next(ports))
+    monkeypatch.setattr("workerbee.profiles.wait_for_http", lambda *_args, **_kwargs: None)
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):  # noqa: ANN001
+        commands.append([str(part) for part in cmd])
+        if "network" in cmd and "inspect" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", "missing")
+        if "ps" in cmd:
+            name_filters = [
+                str(cmd[index + 1]).removeprefix("name=")
+                for index, value in enumerate(cmd[:-1])
+                if value == "--filter" and str(cmd[index + 1]).startswith("name=")
+            ]
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "\n".join(name_filters) + ("\n" if name_filters else ""),
+                "",
+            )
+        if "run" in cmd:
+            name = cmd[cmd.index("--name") + 1]
+            return subprocess.CompletedProcess(cmd, 0, f"{name}-id\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("workerbee.profiles.subprocess.run", fake_run)
+
+    runner = K1sProfileRunner(
+        project="HA Demo",
+        state_root=tmp_path,
+        runtime="containerd",
+        k1s_root=tmp_path / "k1s",
+    )
+    result = runner.start(profile="k1s-ha-min", timeout=0.01)
+
+    assert result["ok"] is True
+    profile = result["profile"]
+    assert profile["profile"] == "k1s-ha-min"
+    assert profile["runtime"] == "containerd"
+    assert len(profile["components"]) == 6
+    roles = [component["role"] for component in profile["components"]]
+    assert roles == ["etcd", "nats", "apishim", "controller", "controller", "controller"]
+    run_commands = [cmd for cmd in commands if "run" in cmd]
+    assert len(run_commands) == 6
+    assert all("--network" in cmd for cmd in run_commands)
+    assert not any("ae.controller" in " ".join(cmd[: cmd.index("run")]) for cmd in run_commands)
+
+
+def test_profile_status_reads_recorded_components(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("workerbee.profiles.resolve_runtime", lambda _runtime: "containerd")
+    monkeypatch.setattr("workerbee.profiles.wait_for_http", lambda *_args, **_kwargs: None)
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):  # noqa: ANN001
+        commands.append([str(part) for part in cmd])
+        if "network" in cmd and "inspect" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "run" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "container-id\n", "")
+        if "ps" in cmd:
+            name_filters = [
+                str(cmd[index + 1]).removeprefix("name=")
+                for index, value in enumerate(cmd[:-1])
+                if value == "--filter" and str(cmd[index + 1]).startswith("name=")
+            ]
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "\n".join(name_filters) + ("\n" if name_filters else ""),
+                "",
+            )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("workerbee.profiles.subprocess.run", fake_run)
+    runner = K1sProfileRunner(
+        project="demo",
+        state_root=tmp_path,
+        runtime="containerd",
+        k1s_root=tmp_path / "k1s",
+    )
+
+    runner.start(profile="k1s-dev-min-sqlite", timeout=0.01)
+    status = runner.status()
+
+    assert status["running"] is True
+    assert status["profile"]["profile"] == "k1s-dev-min-sqlite"
+    assert [item["role"] for item in status["components"]] == ["apishim", "controller"]
+
+
+def test_existing_profile_start_refreshes_ingress_routes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("workerbee.profiles.resolve_runtime", lambda _runtime: "containerd")
+    monkeypatch.setattr("workerbee.profiles.wait_for_http", lambda *_args, **_kwargs: None)
+
+    def fake_run(cmd, **_kwargs):  # noqa: ANN001
+        if "network" in cmd and "inspect" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "run" in cmd:
+            name = cmd[cmd.index("--name") + 1]
+            return subprocess.CompletedProcess(cmd, 0, f"{name}-id\n", "")
+        if "ps" in cmd:
+            name_filters = [
+                str(cmd[index + 1]).removeprefix("name=")
+                for index, value in enumerate(cmd[:-1])
+                if value == "--filter" and str(cmd[index + 1]).startswith("name=")
+            ]
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "\n".join(name_filters) + ("\n" if name_filters else ""),
+                "",
+            )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("workerbee.profiles.subprocess.run", fake_run)
+    runner = K1sProfileRunner(
+        project="demo",
+        state_root=tmp_path,
+        runtime="containerd",
+        k1s_root=tmp_path / "k1s",
+    )
+
+    first = runner.start(profile="k1s-dev-min-sqlite", timeout=0.01)
+    assert first["profile"]["ingress_urls"] == {}
+
+    runner.ingress = ProjectIngressConfig(
+        project="demo",
+        domain="demo.workerbee.localhost",
+        https_port=19443,
+        sites_dir=tmp_path / "global" / "caddy-sites" / "demo",
+        caddy_container="workerbee-caddy-test",
+        caddy_file="/etc/caddy/Caddyfile",
+        host_alias="host.docker.internal",
+        ca_bundle=tmp_path / "global" / "caddy-local-root.crt",
+        global_dashboard_url="https://dashboard.workerbee.localhost:19443/",
+    )
+    second = runner.start(profile="k1s-dev-min-sqlite", timeout=0.01)
+
+    assert second["started"] is False
+    assert second["profile"]["ingress_urls"]["dashboard"] == (
+        "https://k1s-dash.demo.workerbee.localhost:19443/dashboard"
+    )
+    assert (tmp_path / "global" / "caddy-sites" / "demo" / "k1s-profile.caddy").is_file()

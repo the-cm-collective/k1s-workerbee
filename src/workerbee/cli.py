@@ -87,6 +87,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("status", help="Show WorkerBee stack status")
     sub.add_parser("projects", help="List WorkerBee daemon projects")
+    profile = sub.add_parser(
+        "profile",
+        help="Manage advanced direct-containerd k1s profiles",
+    )
+    profile_sub = profile.add_subparsers(dest="profile_cmd", required=True)
+    profile_sub.add_parser("list", help="List built-in k1s profiles")
+    profile_start = profile_sub.add_parser("start", help="Start a containerized k1s profile")
+    profile_start.add_argument("--profile", required=True)
+    profile_start.add_argument("--k1s-root", type=Path, default=None)
+    profile_start.add_argument("--timeout", type=float, default=180.0)
+    profile_status = profile_sub.add_parser("status", help="Show k1s profile status")
+    profile_status.add_argument("--k1s-root", type=Path, default=None)
+    profile_stop = profile_sub.add_parser("stop", help="Stop a containerized k1s profile")
+    profile_stop.add_argument("--k1s-root", type=Path, default=None)
+    profile_stop.add_argument("--purge", action="store_true")
+    validate = sub.add_parser("validate", help="Run WorkerBee validation scenarios")
+    validate.add_argument("--scenario", choices=["k1s-profile"], required=True)
+    validate.add_argument("--profile", required=True)
+    validate.add_argument("--k1s-root", type=Path, default=None)
+    validate.add_argument("--timeout", type=float, default=180.0)
     project = sub.add_parser("project", help="Manage daemon project policy")
     project_sub = project.add_subparsers(dest="project_cmd", required=True)
     project_mode = project_sub.add_parser("mode", help="Set project mode: start, lazy, or stop")
@@ -252,6 +272,62 @@ def main(argv: list[str] | None = None) -> int:
         if args.cmd == "projects":
             daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime, cwd=args.cwd)
             return _print(daemon.projects(), json_out=args.json)
+        if args.cmd == "profile":
+            daemon = WorkerBeeDaemon(
+                state_root=args.state_root,
+                runtime=args.runtime,
+                default_project=args.project or "default",
+                cwd=args.cwd,
+            )
+            if args.profile_cmd == "list":
+                return _print(daemon.profile_list(), json_out=args.json)
+            privilege = ensure_containerd_privilege(
+                state_root=args.state_root or default_state_root(),
+                runtime=args.runtime,
+                mode=containerd_privilege,
+            )
+            with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
+                if args.profile_cmd == "start":
+                    result = daemon.profile_start(
+                        profile=args.profile,
+                        project=args.project,
+                        k1s_root=args.k1s_root,
+                        timeout=args.timeout,
+                    )
+                elif args.profile_cmd == "status":
+                    result = daemon.profile_status(project=args.project, k1s_root=args.k1s_root)
+                elif args.profile_cmd == "stop":
+                    result = daemon.profile_stop(
+                        project=args.project,
+                        purge=args.purge,
+                        k1s_root=args.k1s_root,
+                    )
+                else:
+                    result = {"ok": False, "error": f"unknown profile command: {args.profile_cmd}"}
+                result["containerd_privilege"] = privilege
+                return _print(result, json_out=args.json)
+        if args.cmd == "validate":
+            daemon = WorkerBeeDaemon(
+                state_root=args.state_root,
+                runtime=args.runtime,
+                default_project=args.project or "default",
+                cwd=args.cwd,
+            )
+            if args.scenario == "k1s-profile":
+                privilege = ensure_containerd_privilege(
+                    state_root=args.state_root or default_state_root(),
+                    runtime=args.runtime,
+                    mode=containerd_privilege,
+                )
+                with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
+                    result = daemon.profile_validate(
+                        profile=args.profile,
+                        project=args.project,
+                        k1s_root=args.k1s_root,
+                        timeout=args.timeout,
+                    )
+                    result["containerd_privilege"] = privilege
+                    return _print(result, json_out=args.json)
         if args.cmd == "project":
             cwd = args.project_cwd or args.cwd or Path.cwd()
             project = args.project_name or args.project or derive_session_project(cwd)
