@@ -14,6 +14,7 @@ from workerbee.runtime_support import (
     containerd_namespace,
     containerd_nerdctl_probe,
     containerd_network_name,
+    containerd_network_subnet,
     containerd_safety_info,
     runtime_command_args,
     write_containerd_cli_wrapper,
@@ -38,6 +39,8 @@ def test_containerd_runtime_scopes_project_namespace_and_data_root(tmp_path: Pat
         tmp_path / "global" / "containerd-cni-net.d"
     )
     assert containerd_network_name(tmp_path, "My App") == f"workerbee-{state_hash}-my-app"
+    assert containerd_network_subnet(tmp_path, "My App").startswith("10.")
+    assert containerd_network_subnet(tmp_path, "My App").endswith(".0/24")
 
 
 def test_runtime_command_args_uses_nerdctl_only_for_containerd(tmp_path: Path) -> None:

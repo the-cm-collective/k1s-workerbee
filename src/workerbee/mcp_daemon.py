@@ -22,7 +22,7 @@ from workerbee.containerd_helper import (
     temporary_containerd_privilege_env,
 )
 from workerbee.http import request
-from workerbee.ingress import load_global_ingress_info
+from workerbee.ingress import global_ingress_status, load_global_ingress_info
 from workerbee.paths import default_state_root
 from workerbee.runtime_support import CONTAINERD_RUNTIME
 
@@ -78,6 +78,20 @@ def config_from_args(
 def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[str, Any]:
     status = mcp_daemon_status(config)
     if status["running"]:
+        if config.runtime == CONTAINERD_RUNTIME:
+            privilege = ensure_containerd_privilege(
+                state_root=config.state_root,
+                runtime=config.runtime,
+                mode=config.containerd_privilege,
+            )
+            refreshed = mcp_daemon_status(config)
+            return {
+                **refreshed,
+                "ok": bool(privilege.get("ok", True)),
+                "started": False,
+                "containerd_privilege": privilege,
+                "containerd_privilege_mode": privilege.get("effective_mode"),
+            }
         return {**status, "ok": True, "started": False}
     if status.get("stale"):
         stale_stop = stop_mcp_daemon(config, timeout=5.0)
@@ -85,6 +99,15 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
             stale_stop["containerd_cleanup"].get("ok")
         ):
             return {**stale_stop, "ok": False, "started": False}
+    port_check = _mcp_port_available(config)
+    if not port_check["ok"]:
+        return {
+            **_base_status(config),
+            "ok": False,
+            "started": False,
+            "running": False,
+            "error": port_check["error"],
+        }
     config.global_dir.mkdir(parents=True, exist_ok=True)
     privilege = ensure_containerd_privilege(
         state_root=config.state_root,
@@ -164,19 +187,19 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
 def stop_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 10.0) -> dict[str, Any]:
     metadata = _read_metadata(config.metadata_file)
     if not metadata:
-        return {**_base_status(config), "running": False, "stopped": False}
+        global_ingress_stop = _stop_global_ingress(config, metadata)
+        return {
+            **_base_status(config),
+            "running": False,
+            "stopped": False,
+            "global_ingress_stop": global_ingress_stop,
+        }
     pid = _metadata_pid(metadata)
     if pid is None or not _pid_alive(pid):
         cleanup_result = _stop_containerd_state_before_helper_stop(config, metadata)
-        if bool((cleanup_result or {}).get("ok", True)):
-            helper_stop = _stop_metadata_helper(config, metadata)
-            _cleanup_stale_metadata(config)
-        else:
-            helper_stop = {
-                "ok": False,
-                "stopped": False,
-                "reason": "WorkerBee containerd cleanup failed; leaving helper running",
-            }
+        global_ingress_stop = _global_ingress_stop_result(config, metadata, cleanup_result)
+        helper_stop = _stop_metadata_helper(config, metadata)
+        _cleanup_stale_metadata(config)
         return {
             **_base_status(config),
             "running": False,
@@ -184,6 +207,7 @@ def stop_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 10.0) -> dict[s
             "stopped": False,
             "containerd_cleanup": cleanup_result,
             "containerd_helper_stop": helper_stop,
+            "global_ingress_stop": global_ingress_stop,
         }
     if not _pid_matches_metadata(pid, config, metadata):
         return {
@@ -197,17 +221,12 @@ def stop_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 10.0) -> dict[s
     stopped = not _pid_alive(pid)
     cleanup_result = None
     helper_stop = None
+    global_ingress_stop = None
     if stopped:
         cleanup_result = _stop_containerd_state_before_helper_stop(config, metadata)
-        if bool((cleanup_result or {}).get("ok", True)):
-            helper_stop = _stop_metadata_helper(config, metadata)
-        else:
-            helper_stop = {
-                "ok": False,
-                "stopped": False,
-                "reason": "WorkerBee containerd cleanup failed; leaving helper running",
-            }
-    if stopped and bool((cleanup_result or {}).get("ok", True)):
+        global_ingress_stop = _global_ingress_stop_result(config, metadata, cleanup_result)
+        helper_stop = _stop_metadata_helper(config, metadata)
+    if stopped:
         with suppress(OSError):
             config.metadata_file.unlink()
     return {
@@ -217,6 +236,7 @@ def stop_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 10.0) -> dict[s
         "pid": pid,
         "containerd_cleanup": cleanup_result,
         "containerd_helper_stop": helper_stop,
+        "global_ingress_stop": global_ingress_stop,
     }
 
 
@@ -243,9 +263,9 @@ def mcp_daemon_status(config: MCPDaemonConfig) -> dict[str, Any]:
     pid = _metadata_pid(metadata)
     running = bool(pid and _pid_alive(pid) and _pid_matches_metadata(pid, config, metadata))
     stale = bool(pid and not running)
-    ingress = load_global_ingress_info(config.state_root) or {}
     runtime = str(metadata.get("runtime") or config.runtime)
     privilege_mode = str(metadata.get("containerd_privilege_mode") or config.containerd_privilege)
+    ingress = global_ingress_status(config.state_root, runtime=runtime)
     return {
         **status,
         **metadata,
@@ -253,7 +273,7 @@ def mcp_daemon_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "running": running,
         "stale": stale,
         "dashboard_url": ingress.get("dashboard_url") or metadata.get("dashboard_url"),
-        "global_dashboard": ingress or None,
+        "global_dashboard": ingress,
         "containerd_privilege": containerd_privilege_status(
             state_root=config.state_root,
             runtime=runtime,
@@ -266,12 +286,13 @@ def _wait_ready(config: MCPDaemonConfig, *, timeout: float) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         _raise_if_dead(config)
-        if _tcp_ready(config.host, config.port):
+        if _daemon_process_ready(config) and _tcp_ready(config.host, config.port):
             ingress = load_global_ingress_info(config.state_root) or {}
             dashboard_url = str(ingress.get("dashboard_url") or "")
             if dashboard_url:
                 try:
                     request(dashboard_url, timeout=2.0, verify_tls=False)
+                    _raise_if_dead(config)
                     return {
                         "dashboard_url": dashboard_url,
                         "global_dashboard": ingress,
@@ -290,12 +311,69 @@ def _raise_if_dead(config: MCPDaemonConfig) -> None:
         raise RuntimeError(f"WorkerBee MCP daemon exited early; inspect {config.log_file}")
 
 
+def _daemon_process_ready(config: MCPDaemonConfig) -> bool:
+    metadata = _read_metadata(config.metadata_file)
+    pid = _metadata_pid(metadata)
+    return bool(pid and _pid_alive(pid) and _pid_matches_metadata(pid, config, metadata))
+
+
 def _tcp_ready(host: str, port: int) -> bool:
     try:
         with socket.create_connection((host, int(port)), timeout=0.5):
             return True
     except OSError:
         return False
+
+
+def _mcp_port_available(config: MCPDaemonConfig) -> dict[str, Any]:
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.bind((config.host, int(config.port)))
+    except OSError as exc:
+        return {
+            "ok": False,
+            "error": {
+                "code": "MCP_PORT_IN_USE",
+                "message": f"WorkerBee MCP port {config.host}:{config.port} is already in use",
+                "details": {
+                    "host": config.host,
+                    "port": config.port,
+                    "mcp_url": config.mcp_url,
+                    "owner": _port_owner_details(config.host, config.port),
+                    "error": str(exc),
+                },
+                "retryable": True,
+                "remediation": (
+                    "Stop the process using this port or run "
+                    "`workerbee mcp start --port <port>`."
+                ),
+            },
+        }
+    return {"ok": True}
+
+
+def _port_owner_details(host: str, port: int) -> dict[str, Any]:
+    details: dict[str, Any] = {"host": host, "port": int(port)}
+    for label, argv in (
+        ("ss", ["ss", "-ltnp", f"sport = :{int(port)}"]),
+        ("lsof", ["lsof", "-nP", f"-iTCP:{int(port)}", "-sTCP:LISTEN"]),
+    ):
+        proc = None
+        with suppress(Exception):
+            proc = subprocess.run(
+                argv,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=3,
+                check=False,
+            )
+        if proc is None:
+            continue
+        output = (proc.stdout or "").strip()
+        if output:
+            details[label] = output
+    return details
 
 
 def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
@@ -409,6 +487,45 @@ def _stop_metadata_helper(
         return stop_containerd_helper(config.state_root)
 
 
+def _global_ingress_stop_result(
+    config: MCPDaemonConfig,
+    metadata: dict[str, Any],
+    cleanup_result: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    runtime = _metadata_runtime(config, metadata)
+    if runtime == CONTAINERD_RUNTIME:
+        ingress = cleanup_result.get("ingress") if isinstance(cleanup_result, dict) else None
+        return ingress if isinstance(ingress, dict) else None
+    return _stop_global_ingress(config, metadata)
+
+
+def _stop_global_ingress(
+    config: MCPDaemonConfig,
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    from workerbee.daemon import WorkerBeeDaemon
+
+    runtime = _metadata_runtime(config, metadata)
+    if not metadata:
+        ingress = load_global_ingress_info(config.state_root) or {}
+        runtime = str(ingress.get("runtime") or runtime)
+    with temporary_containerd_privilege_env(_metadata_privilege_env(metadata)):
+        try:
+            daemon = WorkerBeeDaemon(
+                state_root=config.state_root,
+                runtime=runtime,
+                default_project=str(metadata.get("project") or config.project),
+            )
+            return daemon.stop_global_ingress()
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "stopped": False,
+                "runtime": runtime,
+                "error": str(exc),
+            }
+
+
 def _stop_containerd_state_before_helper_stop(
     config: MCPDaemonConfig,
     metadata: dict[str, Any],
@@ -418,18 +535,35 @@ def _stop_containerd_state_before_helper_stop(
         return None
     from workerbee.daemon import WorkerBeeDaemon
 
+    warnings: list[str] = []
     with temporary_containerd_privilege_env(_metadata_privilege_env(metadata)):
         daemon = WorkerBeeDaemon(
             state_root=config.state_root,
             runtime=runtime,
             default_project=str(metadata.get("project") or config.project),
         )
-        projects = daemon.stop_all_projects(purge=False)
-        ingress = daemon.stop_global_ingress()
+        try:
+            projects = daemon.stop_all_projects(purge=False)
+        except Exception as exc:  # noqa: BLE001
+            projects = {
+                "ok": False,
+                "errors": [{"error": str(exc)}],
+                "projects": [],
+                "state_root": str(config.state_root),
+            }
+        try:
+            ingress = daemon.stop_global_ingress()
+        except Exception as exc:  # noqa: BLE001
+            ingress = {"ok": False, "stopped": False, "runtime": runtime, "error": str(exc)}
+    if not bool(ingress.get("ok")):
+        warnings.append(
+            "global ingress cleanup failed; stale containerd helper may already be gone"
+        )
     return {
-        "ok": bool(projects.get("ok")) and bool(ingress.get("ok")),
+        "ok": bool(projects.get("ok")),
         "projects": projects,
         "ingress": ingress,
+        "warnings": warnings,
     }
 
 

@@ -356,6 +356,14 @@ def containerd_network_name(state_root: Path, project: str) -> str:
     return containerd_namespace(state_root, project=project)
 
 
+def containerd_network_subnet(state_root: Path, project: str) -> str:
+    seed = f"{state_root.expanduser().resolve()}:{project_slug_for_runtime(project)}"
+    digest = hashlib.blake2s(seed.encode("utf-8"), digest_size=2).digest()
+    second = 200 + (digest[0] % 16)
+    third = 1 + (digest[1] % 254)
+    return f"10.{second}.{third}.0/24"
+
+
 def containerd_data_root(
     state_root: Path,
     project: str | None = None,
@@ -385,11 +393,13 @@ def containerd_base_args(
     state_root: Path,
     project: str | None = None,
     system: bool = False,
+    ensure_dirs: bool = True,
 ) -> list[str]:
     data_root = containerd_data_root(state_root, project=project, system=system)
     cni_conf = containerd_cni_conf_dir(state_root, project=project, system=system)
-    data_root.mkdir(parents=True, exist_ok=True)
-    cni_conf.mkdir(parents=True, exist_ok=True)
+    if ensure_dirs:
+        data_root.mkdir(parents=True, exist_ok=True)
+        cni_conf.mkdir(parents=True, exist_ok=True)
     namespace = containerd_namespace(state_root, project=project, system=system)
     _raise_if_reserved_containerd_namespace(namespace)
     return [
@@ -414,9 +424,18 @@ def runtime_command_args(
     project: str | None,
     args: list[str],
     system: bool = False,
+    ensure_dirs: bool = True,
 ) -> list[str]:
     if runtime == CONTAINERD_RUNTIME:
-        return [*containerd_base_args(state_root=state_root, project=project, system=system), *args]
+        return [
+            *containerd_base_args(
+                state_root=state_root,
+                project=project,
+                system=system,
+                ensure_dirs=ensure_dirs,
+            ),
+            *args,
+        ]
     return [runtime, *args]
 
 

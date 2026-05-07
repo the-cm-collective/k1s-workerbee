@@ -16,6 +16,7 @@ from workerbee.http import wait_for_http
 from workerbee.ports import choose_port
 from workerbee.runtime_support import (
     CONTAINERD_RUNTIME,
+    resolve_runtime,
     runtime_command_args,
     workerbee_runtime_labels,
 )
@@ -368,6 +369,84 @@ def load_global_ingress_info(state_root: Path) -> dict[str, Any] | None:
         return data if isinstance(data, dict) else None
     except Exception:
         return None
+
+
+def global_ingress_status(state_root: Path, *, runtime: str = "auto") -> dict[str, Any]:
+    root = state_root.resolve()
+    info = load_global_ingress_info(root)
+    if not info:
+        return {
+            "enabled": False,
+            "running": False,
+            "stale": False,
+            "state_root": str(root),
+        }
+    selected = str(info.get("runtime") or "")
+    if not selected:
+        selected = resolve_runtime(runtime)
+    container = str(info.get("caddy_container") or "")
+    running = False
+    if container:
+        if selected == CONTAINERD_RUNTIME:
+            from workerbee.containerd_helper import (
+                containerd_privilege_env,
+                containerd_privilege_status,
+                temporary_containerd_privilege_env,
+            )
+
+            privilege = containerd_privilege_status(state_root=root, runtime=selected)
+            with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
+                running = _caddy_container_running(root, selected, container)
+        else:
+            running = _caddy_container_running(root, selected, container)
+    return {
+        **info,
+        "enabled": bool(running),
+        "running": bool(running),
+        "stale": not bool(running),
+        "ca_ready": _safe_is_file(Path(str(info.get("ca_bundle") or ""))),
+    }
+
+
+def _caddy_container_running(state_root: Path, runtime: str, container: str) -> bool:
+    try:
+        proc = subprocess.run(
+            runtime_command_args(
+                runtime,
+                state_root=state_root,
+                project=None,
+                system=True,
+                args=["ps", "-q", "--filter", f"name=^{container}$"],
+            ),
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        return False
+    if proc.returncode == 0 and bool(proc.stdout.strip()):
+        return True
+    return _caddy_container_name_running(state_root, runtime, container)
+
+
+def _caddy_container_name_running(state_root: Path, runtime: str, container: str) -> bool:
+    try:
+        proc = subprocess.run(
+            runtime_command_args(
+                runtime,
+                state_root=state_root,
+                project=None,
+                system=True,
+                args=["ps", "--format", "{{.Names}}", "--filter", f"name={container}"],
+            ),
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+    except Exception:
+        return False
+    names = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
+    return proc.returncode == 0 and container in names
 
 
 def _container_name(state_root: Path) -> str:

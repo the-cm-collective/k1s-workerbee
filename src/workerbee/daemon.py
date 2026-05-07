@@ -22,13 +22,17 @@ from workerbee.agent import (
 )
 from workerbee.containerd_helper import containerd_privilege_status
 from workerbee.contract import WorkerBeeError
-from workerbee.ingress import GlobalIngress, GlobalIngressInfo, ProjectIngressConfig
+from workerbee.ingress import (
+    GlobalIngress,
+    GlobalIngressInfo,
+    ProjectIngressConfig,
+    global_ingress_status,
+)
 from workerbee.locks import FileLock, project_lock_path, state_root_lock_path
 from workerbee.paths import daemon_project_state_dir, default_state_root
 from workerbee.ports import choose_port
 from workerbee.probe import build_probe_url, probe_workerbee_url
 from workerbee.runtime_support import (
-    CONTAINERD_RUNTIME,
     cleanup_runtime,
     resolve_runtime,
     runtime_diagnostics,
@@ -469,20 +473,13 @@ class WorkerBeeDaemon:
 
     def stop_global_ingress(self) -> dict[str, Any]:
         runtime = self._resolve_runtime()
-        if runtime != CONTAINERD_RUNTIME:
-            return {"ok": True, "stopped": False, "runtime": runtime}
         ingress = GlobalIngress(state_root=self.state_root, runtime=runtime)
         return {"stopped": True, "runtime": runtime, **ingress.stop()}
 
     def global_dashboard(self) -> dict[str, Any]:
         if self.ingress is not None:
-            return self.ingress.info().public_dict()
-        from workerbee.ingress import load_global_ingress_info
-
-        return load_global_ingress_info(self.state_root) or {
-            "enabled": False,
-            "state_root": str(self.state_root),
-        }
+            return global_ingress_status(self.state_root, runtime=self.ingress.runtime)
+        return global_ingress_status(self.state_root, runtime=self.runtime_requested)
 
     def ingress_probe(
         self,

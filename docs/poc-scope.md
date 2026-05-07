@@ -19,7 +19,7 @@ WorkerBee now has the planned shared MCP shape:
 - A single background local MCP daemon can serve multiple clients. Each tool accepts a `project` value, allowing two Codex sessions in different working trees to share one MCP daemon while keeping k1s state, runtime networks, generated manifests, and app ingress separated by project name.
 - Agents bootstrap each repo with `workerbee_v1_session_start`, which derives a stable project id from the Git repo name, branch, and cwd hash, persists that cwd for later tool calls, and returns the cloud-native build/deploy/test/export runbook.
 - Per-project mode is persisted as `lazy`, `start`, or `stop`. `lazy` is the default, `start` launches the stack during bootstrap, and `stop` provides a persistent user-controlled off switch that returns `PROJECT_STOPPED` for runtime operations.
-- `workerbee mcp start` starts the background daemon, `workerbee mcp stop` stops it, and `workerbee mcp serve` remains the foreground/debug path.
+- `workerbee mcp start` starts the background daemon, `workerbee mcp stop` stops the daemon plus global dashboard/Caddy ingress, and `workerbee mcp serve` remains the foreground/debug path. MCP port conflicts fail fast instead of silently selecting another port.
 - The MCP daemon starts a global dashboard immediately and prints the URL before serving MCP traffic. The dashboard lists all known project-scoped stacks under the daemon state root, including branch metadata when available.
 - A global Caddy edge is started for local HTTPS. Project app hosts are scoped as `app.<project>.workerbee.localhost` and `api.<project>.workerbee.localhost`, with Caddy using its internal local CA.
 - Native k1s manifest deploys and the POC stack return browser-ready ingress URLs when the MCP daemon provides ingress configuration.
@@ -39,7 +39,7 @@ The immediate v0.1 hardening work should turn the POC into a reliable distributa
 - Observability: defer richer resource summaries/events/ingress health to k1s-side work and track it through `docs/rfcs/k1s-workerbee-observability.md`.
 - TLS/dev CA: complete guided trust-store handling across NixOS, Debian/Fedora, macOS, Windows, Firefox/NSS, and containerized browser cases.
 - Artifact handoff: export native k1s bundles, Kubernetes YAML, Helm chart skeletons, and image metadata suitable for registry handoff.
-- Packaging: publish repeatable wheels/wheelhouses, ship a one-line installer, document active-venv versus standalone install behavior, and provide source-development fallbacks without requiring k1s project edits.
+- Packaging: publish repeatable wheels/wheelhouses, ship a one-line installer, document active-venv versus standalone install behavior, provide source-development fallbacks without requiring k1s project edits, and include best-effort macOS install/trust guidance until macOS validation is complete.
 
 ## Later Phase
 

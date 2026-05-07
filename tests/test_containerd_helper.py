@@ -8,6 +8,8 @@ import pytest
 
 from workerbee import containerd_helper
 from workerbee.containerd_helper import (
+    _handle_remove_tree,
+    containerd_privilege_env,
     effective_containerd_privilege_mode,
     ensure_containerd_helper,
     ensure_containerd_privilege,
@@ -73,6 +75,49 @@ def test_ensure_containerd_privilege_starts_helper_when_probe_fails(
     assert result["effective_mode"] == "sudo-helper"
     assert result["helper"]["started"] is True
     assert result["env"]["WORKERBEE_NERDCTL_BIN"].endswith("workerbee-nerdctl")
+
+
+def test_containerd_privilege_env_synthesizes_from_helper_status(tmp_path: Path) -> None:
+    socket = tmp_path / "global" / "containerd-helper.sock"
+    wrapper = tmp_path / "global" / "bin" / "workerbee-nerdctl"
+
+    env = containerd_privilege_env(
+        {
+            "effective_mode": "sudo-helper",
+            "helper": {
+                "responsive": True,
+                "socket": str(socket),
+                "wrapper": str(wrapper),
+            },
+        },
+    )
+
+    assert env["WORKERBEE_NERDCTL_BIN"] == str(wrapper)
+    assert env["AE_NERDCTL_BIN"] == str(wrapper)
+    assert env["WORKERBEE_CONTAINERD_HELPER_SOCKET"] == str(socket)
+
+
+def test_helper_remove_tree_is_limited_to_project_state(tmp_path: Path) -> None:
+    project = tmp_path / "projects" / "demo"
+    project.mkdir(parents=True)
+    (project / "root-owned-placeholder").write_text("data", encoding="utf-8")
+
+    result = _handle_remove_tree({"path": str(project)}, state_root=tmp_path)
+
+    assert result["ok"] is True
+    assert result["removed"] is True
+    assert not project.exists()
+    denied = _handle_remove_tree({"path": str(tmp_path / "global")}, state_root=tmp_path)
+    assert denied["ok"] is False
+    assert denied["error"]["code"] == "CONTAINERD_HELPER_REMOVE_PATH_DENIED"
+
+
+def test_helper_response_ignores_broken_pipe() -> None:
+    class ClosedConnection:
+        def sendall(self, _payload: bytes) -> None:
+            raise BrokenPipeError
+
+    containerd_helper._send_helper_response(ClosedConnection(), {"ok": True})  # noqa: SLF001
 
 
 def test_ensure_containerd_helper_starts_single_background_sudo(

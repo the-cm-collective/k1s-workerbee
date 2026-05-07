@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.resources as resources
 import json
+import re
 import shutil
 import textwrap
 import time
@@ -78,6 +80,7 @@ def write_stack_files(
     project: str,
     image_tags: dict[str, str],
     service_ports: dict[str, int],
+    runtime: str = "auto",
     ingress_domain: str | None = None,
 ) -> POCArtifacts:
     spec_dir = state_dir / "specs"
@@ -99,6 +102,7 @@ def write_stack_files(
         [
             f"http://ae-{POC_NAMESPACE}--store:8080",
             f"http://app-{POC_NAMESPACE}--store:8080",
+            *_containerd_peer_urls(runtime=runtime, app="store"),
             f"http://host.containers.internal:{service_ports['store']}",
             f"http://host.docker.internal:{service_ports['store']}",
             urls["store"],
@@ -108,6 +112,7 @@ def write_stack_files(
         [
             f"http://ae-{POC_NAMESPACE}--api:8080",
             f"http://app-{POC_NAMESPACE}--api:8080",
+            *_containerd_peer_urls(runtime=runtime, app="api"),
             f"http://host.containers.internal:{service_ports['api']}",
             f"http://host.docker.internal:{service_ports['api']}",
             urls["api"],
@@ -300,6 +305,22 @@ def write_stack_files(
         image_tags=image_tags,
         urls=urls,
     )
+
+
+def _containerd_peer_urls(*, runtime: str, app: str) -> list[str]:
+    if runtime != CONTAINERD_RUNTIME:
+        return []
+    return [f"http://{_containerd_poc_container_name(app)}:8080"]
+
+
+def _containerd_poc_container_name(app: str) -> str:
+    raw = f"{POC_NAMESPACE}--{app}-rev1-0"
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "-", raw)
+    safe = re.sub(r"[._-]+", "-", safe).strip("-._") or "item"
+    if safe == raw:
+        return f"ae-{safe}"
+    digest = hashlib.blake2s(raw.encode("utf-8"), digest_size=5).hexdigest()
+    return f"ae-{safe}-{digest}"
 
 
 def validate_poc_urls(urls: dict[str, str], *, timeout_seconds: float = 90.0) -> dict[str, Any]:

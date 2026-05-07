@@ -107,3 +107,10 @@ def test_containerd_privilege_status_command_parses_global_policy(tmp_path: Path
     assert args.containerd_privilege_cmd == "status"
     assert args.runtime == "containerd"
     assert args.containerd_privilege == "unprivileged"
+
+
+def test_print_returns_failure_for_structured_error(capsys) -> None:
+    rc = cli._print({"ok": False, "error": {"code": "MCP_PORT_IN_USE"}}, json_out=True)
+
+    assert rc == 1
+    assert "MCP_PORT_IN_USE" in capsys.readouterr().out

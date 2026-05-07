@@ -1,8 +1,10 @@
+import json
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
 from workerbee.daemon import WorkerBeeDaemon
-from workerbee.ingress import GlobalIngress, GlobalIngressInfo
+from workerbee.ingress import GlobalIngress, GlobalIngressInfo, global_ingress_status
 from workerbee.k1s_runtime import K1sRuntime
 
 
@@ -120,6 +122,163 @@ def test_global_ingress_public_dict_treats_unreadable_ca_as_not_ready(
     )
 
     assert info.public_dict()["ca_ready"] is False
+
+
+def test_global_ingress_status_reports_missing_metadata(tmp_path: Path) -> None:
+    assert global_ingress_status(tmp_path) == {
+        "enabled": False,
+        "running": False,
+        "stale": False,
+        "state_root": str(tmp_path.resolve()),
+    }
+
+
+def test_global_ingress_status_marks_missing_container_stale(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    missing_ca = tmp_path / "missing-ca.crt"
+    (global_dir / "ingress.json").write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "runtime": "podman",
+                "caddy_container": "workerbee-caddy-test",
+                "dashboard_url": "https://dashboard.workerbee.localhost:19443/",
+                "ca_bundle": str(missing_ca),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run(_cmd: list[str], **_kwargs):
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("workerbee.ingress.subprocess.run", fake_run)
+
+    status = global_ingress_status(tmp_path)
+
+    assert status["enabled"] is False
+    assert status["running"] is False
+    assert status["stale"] is True
+    assert status["dashboard_url"] == "https://dashboard.workerbee.localhost:19443/"
+
+
+def test_global_ingress_status_reports_running_container(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    ca = global_dir / "caddy-local-root.crt"
+    ca.write_text("cert", encoding="utf-8")
+    (global_dir / "ingress.json").write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "runtime": "podman",
+                "caddy_container": "workerbee-caddy-test",
+                "ca_bundle": str(ca),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_run(_cmd: list[str], **_kwargs):
+        return SimpleNamespace(returncode=0, stdout="abc123\n")
+
+    monkeypatch.setattr("workerbee.ingress.subprocess.run", fake_run)
+
+    status = global_ingress_status(tmp_path)
+
+    assert status["enabled"] is True
+    assert status["running"] is True
+    assert status["stale"] is False
+    assert status["ca_ready"] is True
+
+
+def test_global_ingress_status_falls_back_to_exact_name_match(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    (global_dir / "ingress.json").write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "runtime": "podman",
+                "caddy_container": "workerbee-caddy-test",
+                "ca_bundle": str(global_dir / "caddy-local-root.crt"),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs):
+        calls.append(cmd)
+        if "--format" in cmd:
+            return SimpleNamespace(
+                returncode=0,
+                stdout="workerbee-caddy-test\nworkerbee-caddy-test-extra\n",
+            )
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("workerbee.ingress.subprocess.run", fake_run)
+
+    status = global_ingress_status(tmp_path)
+
+    assert status["enabled"] is True
+    assert status["running"] is True
+    assert len(calls) == 2
+
+
+def test_global_ingress_status_uses_containerd_helper_env(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    wrapper = global_dir / "bin" / "workerbee-nerdctl"
+    socket = global_dir / "containerd-helper.sock"
+    (global_dir / "ingress.json").write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "runtime": "containerd",
+                "caddy_container": "workerbee-caddy-test",
+                "ca_bundle": str(global_dir / "caddy-local-root.crt"),
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "workerbee.containerd_helper.containerd_privilege_status",
+        lambda **_kwargs: {
+            "helper": {
+                "responsive": True,
+                "socket": str(socket),
+                "wrapper": str(wrapper),
+            }
+        },
+    )
+
+    def fake_run(cmd: list[str], **_kwargs):
+        assert cmd[0] == str(wrapper)
+        assert os.environ["WORKERBEE_CONTAINERD_HELPER_SOCKET"] == str(socket)
+        return SimpleNamespace(returncode=0, stdout="abc123\n")
+
+    monkeypatch.setattr("workerbee.ingress.subprocess.run", fake_run)
+
+    status = global_ingress_status(tmp_path)
+
+    assert status["enabled"] is True
+    assert status["running"] is True
+    assert "WORKERBEE_CONTAINERD_HELPER_SOCKET" not in os.environ
 
 
 def test_global_ingress_exports_caddy_ca_bundle(tmp_path: Path, monkeypatch) -> None:

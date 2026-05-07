@@ -254,6 +254,30 @@ def stop_containerd_helper(state_root: Path, *, timeout: float = 10.0) -> dict[s
     }
 
 
+def remove_containerd_helper_tree(
+    state_root: Path,
+    target: Path,
+    *,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    root = state_root.expanduser().resolve()
+    status = containerd_helper_status(root)
+    socket_path = Path(str(status.get("socket") or _helper_paths(root)["socket"]))
+    if not socket_path.exists():
+        return {
+            "ok": False,
+            "removed": False,
+            "path": str(target),
+            "code": "CONTAINERD_HELPER_SOCKET_MISSING",
+            "message": "WorkerBee containerd helper socket is not available",
+        }
+    return helper_request(
+        socket_path,
+        {"action": "remove_tree", "path": str(target)},
+        timeout=timeout,
+    )
+
+
 def containerd_helper_status(state_root: Path) -> dict[str, Any]:
     root = state_root.expanduser().resolve()
     paths = _helper_paths(root)
@@ -335,9 +359,20 @@ def write_containerd_helper_client_wrapper(state_root: Path) -> Path:
 
 def containerd_privilege_env(privilege: dict[str, Any]) -> dict[str, str]:
     raw = privilege.get("env") if isinstance(privilege, dict) else None
-    if not isinstance(raw, dict):
+    if isinstance(raw, dict) and raw:
+        return {str(key): str(value) for key, value in raw.items() if value is not None}
+    helper = privilege.get("helper") if isinstance(privilege, dict) else None
+    if not isinstance(helper, dict) or not bool(helper.get("responsive", True)):
         return {}
-    return {str(key): str(value) for key, value in raw.items() if value is not None}
+    wrapper = str(helper.get("wrapper") or "")
+    socket_path = str(helper.get("socket") or "")
+    if not wrapper or not socket_path:
+        return {}
+    return {
+        "WORKERBEE_NERDCTL_BIN": wrapper,
+        "AE_NERDCTL_BIN": wrapper,
+        "WORKERBEE_CONTAINERD_HELPER_SOCKET": socket_path,
+    }
 
 
 @contextmanager
@@ -519,13 +554,18 @@ def serve_helper(
                 )
                 if response.pop("_shutdown", False):
                     stop = True
-                conn.sendall(json.dumps(response).encode("utf-8"))
+                _send_helper_response(conn, response)
     finally:
         server.close()
         with suppress(FileNotFoundError):
             socket_path.unlink()
         with suppress(FileNotFoundError):
             metadata_file.unlink()
+
+
+def _send_helper_response(conn: socket.socket, response: dict[str, Any]) -> None:
+    with suppress(BrokenPipeError):
+        conn.sendall(json.dumps(response).encode("utf-8"))
 
 
 def client_main(argv: list[str] | None = None) -> int:
@@ -596,6 +636,8 @@ def _handle_helper_connection(
             return {"ok": True, "pid": os.getpid(), "euid": os.geteuid()}
         if action == "shutdown":
             return {"ok": True, "_shutdown": True}
+        if action == "remove_tree":
+            return _handle_remove_tree(payload, state_root=state_root)
         if action != "run":
             return _error_response("CONTAINERD_HELPER_BAD_ACTION", f"unsupported action {action}")
         argv = payload.get("argv")
@@ -620,6 +662,35 @@ def _handle_helper_connection(
         }
     except Exception as exc:  # noqa: BLE001
         return _error_response("CONTAINERD_HELPER_INTERNAL_ERROR", str(exc))
+
+
+def _handle_remove_tree(payload: dict[str, Any], *, state_root: Path) -> dict[str, Any]:
+    raw = str(payload.get("path") or "").strip()
+    if not raw:
+        return _error_response("CONTAINERD_HELPER_REMOVE_PATH_MISSING", "path is required")
+    root = state_root.expanduser().resolve()
+    projects_root = root / "projects"
+    target = Path(raw).expanduser().resolve()
+    if target == projects_root or not _under_root(target, projects_root):
+        return _error_response(
+            "CONTAINERD_HELPER_REMOVE_PATH_DENIED",
+            "containerd helper only removes WorkerBee project state paths",
+            details={"path": str(target), "projects_root": str(projects_root)},
+        )
+    if not target.exists() and not target.is_symlink():
+        return {"ok": True, "removed": False, "path": str(target)}
+    try:
+        if target.is_dir() and not target.is_symlink():
+            shutil.rmtree(target)
+        else:
+            target.unlink()
+    except Exception as exc:  # noqa: BLE001
+        return _error_response(
+            "CONTAINERD_HELPER_REMOVE_PATH_FAILED",
+            str(exc),
+            details={"path": str(target)},
+        )
+    return {"ok": True, "removed": True, "path": str(target)}
 
 
 def _recv_all(conn: socket.socket, *, limit: int) -> bytes:

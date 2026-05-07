@@ -418,7 +418,7 @@ def main(argv: list[str] | None = None) -> int:
 def _print(payload: dict[str, Any], *, json_out: bool) -> int:
     if json_out:
         print(json.dumps(payload, indent=2, sort_keys=True))
-        return 0
+        return 1 if payload.get("ok") is False else 0
     if payload.get("user_message"):
         print(payload["user_message"])
         if payload.get("dashboard_url"):
@@ -430,7 +430,7 @@ def _print(payload: dict[str, Any], *, json_out: bool) -> int:
             print(f"dashboard: {payload['dashboard_url']}")
         print(f"running: {payload.get('running')}")
         print(f"state: {payload.get('state_root')}")
-        return 0
+        return 1 if payload.get("ok") is False else 0
     if "dashboard_url" in payload:
         print(f"dashboard: {payload['dashboard_url']}")
         print(f"controller: {payload.get('controller_url')}")
@@ -438,7 +438,7 @@ def _print(payload: dict[str, Any], *, json_out: bool) -> int:
         print(f"state: {payload.get('state_dir')}")
         return 0
     print(json.dumps(payload, indent=2, sort_keys=True))
-    return 0
+    return 1 if payload.get("ok") is False else 0
 
 
 def _doctor(

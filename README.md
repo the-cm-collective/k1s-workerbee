@@ -25,7 +25,9 @@ workerbee mcp start
 The command prints the local MCP URL and the global dashboard URL, normally
 `https://dashboard.workerbee.localhost:19443/`. Use `workerbee mcp status`,
 `workerbee mcp restart`, and `workerbee mcp stop` for lifecycle management. Use
-`workerbee mcp serve` only when you want a foreground/debug process.
+`workerbee mcp serve` only when you want a foreground/debug process. If the
+requested MCP port is already in use, `workerbee mcp start` fails fast; stop the
+owning process or pass `--port`.
 
 Connect Codex to the shared local MCP server:
 
@@ -108,6 +110,11 @@ workerbee ingress status
 workerbee trust status
 ```
 
+`workerbee mcp stop` stops the background MCP daemon and its global
+dashboard/Caddy ingress container. Project stacks remain controlled with
+`workerbee stop`, `workerbee project mode stop`, or the MCP project stop/reset
+tools.
+
 Staged deployment workflow:
 
 ```bash
@@ -159,3 +166,14 @@ rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/workerbee/venv" "$HOME/.local/bin/w
 ```
 
 If installed into an active venv, uninstall with `python -m pip uninstall k1s-workerbee`.
+
+## macOS Notes
+
+macOS support is best effort for v0.1 until validated on physical hosts. Install
+Python 3.11 or newer, use Docker Desktop or Podman, run the one-line installer,
+then verify with `workerbee doctor`. To trust the local WorkerBee Caddy CA after
+`workerbee mcp start`, run:
+
+```bash
+workerbee trust install --target system
+```

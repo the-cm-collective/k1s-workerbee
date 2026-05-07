@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from workerbee.containerd_helper import remove_containerd_helper_tree
 from workerbee.http import request, wait_for_http
 from workerbee.ingress import ProjectIngressConfig
 from workerbee.k1s_runtime import resolve_k1s_runtime
@@ -36,6 +37,7 @@ from workerbee.runtime_support import (
     containerd_data_root,
     containerd_namespace,
     containerd_network_name,
+    containerd_network_subnet,
     nerdctl_binary,
     resolve_runtime,
     runtime_command_args,
@@ -185,11 +187,23 @@ class WorkerBeeSupervisor:
                     _terminate_pid(pid)
                     stopped.append(pid)
             self._cleanup_runtime(info, purge=purge)
+        elif purge and self._resolve_runtime() == CONTAINERD_RUNTIME:
+            self._cleanup_containerd_runtime(
+                network=containerd_network_name(self.state_dir.parent.parent, self.project),
+                purge=True,
+            )
+        purge_result = None
         if purge and self.state_dir.exists():
-            shutil.rmtree(self.state_dir)
+            purge_result = self._purge_state_dir(info)
         elif self.stack_file.exists():
             self.stack_file.unlink()
-        return {"stopped_pids": stopped, "purged": purge, "state_dir": str(self.state_dir)}
+        return {
+            "ok": not (isinstance(purge_result, dict) and purge_result.get("ok") is False),
+            "stopped_pids": stopped,
+            "purged": purge,
+            "state_dir": str(self.state_dir),
+            "purge_result": purge_result,
+        }
 
     def status(self) -> dict[str, Any]:
         info = self.load_stack()
@@ -240,6 +254,7 @@ class WorkerBeeSupervisor:
             project=self.project,
             image_tags=image_tags,
             service_ports=info.service_ports,
+            runtime=info.runtime,
             ingress_domain=self.ingress.domain if self.ingress else None,
         )
 
@@ -264,7 +279,10 @@ class WorkerBeeSupervisor:
                 )
             )
 
-        validation = validate_poc_urls(artifacts.urls, timeout_seconds=timeout_seconds)
+        if info.runtime == CONTAINERD_RUNTIME:
+            validation = self._validate_poc_containerd(info, timeout_seconds=timeout_seconds)
+        else:
+            validation = validate_poc_urls(artifacts.urls, timeout_seconds=timeout_seconds)
         return {
             "stack": info.public_dict(),
             "manifests": [str(p) for p in artifacts.manifests],
@@ -606,9 +624,9 @@ class WorkerBeeSupervisor:
         return result
 
     def load_stack(self) -> StackInfo | None:
-        if not self.stack_file.exists():
-            return None
         try:
+            if not self.stack_file.exists():
+                return None
             data = json.loads(self.stack_file.read_text(encoding="utf-8"))
             data.setdefault("k1s_runtime_source", self.k1s_runtime.source)
             data.setdefault("python_executable", self.python_executable)
@@ -659,12 +677,19 @@ class WorkerBeeSupervisor:
                 stderr=subprocess.DEVNULL,
             )
             if exists.returncode != 0:
+                args = [
+                    "network",
+                    "create",
+                    "--subnet",
+                    containerd_network_subnet(state_root, self.project),
+                    network,
+                ]
                 subprocess.run(
                     runtime_command_args(
                         runtime,
                         state_root=state_root,
                         project=self.project,
-                        args=["network", "create", network],
+                        args=args,
                     ),
                     check=True,
                     stdout=subprocess.DEVNULL,
@@ -739,6 +764,10 @@ class WorkerBeeSupervisor:
                         containerd_data_root(state_root, project=self.project)
                     ),
                     "AE_CONTAINERD_NETWORK": info.network,
+                    "AE_CONTAINERD_NETWORK_SUBNET": containerd_network_subnet(
+                        state_root,
+                        self.project,
+                    ),
                     "AE_CONTAINERD_CNI_BIN_DIR": containerd_cni_bin_dir(),
                     "AE_CONTAINERD_CNI_CONF_DIR": str(
                         containerd_cni_conf_dir(state_root, project=self.project)
@@ -935,44 +964,7 @@ class WorkerBeeSupervisor:
                 )
             return
         if info.runtime == CONTAINERD_RUNTIME:
-            state_root = self.state_dir.parent.parent
-            ids = _split_lines(
-                subprocess.run(
-                    runtime_command_args(
-                        info.runtime,
-                        state_root=state_root,
-                        project=self.project,
-                        args=["ps", "-aq", "--filter", f"label={namespace_filter}"],
-                    ),
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                ).stdout
-            )
-            if ids:
-                subprocess.run(
-                    runtime_command_args(
-                        info.runtime,
-                        state_root=state_root,
-                        project=self.project,
-                        args=["rm", "-f", *ids],
-                    ),
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            if purge:
-                subprocess.run(
-                    runtime_command_args(
-                        info.runtime,
-                        state_root=state_root,
-                        project=self.project,
-                        args=["network", "rm", info.network],
-                    ),
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+            self._cleanup_containerd_runtime(network=info.network, purge=purge)
             return
 
         ids = _split_lines(
@@ -997,6 +989,175 @@ class WorkerBeeSupervisor:
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
+
+    def _cleanup_containerd_runtime(self, *, network: str, purge: bool) -> None:
+        state_root = self.state_dir.parent.parent
+        ids = _split_lines(
+            subprocess.run(
+                runtime_command_args(
+                    CONTAINERD_RUNTIME,
+                    state_root=state_root,
+                    project=self.project,
+                    args=["ps", "-aq"],
+                    ensure_dirs=not purge,
+                ),
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            ).stdout
+        )
+        if ids:
+            rm_cmd = runtime_command_args(
+                CONTAINERD_RUNTIME,
+                state_root=state_root,
+                project=self.project,
+                args=["rm", "-f", *ids],
+                ensure_dirs=not purge,
+            )
+            proc = subprocess.run(
+                rm_cmd,
+                check=False,
+                text=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            if proc.returncode != 0 and "no such network" in (proc.stderr or ""):
+                self._ensure_containerd_cleanup_network(network)
+                subprocess.run(
+                    rm_cmd,
+                    check=False,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+        if not purge:
+            return
+
+        images = [
+            image
+            for image in _split_lines(
+                subprocess.run(
+                    runtime_command_args(
+                        CONTAINERD_RUNTIME,
+                        state_root=state_root,
+                        project=self.project,
+                        args=["images", "--format", "{{.Repository}}:{{.Tag}}"],
+                        ensure_dirs=False,
+                    ),
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                ).stdout
+            )
+            if image and not image.startswith("<none>")
+        ]
+        if images:
+            subprocess.run(
+                runtime_command_args(
+                    CONTAINERD_RUNTIME,
+                    state_root=state_root,
+                    project=self.project,
+                    args=["rmi", "-f", *images],
+                    ensure_dirs=False,
+                ),
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        subprocess.run(
+            runtime_command_args(
+                CONTAINERD_RUNTIME,
+                state_root=state_root,
+                project=self.project,
+                args=["network", "rm", network],
+                ensure_dirs=False,
+            ),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        subprocess.run(
+            runtime_command_args(
+                CONTAINERD_RUNTIME,
+                state_root=state_root,
+                project=self.project,
+                args=[
+                    "namespace",
+                    "remove",
+                    containerd_namespace(state_root, self.project),
+                ],
+                ensure_dirs=False,
+            ),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _ensure_containerd_cleanup_network(self, network: str) -> None:
+        state_root = self.state_dir.parent.parent
+        base = {
+            "runtime": CONTAINERD_RUNTIME,
+            "state_root": state_root,
+            "project": self.project,
+            "ensure_dirs": False,
+        }
+        exists = subprocess.run(
+            runtime_command_args(args=["network", "inspect", network], **base),
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if exists.returncode == 0:
+            return
+        create = subprocess.run(
+            runtime_command_args(
+                args=[
+                    "network",
+                    "create",
+                    "--subnet",
+                    containerd_network_subnet(state_root, self.project),
+                    network,
+                ],
+                **base,
+            ),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if create.returncode != 0:
+            subprocess.run(
+                runtime_command_args(args=["network", "create", network], **base),
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+
+    def _purge_state_dir(self, info: StackInfo | None) -> dict[str, Any]:
+        runtime = info.runtime if info else self._resolve_runtime()
+        if runtime == CONTAINERD_RUNTIME:
+            result = remove_containerd_helper_tree(
+                self.state_dir.parent.parent,
+                self.state_dir,
+            )
+            if result.get("ok"):
+                return result
+            try:
+                shutil.rmtree(self.state_dir)
+                return {
+                    "ok": True,
+                    "removed": True,
+                    "path": str(self.state_dir),
+                    "fallback": "shutil",
+                    "helper": result,
+                }
+            except Exception as exc:  # noqa: BLE001
+                return {
+                    "ok": False,
+                    "removed": False,
+                    "path": str(self.state_dir),
+                    "helper": result,
+                    "error": str(exc),
+                }
+        shutil.rmtree(self.state_dir)
+        return {"ok": True, "removed": True, "path": str(self.state_dir)}
 
     def _runtime_container_ids(self, info: StackInfo, app: str) -> list[str]:
         filters = [
@@ -1088,6 +1249,92 @@ class WorkerBeeSupervisor:
         if proc.returncode != 0:
             raise RuntimeError(json.dumps(result, indent=2))
         return result
+
+    def _validate_poc_containerd(
+        self,
+        info: StackInfo,
+        *,
+        timeout_seconds: float = 90.0,
+    ) -> dict[str, Any]:
+        checks = {
+            "store": ("store", "/healthz", "json"),
+            "api": ("api", "/healthz", "json"),
+            "frontend_health": ("frontend", "/healthz", "json"),
+            "api_check": ("api", "/api/check", "json"),
+            "frontend": ("frontend", "/", "text"),
+        }
+        deadline = time.monotonic() + timeout_seconds
+        last_errors: dict[str, str] = {}
+        while time.monotonic() < deadline:
+            result: dict[str, Any] = {"mode": "containerd-exec"}
+            ok = True
+            for name, (app, path, output) in checks.items():
+                try:
+                    probe = self._containerd_http_probe(info, app=app, path=path)
+                except Exception as exc:  # noqa: BLE001
+                    last_errors[name] = str(exc)
+                    ok = False
+                    continue
+                status = int(probe.get("status") or 0)
+                if status != 200:
+                    last_errors[name] = f"status {status}: {probe.get('body', '')[:300]}"
+                    ok = False
+                    continue
+                result[name] = (
+                    probe.get("json", {"body": probe.get("body", "")})
+                    if output == "json"
+                    else str(probe.get("body", ""))[:300]
+                )
+            if ok:
+                result["ok"] = True
+                return result
+            time.sleep(1.0)
+        raise TimeoutError(
+            "containerd POC containers did not become ready: "
+            f"{json.dumps(last_errors, indent=2)}"
+        )
+
+    def _containerd_http_probe(
+        self,
+        info: StackInfo,
+        *,
+        app: str,
+        path: str,
+    ) -> dict[str, Any]:
+        code = (
+            "import json, sys, urllib.error, urllib.request\n"
+            "url = sys.argv[1]\n"
+            "try:\n"
+            "    try:\n"
+            "        with urllib.request.urlopen(url, timeout=4.0) as resp:\n"
+            "            status = int(resp.status)\n"
+            "            body = resp.read()\n"
+            "    except urllib.error.HTTPError as exc:\n"
+            "        status = int(exc.code)\n"
+            "        body = exc.read()\n"
+            "    text = body.decode('utf-8', errors='replace')\n"
+            "    payload = {'status': status, 'body': text[:1000]}\n"
+            "    try:\n"
+            "        payload['json'] = json.loads(text)\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "    print(json.dumps(payload, sort_keys=True))\n"
+            "except Exception as exc:\n"
+            "    print(json.dumps({'error': str(exc)}, sort_keys=True))\n"
+            "    raise SystemExit(1)\n"
+        )
+        exec_result = self._runtime_exec(
+            info,
+            app=app,
+            command=["python", "-c", code, f"http://127.0.0.1:8080{path}"],
+        )
+        stdout = exec_result["stdout"].strip()
+        if not stdout:
+            raise RuntimeError(f"empty probe output for app {app!r}")
+        probe = json.loads(stdout.splitlines()[-1])
+        if probe.get("error"):
+            raise RuntimeError(str(probe["error"]))
+        return probe
 
 
 def _slug(value: str) -> str:
