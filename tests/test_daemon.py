@@ -1,7 +1,8 @@
 from pathlib import Path
+from types import SimpleNamespace
 
 from workerbee.daemon import WorkerBeeDaemon
-from workerbee.ingress import GlobalIngress
+from workerbee.ingress import GlobalIngress, GlobalIngressInfo
 from workerbee.k1s_runtime import K1sRuntime
 
 
@@ -82,3 +83,69 @@ def test_global_ingress_containerd_writes_host_network_https_port(tmp_path: Path
 
     assert "https_port 19443" in text
     assert "default_bind 127.0.0.1" in text
+
+
+def test_global_ingress_uses_exported_ca_bundle_path(tmp_path: Path) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="containerd",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+
+    assert ingress.ca_bundle == tmp_path / "global" / "caddy-local-root.crt"
+    assert "caddy-data" not in str(ingress.ca_bundle)
+
+
+def test_global_ingress_public_dict_treats_unreadable_ca_as_not_ready(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class UnreadablePath:
+        def is_file(self) -> bool:
+            raise PermissionError("denied")
+
+    monkeypatch.setattr("workerbee.ingress.Path", lambda _raw: UnreadablePath())
+    info = GlobalIngressInfo(
+        enabled=True,
+        state_root=str(tmp_path),
+        https_port=19443,
+        dashboard_port=18090,
+        dashboard_url="https://dashboard.workerbee.localhost:19443/",
+        caddy_container="workerbee-caddy-test",
+        caddy_data=str(tmp_path / "global" / "caddy-data"),
+        ca_bundle=str(tmp_path / "global" / "caddy-local-root.crt"),
+        localhost_dns_ok=True,
+        runtime="containerd",
+    )
+
+    assert info.public_dict()["ca_ready"] is False
+
+
+def test_global_ingress_exports_caddy_ca_bundle(tmp_path: Path, monkeypatch) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="containerd",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    ingress.global_dir.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(
+            returncode=0,
+            stdout="-----BEGIN CERTIFICATE-----\ncert\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("workerbee.ingress.subprocess.run", fake_run)
+
+    ingress._export_ca_bundle()  # noqa: SLF001
+
+    assert ingress.ca_bundle.read_text(encoding="utf-8").startswith("-----BEGIN CERTIFICATE-----")
+    assert ingress.ca_bundle.stat().st_mode & 0o777 == 0o644
+    assert calls
+    assert "cat" in calls[0]
+    assert "/data/caddy/pki/authorities/local/root.crt" in calls[0]

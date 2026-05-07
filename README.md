@@ -134,10 +134,21 @@ wheelhouse first or provide equivalent dependency links before running `workerbe
 For container-orchestration development where Podman or Docker would interfere with the system under test, run WorkerBee against direct containerd explicitly:
 
 ```bash
-workerbee --runtime containerd mcp start
+workerbee --runtime containerd --containerd-privilege sudo-helper mcp start
 ```
 
-This path uses `nerdctl` with WorkerBee-scoped containerd namespaces and state-local data roots. It is intended for development hosts where no other WorkerBee/k1s process is using the same direct containerd runtime at the same time.
+This path uses `nerdctl` against the configured containerd socket, but scopes WorkerBee work into state-root-hashed namespaces such as `workerbee-<state-hash>-system` and `workerbee-<state-hash>-<project>`. It also uses state-local nerdctl data roots, state-local CNI config directories, and state-hash-scoped project networks. WorkerBee must never target reserved namespaces such as `ae`, `k8s.io`, `moby`, or `default`; those may belong to a real k1s/Kubernetes runtime on the same host.
+
+When `--runtime containerd` is explicitly selected, WorkerBee MCP defaults to `--containerd-privilege auto`. Auto first tries unprivileged `nerdctl`; if that fails, WorkerBee prompts once with `sudo` and starts a state-scoped root helper. The helper exposes a WorkerBee-owned Unix socket and a generated `nerdctl` wrapper under the WorkerBee state root, validates every command, and only allows WorkerBee state-hash namespaces plus state-local data/CNI paths. This never runs for `--runtime auto`, Docker, or Podman. Use `--containerd-privilege unprivileged` if you preconfigured rootless/system access yourself.
+
+Inspect or stop the helper with:
+
+```bash
+workerbee --runtime containerd containerd-privilege status
+workerbee --runtime containerd containerd-privilege stop-helper
+```
+
+Shared host containerd is still a privileged development mode. WorkerBee avoids broad prune operations and cleanup is constrained to WorkerBee state-hash namespaces, but Podman or Docker remains the safer default for ordinary users.
 
 Other MCP clients can connect to the same Streamable HTTP endpoint if they support HTTP MCP. For example, Claude Code documents `claude mcp add --transport http workerbee http://127.0.0.1:8765/mcp`; Codex is the tested target for WorkerBee v0.1.
 

@@ -13,6 +13,11 @@ from typing import Any
 
 from workerbee import __version__
 from workerbee.agent import derive_session_project
+from workerbee.containerd_access import release_containerd_socket_access
+from workerbee.containerd_helper import (
+    containerd_privilege_status,
+    stop_containerd_helper,
+)
 from workerbee.daemon import WorkerBeeDaemon
 from workerbee.k1s_runtime import resolve_k1s_runtime
 from workerbee.manifests import (
@@ -31,6 +36,7 @@ from workerbee.mcp_daemon import (
 )
 from workerbee.mcp_server import serve_mcp
 from workerbee.paths import default_state_root
+from workerbee.runtime_support import runtime_diagnostics
 from workerbee.supervisor import WorkerBeeSupervisor
 from workerbee.trust import trust_install, trust_status, trust_uninstall
 
@@ -52,6 +58,18 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         choices=["auto", "podman", "docker", "containerd"],
         help="Container runtime backend",
+    )
+    parser.add_argument(
+        "--containerd-socket-access",
+        default=None,
+        choices=["auto", "off"],
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--containerd-privilege",
+        default="auto",
+        choices=["auto", "sudo-helper", "unprivileged"],
+        help="Privilege strategy for explicit --runtime containerd",
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON output")
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -98,6 +116,20 @@ def build_parser() -> argparse.ArgumentParser:
     cleanup = sub.add_parser("cleanup", help="Inspect or remove stale WorkerBee runtime resources")
     cleanup.add_argument("--execute", action="store_true", help="Perform cleanup")
     cleanup.add_argument("--purge-images", action="store_true", help="Also remove WorkerBee images")
+    containerd_privilege = sub.add_parser(
+        "containerd-privilege",
+        help="Inspect or stop the WorkerBee direct-containerd root helper",
+    )
+    containerd_privilege_sub = containerd_privilege.add_subparsers(
+        dest="containerd_privilege_cmd",
+        required=True,
+    )
+    containerd_privilege_sub.add_parser("status", help="Show direct-containerd privilege status")
+    containerd_privilege_sub.add_parser("stop-helper", help="Stop the WorkerBee root helper")
+    containerd_privilege_sub.add_parser(
+        "revoke-acl-leases",
+        help="Revoke deprecated WorkerBee containerd socket ACL leases",
+    )
     sub.add_parser("tls-info", help="Show local API shim TLS paths")
     sub.add_parser("reset", help="Reset WorkerBee project workloads and artifacts")
     sub.add_parser("poc-status", help="Show POC app status through the native k1s API")
@@ -172,9 +204,17 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    containerd_privilege = _containerd_privilege_arg(args)
     try:
         if args.cmd == "doctor":
-            return _print(_doctor(), json_out=args.json)
+            return _print(
+                _doctor(
+                    runtime=args.runtime,
+                    state_root=args.state_root,
+                    containerd_privilege=containerd_privilege,
+                ),
+                json_out=args.json,
+            )
         if args.cmd == "mcp":
             if args.mcp_cmd == "serve":
                 serve_mcp(
@@ -184,6 +224,7 @@ def main(argv: list[str] | None = None) -> int:
                     port=args.port,
                     state_dir=args.state_dir,
                     state_root=args.state_root,
+                    containerd_privilege=containerd_privilege,
                 )
                 return 0
             if args.state_dir is not None and args.state_root is not None:
@@ -194,6 +235,7 @@ def main(argv: list[str] | None = None) -> int:
                 project=args.project or "default",
                 host=args.host,
                 port=args.port,
+                containerd_privilege=containerd_privilege,
             )
             if args.mcp_cmd == "start":
                 return _print(start_mcp_daemon(config, timeout=args.timeout), json_out=args.json)
@@ -248,6 +290,29 @@ def main(argv: list[str] | None = None) -> int:
                 daemon.cleanup(execute=args.execute, purge_images=args.purge_images),
                 json_out=args.json,
             )
+        if args.cmd == "containerd-privilege":
+            root = (args.state_root or default_state_root()).resolve()
+            if args.containerd_privilege_cmd == "status":
+                return _print(
+                    containerd_privilege_status(
+                        state_root=root,
+                        runtime=args.runtime,
+                        mode=containerd_privilege,
+                    ),
+                    json_out=args.json,
+                )
+            if args.containerd_privilege_cmd == "stop-helper":
+                return _print(stop_containerd_helper(root), json_out=args.json)
+            if args.containerd_privilege_cmd == "revoke-acl-leases":
+                return _print(
+                    release_containerd_socket_access(
+                        state_root=root,
+                        runtime="containerd",
+                        mode="auto",
+                        force=True,
+                    ),
+                    json_out=args.json,
+                )
         sup = WorkerBeeSupervisor(
             project=args.project or "default",
             runtime=args.runtime,
@@ -367,7 +432,12 @@ def _print(payload: dict[str, Any], *, json_out: bool) -> int:
     return 0
 
 
-def _doctor() -> dict[str, Any]:
+def _doctor(
+    *,
+    runtime: str = "auto",
+    state_root: Path | None = None,
+    containerd_privilege: str = "auto",
+) -> dict[str, Any]:
     checks: dict[str, Any] = {
         "python": sys.version.split()[0],
         "podman": shutil.which("podman"),
@@ -375,6 +445,14 @@ def _doctor() -> dict[str, Any]:
         "nerdctl": shutil.which("nerdctl"),
         "buildctl": shutil.which("buildctl"),
     }
+    root = (state_root or default_state_root()).resolve()
+    checks["runtime"] = runtime_diagnostics(runtime, state_root=root)
+    checks["containerd_runtime"] = runtime_diagnostics("containerd", state_root=root)
+    checks["containerd_privilege"] = containerd_privilege_status(
+        state_root=root,
+        runtime=runtime,
+        mode=containerd_privilege,
+    )
     try:
         runtime = resolve_k1s_runtime()
         checks["k1s_runtime_source"] = runtime.source
@@ -421,6 +499,12 @@ def _doctor() -> dict[str, Any]:
     checks["ok"] = (
         bool(checks.get("ae_import"))
         and bool(checks.get("apishim_env_helper"))
-        and bool(checks.get("podman") or checks.get("docker") or checks.get("nerdctl"))
+        and bool(checks.get("runtime", {}).get("ok"))
     )
     return checks
+
+
+def _containerd_privilege_arg(args: argparse.Namespace) -> str:
+    if getattr(args, "containerd_socket_access", None) == "off":
+        return "unprivileged"
+    return str(getattr(args, "containerd_privilege", "auto") or "auto")

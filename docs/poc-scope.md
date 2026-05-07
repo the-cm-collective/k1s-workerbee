@@ -33,6 +33,7 @@ The immediate v0.1 hardening work should turn the POC into a reliable distributa
 
 - MCP contract: register v1-only `workerbee_v1_*` tool names, stable result envelopes, stable errors, version/capabilities reporting, and dashboard URL notification semantics.
 - Runtime support: harden Podman rootless, Podman rootful, Docker Linux, Docker Desktop, and explicit direct containerd behavior, especially Caddy host reachability and port cleanup.
+- Direct containerd safety: use WorkerBee state-hash namespaces, state-local CNI config paths, explicit `--runtime containerd` privilege handling, a state-scoped sudo root helper when unprivileged `nerdctl` cannot reach system containerd, and cleanup boundaries that never target reserved namespaces such as `ae`, `k8s.io`, `moby`, or `default`.
 - Lifecycle safety: prevent two independent MCP daemons from mutating the same state root, clean stale processes, avoid port drift, support purge/reset, and never expose bearer tokens in tool results.
 - Deployment inputs: support staged native k1s manifests as the primary path, practical Kubernetes YAML apply through `ae apply --k8s`, image build contexts, and simple generated app templates. Kubernetes input is intentionally limited to one workload plus optional Service/Ingress per file for v0.1; native k1s input is required for native k1s bundle export.
 - Observability: defer richer resource summaries/events/ingress health to k1s-side work and track it through `docs/rfcs/k1s-workerbee-observability.md`.

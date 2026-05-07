@@ -7,6 +7,7 @@ import json
 import os
 import socket
 import subprocess
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -63,7 +64,7 @@ class GlobalIngressInfo:
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        data["ca_ready"] = Path(self.ca_bundle).is_file()
+        data["ca_ready"] = _safe_is_file(Path(self.ca_bundle))
         return data
 
 
@@ -81,6 +82,7 @@ class GlobalIngress:
         self.global_dir = self.state_root / "global"
         self.projects_dir = self.state_root / "projects"
         self.caddy_data = self.global_dir / "caddy-data"
+        self.caddy_ca_bundle = self.global_dir / "caddy-local-root.crt"
         self.caddy_file = self.global_dir / "Caddyfile"
         self.info_file = self.global_dir / "ingress.json"
         existing = self._load_existing()
@@ -108,6 +110,7 @@ class GlobalIngress:
         self._write_caddyfile(projects or [])
         self._ensure_caddy_container()
         self._wait_ready()
+        self._export_ca_bundle()
         info = self.info()
         self.info_file.write_text(json.dumps(info.public_dict(), indent=2), encoding="utf-8")
         return info
@@ -139,6 +142,32 @@ class GlobalIngress:
             stderr=subprocess.DEVNULL,
         )
 
+    def stop(self) -> dict[str, Any]:
+        proc = subprocess.run(
+            runtime_command_args(
+                self.runtime,
+                state_root=self.state_root,
+                project=None,
+                system=True,
+                args=["rm", "-f", self.container],
+            ),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+        )
+        ok = proc.returncode == 0 or _missing_container(proc.stdout)
+        if ok:
+            with suppress(FileNotFoundError):
+                self.info_file.unlink()
+        return {
+            "ok": ok,
+            "container": self.container,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout,
+        }
+
     def project_config(self, project: str) -> ProjectIngressConfig:
         domain = f"{project}.workerbee.localhost"
         sites_dir = self.projects_dir / project / "caddy"
@@ -157,7 +186,11 @@ class GlobalIngress:
 
     @property
     def ca_bundle(self) -> Path:
-        return self.caddy_data / "caddy" / "pki" / "authorities" / "local" / "root.crt"
+        return self.caddy_ca_bundle
+
+    @property
+    def _container_ca_bundle(self) -> str:
+        return "/data/caddy/pki/authorities/local/root.crt"
 
     def info(self) -> GlobalIngressInfo:
         return GlobalIngressInfo(
@@ -289,6 +322,27 @@ https://dashboard.workerbee.localhost {{
             ok_statuses={200},
         )
 
+    def _export_ca_bundle(self) -> None:
+        proc = subprocess.run(
+            runtime_command_args(
+                self.runtime,
+                state_root=self.state_root,
+                project=None,
+                system=True,
+                args=["exec", self.container, "cat", self._container_ca_bundle],
+            ),
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=10,
+        )
+        if proc.returncode != 0 or not proc.stdout.strip():
+            raise RuntimeError(f"failed to export WorkerBee Caddy CA:\n{proc.stderr}")
+        tmp = self.ca_bundle.with_suffix(".tmp")
+        tmp.write_text(proc.stdout, encoding="utf-8")
+        tmp.chmod(0o644)
+        tmp.replace(self.ca_bundle)
+
     def _container_running(self) -> bool:
         proc = subprocess.run(
             runtime_command_args(
@@ -329,6 +383,11 @@ def _localhost_dns_ok() -> bool:
         return False
 
 
+def _missing_container(output: str) -> bool:
+    lowered = output.lower()
+    return "no such container" in lowered or "not found" in lowered
+
+
 def _env_int(name: str) -> int | None:
     raw = os.getenv(name)
     if not raw:
@@ -337,3 +396,10 @@ def _env_int(name: str) -> int | None:
         return int(raw)
     except ValueError:
         return None
+
+
+def _safe_is_file(path: Path) -> bool:
+    try:
+        return path.is_file()
+    except OSError:
+        return False

@@ -20,13 +20,19 @@ from workerbee.agent import (
     runbook_payload,
     user_message_for_session,
 )
+from workerbee.containerd_helper import containerd_privilege_status
 from workerbee.contract import WorkerBeeError
 from workerbee.ingress import GlobalIngress, GlobalIngressInfo, ProjectIngressConfig
 from workerbee.locks import FileLock, project_lock_path, state_root_lock_path
 from workerbee.paths import daemon_project_state_dir, default_state_root
 from workerbee.ports import choose_port
 from workerbee.probe import build_probe_url, probe_workerbee_url
-from workerbee.runtime_support import cleanup_runtime, resolve_runtime, runtime_diagnostics
+from workerbee.runtime_support import (
+    CONTAINERD_RUNTIME,
+    cleanup_runtime,
+    resolve_runtime,
+    runtime_diagnostics,
+)
 from workerbee.supervisor import WorkerBeeSupervisor, project_slug
 
 T = TypeVar("T")
@@ -423,7 +429,11 @@ class WorkerBeeDaemon:
                 },
             },
             "bundle_formats": ["k1s", "k8s", "helm"],
-            "runtime": runtime_diagnostics(self.runtime_requested),
+            "runtime": runtime_diagnostics(self.runtime_requested, state_root=self.state_root),
+            "containerd_privilege": containerd_privilege_status(
+                state_root=self.state_root,
+                runtime=self.runtime_requested,
+            ),
         }
 
     def cleanup(self, *, execute: bool = False, purge_images: bool = False) -> dict[str, Any]:
@@ -433,6 +443,36 @@ class WorkerBeeDaemon:
             execute=execute,
             purge_images=purge_images,
         )
+
+    def stop_all_projects(self, *, purge: bool = False) -> dict[str, Any]:
+        results: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for name in self._known_projects():
+            try:
+                with self._project_lock(name):
+                    file_lock = FileLock(
+                        project_lock_path(self.state_root, name),
+                        label=f"project {name}",
+                    )
+                    with file_lock:
+                        sup = self._build_supervisor(name, ingress=self._project_ingress(name))
+                        results.append({"project": name, **sup.stop(purge=purge)})
+            except Exception as exc:  # noqa: BLE001
+                errors.append({"project": name, "error": str(exc)})
+        return {
+            "ok": not errors,
+            "state_root": str(self.state_root),
+            "purge": purge,
+            "projects": results,
+            "errors": errors,
+        }
+
+    def stop_global_ingress(self) -> dict[str, Any]:
+        runtime = self._resolve_runtime()
+        if runtime != CONTAINERD_RUNTIME:
+            return {"ok": True, "stopped": False, "runtime": runtime}
+        ingress = GlobalIngress(state_root=self.state_root, runtime=runtime)
+        return {"stopped": True, "runtime": runtime, **ingress.stop()}
 
     def global_dashboard(self) -> dict[str, Any]:
         if self.ingress is not None:

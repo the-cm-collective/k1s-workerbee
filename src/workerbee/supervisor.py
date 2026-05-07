@@ -31,8 +31,12 @@ from workerbee.runtime_support import (
     CONTAINERD_RUNTIME,
     build_image_with_runtime,
     containerd_address,
+    containerd_cni_bin_dir,
+    containerd_cni_conf_dir,
     containerd_data_root,
     containerd_namespace,
+    containerd_network_name,
+    nerdctl_binary,
     resolve_runtime,
     runtime_command_args,
     workerbee_runtime_labels,
@@ -104,7 +108,12 @@ class WorkerBeeSupervisor:
 
         runtime = self._resolve_runtime()
         self._ensure_dirs()
-        network = f"workerbee-{self.project}"
+        state_root = self.state_dir.parent.parent
+        network = (
+            containerd_network_name(state_root, self.project)
+            if runtime == CONTAINERD_RUNTIME
+            else f"workerbee-{self.project}"
+        )
         self._ensure_network(runtime, network)
 
         controller_port = _env_int("WORKERBEE_API_PORT") or choose_port(
@@ -679,7 +688,9 @@ class WorkerBeeSupervisor:
         env = self.k1s_runtime.apply_env(os.environ.copy())
         state_root = self.state_dir.parent.parent
         container_cli = info.runtime
+        nerdctl_cli = nerdctl_binary()
         if info.runtime == CONTAINERD_RUNTIME:
+            nerdctl_cli = os.getenv("WORKERBEE_NERDCTL_BIN") or nerdctl_cli
             container_cli = str(
                 write_containerd_cli_wrapper(
                     self.state_dir / "bin" / "nerdctl-workerbee",
@@ -722,11 +733,19 @@ class WorkerBeeSupervisor:
                 {
                     "AE_CONTAINERD_ADDRESS": containerd_address(),
                     "AE_CRI_ENDPOINT": containerd_address(),
-                    "AE_CONTAINERD_NAMESPACE": containerd_namespace(self.project),
+                    "AE_NERDCTL_BIN": nerdctl_cli,
+                    "AE_CONTAINERD_NAMESPACE": containerd_namespace(state_root, self.project),
                     "AE_CONTAINERD_DATA_ROOT": str(
                         containerd_data_root(state_root, project=self.project)
                     ),
                     "AE_CONTAINERD_NETWORK": info.network,
+                    "AE_CONTAINERD_CNI_BIN_DIR": containerd_cni_bin_dir(),
+                    "AE_CONTAINERD_CNI_CONF_DIR": str(
+                        containerd_cni_conf_dir(state_root, project=self.project)
+                    ),
+                    "NETCONFPATH": str(
+                        containerd_cni_conf_dir(state_root, project=self.project)
+                    ),
                 }
             )
         if self.ingress:

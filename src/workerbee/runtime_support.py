@@ -7,6 +7,7 @@ import json
 import os
 import shlex
 import shutil
+import socket
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,7 @@ from workerbee.contract import WorkerBeeError
 
 WORKERBEE_LABEL = "workerbee.managed=true"
 CONTAINERD_RUNTIME = "containerd"
-CONTAINERD_SYSTEM_NAMESPACE = "workerbee-system"
+CONTAINERD_RESERVED_NAMESPACES = frozenset({"ae", "k8s.io", "moby", "default"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +65,11 @@ def resolve_runtime(requested: str = "auto") -> str:
     )
 
 
-def runtime_diagnostics(requested: str = "auto") -> dict[str, Any]:
+def runtime_diagnostics(
+    requested: str = "auto",
+    *,
+    state_root: Path | None = None,
+) -> dict[str, Any]:
     diagnostics: dict[str, Any] = {
         "requested": requested,
         "podman": _runtime_version("podman"),
@@ -74,9 +79,11 @@ def runtime_diagnostics(requested: str = "auto") -> dict[str, Any]:
         "containerd": {
             "address": containerd_address(),
             "socket_exists": _containerd_socket_exists(containerd_address()),
-            "system_namespace": CONTAINERD_SYSTEM_NAMESPACE,
+            "reserved_namespaces": sorted(CONTAINERD_RESERVED_NAMESPACES),
         },
     }
+    if state_root is not None and requested.lower() == CONTAINERD_RUNTIME:
+        diagnostics["containerd"]["safety"] = containerd_safety_info(state_root)
     try:
         runtime = resolve_runtime(requested)
         diagnostics["selected"] = runtime
@@ -87,6 +94,17 @@ def runtime_diagnostics(requested: str = "auto") -> dict[str, Any]:
             diagnostics["docker_desktop_hint"] = _docker_desktop_hint()
         if runtime == CONTAINERD_RUNTIME:
             diagnostics["containerd"]["selected"] = True
+            probe = containerd_nerdctl_probe(containerd_address())
+            diagnostics["containerd"]["nerdctl_probe"] = probe
+            diagnostics["ok"] = bool(probe.get("ok"))
+            if not probe.get("ok"):
+                diagnostics["error"] = {
+                    "code": probe.get("code") or "CONTAINERD_UNAVAILABLE",
+                    "message": probe.get("message") or "nerdctl cannot access containerd",
+                    "details": {"probe": probe},
+                    "remediation": _runtime_guidance(),
+                    "retryable": True,
+                }
     except WorkerBeeError as exc:
         diagnostics["selected"] = None
         diagnostics["ok"] = False
@@ -143,10 +161,172 @@ def containerd_address() -> str:
     )
 
 
-def containerd_namespace(project: str | None = None, *, system: bool = False) -> str:
+def containerd_socket_path(address: str | None = None) -> Path | None:
+    selected = address or containerd_address()
+    if selected.startswith("unix://"):
+        return Path(selected.removeprefix("unix://"))
+    if selected.startswith("/"):
+        return Path(selected)
+    return None
+
+
+def containerd_socket_access_info(address: str | None = None) -> dict[str, Any]:
+    selected_address = address or containerd_address()
+    path = containerd_socket_path(selected_address)
+    if path is None:
+        return {
+            "address": selected_address,
+            "path": None,
+            "exists": None,
+            "accessible": None,
+            "error": None,
+            "error_code": "NON_UNIX_CONTAINERD_ADDRESS",
+        }
+    exists = path.exists()
+    if not exists:
+        return {
+            "address": selected_address,
+            "path": str(path),
+            "exists": False,
+            "accessible": False,
+            "error": f"containerd socket not found: {path}",
+            "error_code": "CONTAINERD_SOCKET_MISSING",
+        }
+    if not path.is_socket():
+        return {
+            "address": selected_address,
+            "path": str(path),
+            "exists": True,
+            "accessible": False,
+            "error": f"containerd path is not a socket: {path}",
+            "error_code": "CONTAINERD_SOCKET_INVALID",
+        }
+    sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    try:
+        sock.connect(str(path))
+    except PermissionError as exc:
+        return {
+            "address": selected_address,
+            "path": str(path),
+            "exists": True,
+            "accessible": False,
+            "error": str(exc),
+            "error_code": "CONTAINERD_SOCKET_PERMISSION_DENIED",
+        }
+    except OSError as exc:
+        return {
+            "address": selected_address,
+            "path": str(path),
+            "exists": True,
+            "accessible": False,
+            "error": str(exc),
+            "error_code": "CONTAINERD_SOCKET_CONNECT_FAILED",
+        }
+    finally:
+        sock.close()
+    return {
+        "address": selected_address,
+        "path": str(path),
+        "exists": True,
+        "accessible": True,
+        "error": None,
+        "error_code": None,
+    }
+
+
+def containerd_nerdctl_probe(address: str | None = None) -> dict[str, Any]:
+    selected_address = address or containerd_address()
+    socket_info = containerd_socket_access_info(selected_address)
+    nerdctl = shutil.which(nerdctl_binary())
+    using_workerbee_helper = bool(os.getenv("WORKERBEE_CONTAINERD_HELPER_SOCKET"))
+    if nerdctl is None:
+        return {
+            "ok": False,
+            "code": "NERDCTL_MISSING",
+            "message": f"{nerdctl_binary()} not found on PATH",
+            "cmd": None,
+            "stdout": "",
+            "socket": socket_info,
+            "namespaces": [],
+        }
+    if socket_info.get("accessible") is False and not using_workerbee_helper:
+        return {
+            "ok": False,
+            "code": socket_info.get("error_code") or "CONTAINERD_SOCKET_INACCESSIBLE",
+            "message": str(socket_info.get("error") or "containerd socket is not accessible"),
+            "cmd": None,
+            "stdout": "",
+            "socket": socket_info,
+            "namespaces": [],
+        }
+    cmd = [nerdctl, "--address", selected_address, "namespace", "ls", "--quiet"]
+    try:
+        proc = subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=10,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "ok": False,
+            "code": "NERDCTL_PROBE_FAILED",
+            "message": str(exc),
+            "cmd": cmd,
+            "stdout": "",
+            "socket": socket_info,
+            "namespaces": [],
+        }
+    namespaces = [
+        line.strip()
+        for line in proc.stdout.splitlines()
+        if line.strip() and line.strip().lower() != "name"
+    ]
+    if proc.returncode == 0:
+        return {
+            "ok": True,
+            "code": None,
+            "message": None,
+            "cmd": cmd,
+            "stdout": proc.stdout,
+            "socket": socket_info,
+            "namespaces": sorted(set(namespaces)),
+        }
+    return {
+        "ok": False,
+        "code": _classify_nerdctl_error(proc.stdout),
+        "message": (proc.stdout or "").strip() or f"nerdctl exited {proc.returncode}",
+        "cmd": cmd,
+        "stdout": proc.stdout,
+        "socket": socket_info,
+        "namespaces": [],
+    }
+
+
+def containerd_cni_bin_dir() -> str:
+    return (
+        os.getenv("WORKERBEE_CONTAINERD_CNI_BIN_DIR")
+        or os.getenv("AE_CONTAINERD_CNI_BIN_DIR")
+        or os.getenv("CNI_PATH")
+        or "/opt/cni/bin"
+    )
+
+
+def containerd_namespace(
+    state_root: Path,
+    project: str | None = None,
+    *,
+    system: bool = False,
+) -> str:
+    state_hash = _state_hash(state_root)
     if system or not project:
-        return CONTAINERD_SYSTEM_NAMESPACE
-    return f"workerbee-{project_slug_for_runtime(project)}"
+        return f"workerbee-{state_hash}-system"
+    return f"workerbee-{state_hash}-{project_slug_for_runtime(project)}"
+
+
+def containerd_network_name(state_root: Path, project: str) -> str:
+    return containerd_namespace(state_root, project=project)
 
 
 def containerd_data_root(
@@ -161,6 +341,18 @@ def containerd_data_root(
     return root / "projects" / project_slug_for_runtime(project) / "containerd-data"
 
 
+def containerd_cni_conf_dir(
+    state_root: Path,
+    project: str | None = None,
+    *,
+    system: bool = False,
+) -> Path:
+    root = state_root.expanduser().resolve()
+    if system or not project:
+        return root / "global" / "containerd-cni-net.d"
+    return root / "projects" / project_slug_for_runtime(project) / "containerd-cni-net.d"
+
+
 def containerd_base_args(
     *,
     state_root: Path,
@@ -168,15 +360,23 @@ def containerd_base_args(
     system: bool = False,
 ) -> list[str]:
     data_root = containerd_data_root(state_root, project=project, system=system)
+    cni_conf = containerd_cni_conf_dir(state_root, project=project, system=system)
     data_root.mkdir(parents=True, exist_ok=True)
+    cni_conf.mkdir(parents=True, exist_ok=True)
+    namespace = containerd_namespace(state_root, project=project, system=system)
+    _raise_if_reserved_containerd_namespace(namespace)
     return [
         nerdctl_binary(),
         "--address",
         containerd_address(),
         "--namespace",
-        containerd_namespace(project, system=system),
+        namespace,
         "--data-root",
         str(data_root),
+        "--cni-path",
+        containerd_cni_bin_dir(),
+        "--cni-netconfpath",
+        str(cni_conf),
     ]
 
 
@@ -249,6 +449,7 @@ def build_image_with_runtime(
             timeout=timeout,
         )
     cmd = [selected, "build", "-t", tag]
+    cmd.extend(_container_build_file_args(build_context))
     for label in label_values:
         cmd.extend(["--label", label])
     cmd.append(str(build_context))
@@ -290,6 +491,51 @@ def project_slug_for_runtime(value: str) -> str:
     return out or "default"
 
 
+def containerd_safety_info(state_root: Path, project: str | None = None) -> dict[str, Any]:
+    root = state_root.expanduser().resolve()
+    project_name = project_slug_for_runtime(project) if project else None
+    system_namespace = containerd_namespace(root, system=True)
+    project_namespace = (
+        containerd_namespace(root, project=project_name) if project_name else None
+    )
+    namespaces = [system_namespace] + ([project_namespace] if project_namespace else [])
+    reserved_overlap = sorted(set(namespaces).intersection(CONTAINERD_RESERVED_NAMESPACES))
+    active_namespaces, namespace_probe_error = _list_containerd_namespaces()
+    non_workerbee_namespaces = [
+        item for item in active_namespaces if not item.startswith(f"workerbee-{_state_hash(root)}-")
+    ]
+    warnings = []
+    if _containerd_socket_exists(containerd_address()):
+        warnings.append(
+            "WorkerBee is using a shared host containerd socket; isolation relies on "
+            "WorkerBee state-hash namespaces and state-local nerdctl/CNI roots."
+        )
+    return {
+        "state_hash": _state_hash(root),
+        "address": containerd_address(),
+        "socket_exists": _containerd_socket_exists(containerd_address()),
+        "reserved_namespaces": sorted(CONTAINERD_RESERVED_NAMESPACES),
+        "reserved_overlap": reserved_overlap,
+        "active_namespaces": active_namespaces,
+        "non_workerbee_namespaces": non_workerbee_namespaces,
+        "namespace_probe_error": namespace_probe_error,
+        "system_namespace": system_namespace,
+        "project_namespace": project_namespace,
+        "project_network": containerd_network_name(root, project_name) if project_name else None,
+        "system_data_root": str(containerd_data_root(root, system=True)),
+        "project_data_root": (
+            str(containerd_data_root(root, project=project_name)) if project_name else None
+        ),
+        "system_cni_conf_dir": str(containerd_cni_conf_dir(root, system=True)),
+        "project_cni_conf_dir": (
+            str(containerd_cni_conf_dir(root, project=project_name)) if project_name else None
+        ),
+        "cni_bin_dir": containerd_cni_bin_dir(),
+        "warnings": warnings,
+        "ok": not reserved_overlap,
+    }
+
+
 def _cleanup_containerd_runtime(
     *,
     state_root: Path,
@@ -297,12 +543,10 @@ def _cleanup_containerd_runtime(
     purge_images: bool,
 ) -> dict[str, Any]:
     state_hash = _state_hash(state_root)
-    project_names = {
-        name.removeprefix("workerbee-") for name in _known_project_networks(state_root)
-    }
-    namespaces = [(CONTAINERD_SYSTEM_NAMESPACE, None)]
+    project_names = set(_known_projects(state_root))
+    namespaces = [(containerd_namespace(state_root, system=True), None)]
     namespaces.extend(
-        (containerd_namespace(project), project)
+        (containerd_namespace(state_root, project), project)
         for project in sorted(project_names)
     )
     actions: list[dict[str, Any]] = []
@@ -313,7 +557,7 @@ def _cleanup_containerd_runtime(
             action["namespace"] = namespace
             actions.append(action)
         if project is not None:
-            targets = {f"workerbee-{project}"}
+            targets = {containerd_network_name(state_root, project)}
             for action in _cleanup_networks(cmd, targets=targets, execute=execute):
                 action["namespace"] = namespace
                 actions.append(action)
@@ -325,6 +569,7 @@ def _cleanup_containerd_runtime(
         "ok": True,
         "runtime": CONTAINERD_RUNTIME,
         "state_root": str(state_root.resolve()),
+        "safety": containerd_safety_info(state_root),
         "execute": execute,
         "purge_images": purge_images,
         "actions": actions,
@@ -342,6 +587,7 @@ def _build_image_containerd(
 ) -> dict[str, Any]:
     base = containerd_base_args(state_root=state_root, project=project)
     cmd = [*base, "build", "-t", tag]
+    cmd.extend(_container_build_file_args(context))
     for label in labels:
         cmd.extend(["--label", label])
     cmd.append(str(context))
@@ -413,6 +659,7 @@ def _build_with_fallback_and_load(
     timeout: int,
 ) -> dict[str, Any]:
     build_cmd = [fallback, "build", "-t", tag]
+    build_cmd.extend(_container_build_file_args(context))
     for label in labels:
         build_cmd.extend(["--label", label])
     build_cmd.append(str(context))
@@ -505,6 +752,10 @@ def _cleanup_networks(
 
 
 def _known_project_networks(state_root: Path) -> set[str]:
+    return {f"workerbee-{name}" for name in _known_projects(state_root)}
+
+
+def _known_projects(state_root: Path) -> set[str]:
     root = state_root.expanduser().resolve()
     projects = set()
     registry = root / "registry.json"
@@ -520,7 +771,7 @@ def _known_project_networks(state_root: Path) -> set[str]:
     projects_dir = root / "projects"
     if projects_dir.is_dir():
         projects.update(path.name for path in projects_dir.iterdir() if path.is_dir())
-    return {f"workerbee-{name}" for name in projects}
+    return {project_slug_for_runtime(name) for name in projects}
 
 
 def _cleanup_images(cmd: RuntimeCommand, *, execute: bool) -> list[dict[str, Any]]:
@@ -533,6 +784,15 @@ def _cleanup_images(cmd: RuntimeCommand, *, execute: bool) -> list[dict[str, Any
     if execute and images:
         cmd.run(["rmi", "-f", *[str(item["id"]) for item in images]], timeout=120)
     return images
+
+
+def _container_build_file_args(context: Path) -> list[str]:
+    if (context / "Dockerfile").is_file():
+        return []
+    containerfile = context / "Containerfile"
+    if containerfile.is_file():
+        return ["-f", str(containerfile)]
+    return []
 
 
 def _ids(raw: str) -> list[str]:
@@ -591,8 +851,9 @@ def _docker_desktop_hint() -> bool | None:
 def _runtime_guidance() -> str:
     return (
         "Install Podman or Docker for the default workflow, or install nerdctl/containerd and "
-        "run WorkerBee with `--runtime containerd`. WorkerBee does not install container "
-        "runtimes automatically."
+        "run WorkerBee with `--runtime containerd`. Direct containerd also requires access "
+        "to the configured containerd socket. WorkerBee does not install container runtimes "
+        "automatically."
     )
 
 
@@ -606,3 +867,37 @@ def _containerd_socket_exists(address: str) -> bool | None:
     if address.startswith("/"):
         return Path(address).exists()
     return None
+
+
+def _list_containerd_namespaces() -> tuple[list[str], str | None]:
+    probe = containerd_nerdctl_probe(containerd_address())
+    if not probe.get("ok"):
+        return [], str(probe.get("message") or probe.get("code") or "nerdctl probe failed")
+    return list(probe.get("namespaces") or []), None
+
+
+def _classify_nerdctl_error(output: str) -> str:
+    lowered = output.lower()
+    if "rootless containerd not running" in lowered or "containerd-rootless" in lowered:
+        return "NERDCTL_ROOTLESS_MODE"
+    if "permission denied" in lowered:
+        return "CONTAINERD_SOCKET_PERMISSION_DENIED"
+    if "no such file or directory" in lowered and "containerd.sock" in lowered:
+        return "CONTAINERD_SOCKET_MISSING"
+    return "NERDCTL_PROBE_FAILED"
+
+
+def _raise_if_reserved_containerd_namespace(namespace: str) -> None:
+    if namespace in CONTAINERD_RESERVED_NAMESPACES:
+        raise WorkerBeeError(
+            code="UNSAFE_CONTAINERD_NAMESPACE",
+            message=f"Refusing to use reserved containerd namespace `{namespace}`",
+            details={
+                "namespace": namespace,
+                "reserved_namespaces": sorted(CONTAINERD_RESERVED_NAMESPACES),
+            },
+            remediation=(
+                "Use WorkerBee-managed containerd namespaces derived from the WorkerBee "
+                "state root; do not target k1s or Kubernetes runtime namespaces directly."
+            ),
+        )

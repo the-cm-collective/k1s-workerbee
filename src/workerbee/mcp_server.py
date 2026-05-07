@@ -2,10 +2,17 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 
 from workerbee.agent import runbook_markdown
+from workerbee.containerd_helper import (
+    containerd_privilege_env,
+    ensure_containerd_privilege,
+    stop_containerd_helper,
+    temporary_containerd_privilege_env,
+)
 from workerbee.contract import protect
 from workerbee.daemon import WorkerBeeDaemon
 from workerbee.manifests import (
@@ -15,6 +22,7 @@ from workerbee.manifests import (
     prepare_stage,
     validate_stage,
 )
+from workerbee.paths import default_state_root
 from workerbee.trust import trust_install, trust_status, trust_uninstall
 
 
@@ -26,6 +34,7 @@ def serve_mcp(
     port: int = 8765,
     state_dir: Path | None = None,
     state_root: Path | None = None,
+    containerd_privilege: str = "auto",
 ) -> None:
     try:
         from mcp.server.fastmcp import FastMCP
@@ -36,12 +45,29 @@ def serve_mcp(
 
     if state_dir is not None and state_root is not None:
         raise RuntimeError("use either --state-dir or --state-root, not both")
+    privilege = ensure_containerd_privilege(
+        state_root=state_root or state_dir or default_state_root(),
+        runtime=runtime,
+        mode=containerd_privilege,
+    )
+    privilege_env = containerd_privilege_env(privilege)
+    os.environ.update(privilege_env)
     daemon = WorkerBeeDaemon(
         state_root=state_root or state_dir,
         runtime=runtime,
         default_project=project,
     )
-    ingress = daemon.start(mcp_bind_url=f"http://{host}:{port}/mcp")
+    try:
+        with temporary_containerd_privilege_env(privilege_env):
+            ingress = daemon.start(mcp_bind_url=f"http://{host}:{port}/mcp")
+    except Exception:
+        _release_foreground_privilege(
+            privilege=privilege,
+            daemon=daemon,
+            privilege_env=privilege_env,
+            stop_stacks=False,
+        )
+        raise
     print(f"WorkerBee global dashboard: {ingress.dashboard_url}", flush=True)
     print(f"WorkerBee state root: {ingress.state_root}", flush=True)
     if not ingress.localhost_dns_ok:
@@ -376,4 +402,31 @@ def serve_mcp(
             f"goal: {goal or '(not provided)'}\n\n{runbook_markdown()}"
         )
 
-    mcp.run(transport="streamable-http")
+    try:
+        mcp.run(transport="streamable-http")
+    finally:
+        _release_foreground_privilege(
+            privilege=privilege,
+            daemon=daemon,
+            privilege_env=privilege_env,
+            stop_stacks=True,
+        )
+
+
+def _release_foreground_privilege(
+    *,
+    privilege: dict[str, Any],
+    daemon: WorkerBeeDaemon,
+    privilege_env: dict[str, str],
+    stop_stacks: bool,
+) -> None:
+    helper = privilege.get("helper") if isinstance(privilege, dict) else None
+    if not isinstance(helper, dict) or not helper.get("started"):
+        return
+    with temporary_containerd_privilege_env(privilege_env):
+        if stop_stacks:
+            cleanup = daemon.stop_all_projects(purge=False)
+            ingress_cleanup = daemon.stop_global_ingress()
+            if not bool(cleanup.get("ok")) or not bool(ingress_cleanup.get("ok")):
+                return
+        stop_containerd_helper(daemon.state_root)

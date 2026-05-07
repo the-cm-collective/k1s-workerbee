@@ -1,5 +1,7 @@
 from pathlib import Path
+from types import SimpleNamespace
 
+from workerbee import cli
 from workerbee.cli import build_parser
 
 
@@ -32,6 +34,8 @@ def test_mcp_start_accepts_background_bind_flags(tmp_path: Path) -> None:
             str(tmp_path),
             "--runtime",
             "containerd",
+            "--containerd-privilege",
+            "sudo-helper",
             "mcp",
             "start",
             "--host",
@@ -46,7 +50,60 @@ def test_mcp_start_accepts_background_bind_flags(tmp_path: Path) -> None:
     assert args.cmd == "mcp"
     assert args.mcp_cmd == "start"
     assert args.runtime == "containerd"
+    assert args.containerd_privilege == "sudo-helper"
     assert args.state_root == tmp_path
     assert args.host == "127.0.0.1"
     assert args.port == 9999
     assert args.timeout == 1
+
+
+def test_doctor_reports_requested_runtime(tmp_path: Path, monkeypatch) -> None:
+    calls: list[str] = []
+
+    def fake_runtime_diagnostics(requested: str, **_kwargs):
+        calls.append(requested)
+        return {"ok": requested == "docker", "requested": requested}
+
+    runtime = SimpleNamespace(
+        source="test",
+        k1s_root=tmp_path,
+        python_executable="python",
+        ae_origin="test-ae",
+        apply_env=lambda env: env,
+    )
+    proc = SimpleNamespace(returncode=0, stderr="")
+
+    monkeypatch.setattr(cli, "runtime_diagnostics", fake_runtime_diagnostics)
+    monkeypatch.setattr(
+        cli,
+        "containerd_privilege_status",
+        lambda **_kwargs: {"ok": True, "enabled": False},
+    )
+    monkeypatch.setattr(cli, "resolve_k1s_runtime", lambda: runtime)
+    monkeypatch.setattr(cli.subprocess, "run", lambda *_args, **_kwargs: proc)
+
+    result = cli._doctor(runtime="docker", state_root=tmp_path)
+
+    assert calls == ["docker", "containerd"]
+    assert result["runtime"]["requested"] == "docker"
+    assert result["ok"] is True
+
+
+def test_containerd_privilege_status_command_parses_global_policy(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--state-root",
+            str(tmp_path),
+            "--runtime",
+            "containerd",
+            "--containerd-privilege",
+            "unprivileged",
+            "containerd-privilege",
+            "status",
+        ]
+    )
+
+    assert args.cmd == "containerd-privilege"
+    assert args.containerd_privilege_cmd == "status"
+    assert args.runtime == "containerd"
+    assert args.containerd_privilege == "unprivileged"
