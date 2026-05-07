@@ -1,0 +1,311 @@
+"""POC app stack generation and validation."""
+
+from __future__ import annotations
+
+import importlib.resources as resources
+import json
+import shutil
+import subprocess
+import textwrap
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from workerbee.http import request
+
+
+POC_NAMESPACE = "workerbee-poc"
+POC_APPS = ("store", "api", "frontend")
+
+
+@dataclass(slots=True)
+class POCArtifacts:
+    manifests: list[Path]
+    config_file: Path
+    secret_file: Path
+    image_tags: dict[str, str]
+    urls: dict[str, str]
+
+
+def _copy_asset_tree(name: str, target: Path) -> None:
+    src = resources.files("workerbee.assets").joinpath("poc", name)
+    if target.exists():
+        shutil.rmtree(target)
+    target.mkdir(parents=True, exist_ok=True)
+    for item in src.iterdir():
+        dest = target / item.name
+        if item.is_dir():
+            shutil.copytree(item, dest)
+        else:
+            dest.write_bytes(item.read_bytes())
+
+
+def build_images(*, runtime: str, state_dir: Path, project: str) -> dict[str, str]:
+    build_root = state_dir / "build"
+    build_root.mkdir(parents=True, exist_ok=True)
+    tags: dict[str, str] = {}
+    for name in POC_APPS:
+        ctx = build_root / name
+        _copy_asset_tree(name, ctx)
+        tag = f"workerbee-poc-{name}:{project}"
+        cmd = [runtime, "build", "-t", tag, str(ctx)]
+        proc = subprocess.run(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        if proc.returncode != 0:
+            raise RuntimeError(f"failed to build {name} image with {runtime}:\n{proc.stdout}")
+        tags[name] = tag
+    return tags
+
+
+def write_stack_files(
+    *,
+    state_dir: Path,
+    project: str,
+    image_tags: dict[str, str],
+    service_ports: dict[str, int],
+) -> POCArtifacts:
+    spec_dir = state_dir / "specs"
+    data_dir = state_dir / "poc-data"
+    spec_dir.mkdir(parents=True, exist_ok=True)
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    config_file = data_dir / "api-config.yaml"
+    secret_file = data_dir / "api-secret.yaml"
+    config_file.write_text("mode: poc\ncolor: amber\nfeature_flag: workerbee\n", encoding="utf-8")
+    secret_file.write_text("token: workerbee-poc-token\n", encoding="utf-8")
+
+    urls = {
+        "store": f"http://127.0.0.1:{service_ports['store']}",
+        "api": f"http://127.0.0.1:{service_ports['api']}",
+        "frontend": f"http://127.0.0.1:{service_ports['frontend']}",
+    }
+    store_urls = ",".join(
+        [
+            f"http://ae-{POC_NAMESPACE}--store:8080",
+            f"http://app-{POC_NAMESPACE}--store:8080",
+            f"http://host.containers.internal:{service_ports['store']}",
+            f"http://host.docker.internal:{service_ports['store']}",
+            urls["store"],
+        ]
+    )
+    api_urls = ",".join(
+        [
+            f"http://ae-{POC_NAMESPACE}--api:8080",
+            f"http://app-{POC_NAMESPACE}--api:8080",
+            f"http://host.containers.internal:{service_ports['api']}",
+            f"http://host.docker.internal:{service_ports['api']}",
+            urls["api"],
+        ]
+    )
+
+    manifests: dict[str, str] = {
+        "store": f"""
+            apiVersion: ae.dev/v1alpha1
+            kind: Deployment
+            metadata:
+              name: store
+              namespace: {POC_NAMESPACE}
+              labels:
+                workerbee.k1s.dev/project: {project}
+            spec:
+              image: {image_tags["store"]}
+              imagePullPolicy: Never
+              replicas: 1
+              env:
+                - name: SEED_KEY
+                  value: boot
+                - name: SEED_VALUE
+                  value: workerbee
+              ports:
+                - name: http
+                  containerPort: 8080
+              service:
+                port: {service_ports["store"]}
+                targetPort: 8080
+              health:
+                readiness:
+                  httpGet: {{ path: /healthz, port: 8080 }}
+                  initialDelaySeconds: 1
+                  periodSeconds: 2
+                liveness:
+                  httpGet: {{ path: /healthz, port: 8080 }}
+                  initialDelaySeconds: 3
+                  periodSeconds: 5
+              emptyDirs:
+                - name: cache
+                  mountPath: /var/cache/workerbee
+              storage:
+                - name: data
+                  mountPath: /data
+                  retention: Delete
+              resources:
+                requests:
+                  cpu: 0.05
+                  memory: 64Mi
+                limits:
+                  cpu: 0.25
+                  memory: 128Mi
+        """,
+        "api": f"""
+            apiVersion: ae.dev/v1alpha1
+            kind: Deployment
+            metadata:
+              name: api
+              namespace: {POC_NAMESPACE}
+              labels:
+                workerbee.k1s.dev/project: {project}
+            spec:
+              image: {image_tags["api"]}
+              imagePullPolicy: Never
+              replicas: 1
+              env:
+                - name: STORE_URLS
+                  value: "{store_urls}"
+                - name: APP_NAME
+                  value: workerbee-api
+                - name: AE_CONFIG_ROOT
+                  value: /var/run/ae/config/{POC_NAMESPACE}--api
+              ports:
+                - name: http
+                  containerPort: 8080
+              service:
+                port: {service_ports["api"]}
+                targetPort: 8080
+              configRefs:
+                - name: api-config
+                  path: {config_file}
+                  envFrom: true
+                  files:
+                    - key: mode
+                      file: mode.txt
+                    - key: color
+                      file: color.txt
+              secretRefs:
+                - name: api-secret
+                  path: {secret_file}
+                  envFrom: true
+                  files:
+                    - key: token
+                      file: token
+              health:
+                readiness:
+                  httpGet: {{ path: /healthz, port: 8080 }}
+                  initialDelaySeconds: 1
+                  periodSeconds: 2
+                liveness:
+                  httpGet: {{ path: /healthz, port: 8080 }}
+                  initialDelaySeconds: 3
+                  periodSeconds: 5
+                startup:
+                  httpGet: {{ path: /healthz, port: 8080 }}
+                  failureThreshold: 20
+                  periodSeconds: 2
+              emptyDirs:
+                - name: work
+                  mountPath: /work
+              ingress:
+                host: api.workerbee.local
+                path: /
+              resources:
+                requests:
+                  cpu: 0.05
+                  memory: 96Mi
+                limits:
+                  cpu: 0.5
+                  memory: 192Mi
+              security:
+                runAsUser: 1000
+                readOnlyRootFilesystem: false
+                dropCapabilities: ["NET_RAW"]
+                seccompProfileType: RuntimeDefault
+              exportHints:
+                suppressImageMultiArchWarning: true
+        """,
+        "frontend": f"""
+            apiVersion: ae.dev/v1alpha1
+            kind: Deployment
+            metadata:
+              name: frontend
+              namespace: {POC_NAMESPACE}
+              labels:
+                workerbee.k1s.dev/project: {project}
+            spec:
+              image: {image_tags["frontend"]}
+              imagePullPolicy: Never
+              replicas: 1
+              env:
+                - name: API_URLS
+                  value: "{api_urls}"
+              ports:
+                - name: http
+                  containerPort: 8080
+              service:
+                port: {service_ports["frontend"]}
+                targetPort: 8080
+              health:
+                readiness:
+                  httpGet: {{ path: /healthz, port: 8080 }}
+                  initialDelaySeconds: 1
+                  periodSeconds: 2
+                liveness:
+                  httpGet: {{ path: /healthz, port: 8080 }}
+                  initialDelaySeconds: 3
+                  periodSeconds: 5
+              ingress:
+                host: app.workerbee.local
+                paths:
+                  - /
+                  - /api
+              resources:
+                requests:
+                  cpu: 0.05
+                  memory: 64Mi
+                limits:
+                  cpu: 0.25
+                  memory: 128Mi
+              exportHints:
+                suppressImageMultiArchWarning: true
+        """,
+    }
+
+    manifest_paths: list[Path] = []
+    for name, text in manifests.items():
+        path = spec_dir / f"{name}.yaml"
+        path.write_text(textwrap.dedent(text).lstrip(), encoding="utf-8")
+        manifest_paths.append(path)
+    return POCArtifacts(
+        manifests=manifest_paths,
+        config_file=config_file,
+        secret_file=secret_file,
+        image_tags=image_tags,
+        urls=urls,
+    )
+
+
+def validate_poc_urls(urls: dict[str, str], *, timeout_seconds: float = 90.0) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    last_errors: dict[str, str] = {}
+    while time.monotonic() < deadline:
+        result: dict[str, Any] = {}
+        ok = True
+        for name, base in urls.items():
+            try:
+                resp = request(f"{base}/healthz", timeout=2.0)
+                if resp.status != 200:
+                    ok = False
+                    last_errors[name] = f"health status {resp.status}"
+                    continue
+                result[name] = resp.json()
+            except Exception as exc:  # noqa: BLE001
+                ok = False
+                last_errors[name] = str(exc)
+        if ok:
+            api_resp = request(f"{urls['api']}/api/check", timeout=4.0)
+            frontend_resp = request(f"{urls['frontend']}/", timeout=4.0)
+            if api_resp.status == 200 and frontend_resp.status == 200:
+                result["api_check"] = api_resp.json()
+                result["frontend"] = frontend_resp.text[:300]
+                return result
+            last_errors["api_check"] = f"api={api_resp.status} frontend={frontend_resp.status}"
+        time.sleep(1.0)
+    raise TimeoutError(f"POC URLs did not become ready: {json.dumps(last_errors, indent=2)}")

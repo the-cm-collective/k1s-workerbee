@@ -1,0 +1,2 @@
+"""Package assets for WorkerBee."""
+
