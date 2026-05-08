@@ -187,12 +187,17 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
 def stop_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 10.0) -> dict[str, Any]:
     metadata = _read_metadata(config.metadata_file)
     if not metadata:
+        privilege = _ensure_stop_privilege(config)
+        metadata = _metadata_with_privilege(config, metadata, privilege)
         global_ingress_stop = _stop_global_ingress(config, metadata)
+        helper_stop = _stop_temporary_helper(config, privilege)
         return {
             **_base_status(config),
             "running": False,
             "stopped": False,
             "global_ingress_stop": global_ingress_stop,
+            "containerd_helper_stop": helper_stop,
+            "containerd_privilege": privilege,
         }
     pid = _metadata_pid(metadata)
     if pid is None or not _pid_alive(pid):
@@ -477,6 +482,51 @@ def _metadata_privilege_env(metadata: dict[str, Any]) -> dict[str, str]:
     if isinstance(privilege, dict):
         return containerd_privilege_env(privilege)
     return {}
+
+
+def _ensure_stop_privilege(config: MCPDaemonConfig) -> dict[str, Any] | None:
+    runtime = config.runtime
+    if runtime != CONTAINERD_RUNTIME:
+        ingress = load_global_ingress_info(config.state_root) or {}
+        runtime = str(ingress.get("runtime") or runtime)
+    if runtime != CONTAINERD_RUNTIME:
+        return None
+    return ensure_containerd_privilege(
+        state_root=config.state_root,
+        runtime=runtime,
+        mode=config.containerd_privilege,
+    )
+
+
+def _metadata_with_privilege(
+    config: MCPDaemonConfig,
+    metadata: dict[str, Any],
+    privilege: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if not privilege:
+        return metadata
+    merged = dict(metadata)
+    merged.setdefault("runtime", privilege.get("runtime") or config.runtime)
+    merged["containerd_privilege"] = privilege
+    merged["containerd_privilege_mode"] = (
+        privilege.get("requested_mode")
+        or privilege.get("effective_mode")
+        or config.containerd_privilege
+    )
+    return merged
+
+
+def _stop_temporary_helper(
+    config: MCPDaemonConfig,
+    privilege: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    if not privilege or privilege.get("runtime") != CONTAINERD_RUNTIME:
+        return None
+    helper = privilege.get("helper")
+    if not isinstance(helper, dict) or not bool(helper.get("started")):
+        return None
+    with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
+        return stop_containerd_helper(config.state_root)
 
 
 def _stop_metadata_helper(

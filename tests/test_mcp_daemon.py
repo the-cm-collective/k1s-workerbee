@@ -292,6 +292,44 @@ def test_stop_mcp_daemon_without_metadata_still_stops_global_ingress(
     assert calls == ["ingress"]
 
 
+def test_stop_mcp_daemon_without_metadata_uses_containerd_privilege(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(
+        state_root=tmp_path,
+        runtime="containerd",
+        containerd_privilege="sudo-helper",
+    )
+    calls: list[str] = []
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.ensure_containerd_privilege",
+        lambda **_kwargs: {
+            "ok": True,
+            "runtime": "containerd",
+            "requested_mode": "sudo-helper",
+            "helper": {"started": True},
+            "env": {"WORKERBEE_NERDCTL_BIN": str(tmp_path / "workerbee-nerdctl")},
+        },
+    )
+
+    def fake_stop_global(_config, metadata):
+        calls.append(metadata["containerd_privilege"]["env"]["WORKERBEE_NERDCTL_BIN"])
+        return {"ok": True, "stopped": True, "runtime": "containerd"}
+
+    monkeypatch.setattr("workerbee.mcp_daemon._stop_global_ingress", fake_stop_global)
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.stop_containerd_helper",
+        lambda _root: calls.append("stop-helper") or {"ok": True, "stopped": True},
+    )
+
+    result = stop_mcp_daemon(config, timeout=1)
+
+    assert result["global_ingress_stop"]["stopped"] is True
+    assert result["containerd_helper_stop"]["stopped"] is True
+    assert calls == [str(tmp_path / "workerbee-nerdctl"), "stop-helper"]
+
+
 def test_stop_mcp_daemon_stops_containerd_helper_after_cleanup(
     tmp_path: Path,
     monkeypatch,

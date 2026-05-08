@@ -144,6 +144,31 @@ normal WorkerBee arguments after applying the direct containerd defaults:
 scripts/dev/wb-containerd --project k1s-dev profile list
 ```
 
+For an installed/user-level WorkerBee, persist the same defaults once and then
+use the normal `workerbee` command:
+
+```bash
+workerbee config set \
+  --runtime containerd \
+  --containerd-privilege sudo-helper \
+  --state-root /tmp/workerbee-containerd-verify \
+  --mcp-host 127.0.0.1 \
+  --mcp-port 8765 \
+  --mcp-timeout 90
+
+workerbee mcp restart
+workerbee mcp status
+workerbee mcp stop
+```
+
+WorkerBee reads defaults from `${XDG_CONFIG_HOME:-~/.config}/workerbee/config.json`.
+Explicit CLI flags still win, and environment variables such as
+`WORKERBEE_RUNTIME`, `WORKERBEE_CONTAINERD_PRIVILEGE`,
+`WORKERBEE_STATE_ROOT`, `WORKERBEE_MCP_HOST`, `WORKERBEE_MCP_PORT`, and
+`WORKERBEE_MCP_TIMEOUT` override the config file. Use
+`workerbee config show`, `workerbee config path`, or `workerbee config clear`
+to inspect or reset these defaults.
+
 The MCP daemon is intentionally shared. Multiple coding agents can connect to
 the same local MCP server URL and operate on separate project scopes by passing
 distinct `project` values to WorkerBee tools. The daemon stores those projects

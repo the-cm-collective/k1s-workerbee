@@ -57,6 +57,105 @@ def test_mcp_start_accepts_background_bind_flags(tmp_path: Path) -> None:
     assert args.timeout == 1
 
 
+def test_config_set_parses_user_level_defaults(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "config",
+            "set",
+            "--runtime",
+            "containerd",
+            "--containerd-privilege",
+            "sudo-helper",
+            "--state-root",
+            str(tmp_path),
+            "--mcp-host",
+            "127.0.0.1",
+            "--mcp-port",
+            "8765",
+            "--mcp-timeout",
+            "90",
+        ]
+    )
+
+    assert args.cmd == "config"
+    assert args.config_cmd == "set"
+    assert args.runtime == "containerd"
+    assert args.containerd_privilege == "sudo-helper"
+    assert args.state_root == tmp_path
+    assert args.mcp_host == "127.0.0.1"
+    assert args.mcp_port == 8765
+    assert args.mcp_timeout == 90
+
+
+def test_cli_defaults_apply_to_mcp_commands(tmp_path: Path, monkeypatch) -> None:
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        (
+            '{"runtime":"containerd","containerd_privilege":"sudo-helper",'
+            f'"state_root":"{tmp_path / "state"}","mcp_host":"127.0.0.2",'
+            '"mcp_port":9999,"mcp_timeout":90}'
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WORKERBEE_CONFIG", str(config_file))
+    captured = {}
+
+    def fake_restart(config, *, timeout):
+        captured["config"] = config
+        captured["timeout"] = timeout
+        return {"ok": True, "mcp_url": config.mcp_url, "running": True}
+
+    monkeypatch.setattr(cli, "restart_mcp_daemon", fake_restart)
+
+    assert cli.main(["--json", "mcp", "restart"]) == 0
+
+    config = captured["config"]
+    assert config.runtime == "containerd"
+    assert config.containerd_privilege == "sudo-helper"
+    assert config.state_root == tmp_path / "state"
+    assert config.host == "127.0.0.2"
+    assert config.port == 9999
+    assert captured["timeout"] == 90
+
+
+def test_explicit_cli_flags_override_defaults(tmp_path: Path, monkeypatch) -> None:
+    config_file = tmp_path / "config.json"
+    config_file.write_text(
+        '{"runtime":"containerd","state_root":"/tmp/wrong","mcp_port":9999}',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("WORKERBEE_CONFIG", str(config_file))
+    captured = {}
+
+    def fake_status(config):
+        captured["config"] = config
+        return {"ok": True, "mcp_url": config.mcp_url, "running": True}
+
+    monkeypatch.setattr(cli, "mcp_daemon_status", fake_status)
+
+    assert (
+        cli.main(
+            [
+                "--json",
+                "--runtime",
+                "podman",
+                "--state-root",
+                str(tmp_path / "explicit"),
+                "mcp",
+                "status",
+                "--port",
+                "7777",
+            ]
+        )
+        == 0
+    )
+
+    config = captured["config"]
+    assert config.runtime == "podman"
+    assert config.state_root == tmp_path / "explicit"
+    assert config.port == 7777
+
+
 def test_doctor_reports_requested_runtime(tmp_path: Path, monkeypatch) -> None:
     calls: list[str] = []
 

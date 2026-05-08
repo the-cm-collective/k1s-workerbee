@@ -13,6 +13,13 @@ from typing import Any
 
 from workerbee import __version__
 from workerbee.agent import derive_session_project
+from workerbee.config import (
+    clear_cli_config,
+    cli_defaults,
+    default_config_file,
+    load_cli_config,
+    save_cli_config,
+)
 from workerbee.containerd_access import release_containerd_socket_access
 from workerbee.containerd_helper import (
     containerd_privilege_env,
@@ -76,6 +83,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--json", action="store_true", help="Emit JSON output")
     sub = parser.add_subparsers(dest="cmd", required=True)
+
+    config = sub.add_parser("config", help="Manage local WorkerBee CLI defaults")
+    config_sub = config.add_subparsers(dest="config_cmd", required=True)
+    config_sub.add_parser("show", help="Show local WorkerBee CLI defaults")
+    config_sub.add_parser("path", help="Show the local WorkerBee config path")
+    config_set = config_sub.add_parser("set", help="Set local WorkerBee CLI defaults")
+    config_set.add_argument("--runtime", choices=["auto", "podman", "docker", "containerd"])
+    config_set.add_argument(
+        "--containerd-privilege",
+        choices=["auto", "sudo-helper", "unprivileged"],
+    )
+    config_set.add_argument("--state-root", type=Path)
+    config_set.add_argument("--project")
+    config_set.add_argument("--mcp-host")
+    config_set.add_argument("--mcp-port", type=int)
+    config_set.add_argument("--mcp-timeout", type=float)
+    config_sub.add_parser("clear", help="Remove local WorkerBee CLI defaults")
 
     sub.add_parser("doctor", help="Check local prerequisites")
     sub.add_parser("start", help="Start the local WorkerBee k1s stack")
@@ -229,9 +253,13 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
-    containerd_privilege = _containerd_privilege_arg(args)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv)
     try:
+        if args.cmd == "config":
+            return _handle_config(args)
+        _apply_cli_defaults(args, raw_argv)
+        containerd_privilege = _containerd_privilege_arg(args)
         if args.cmd == "doctor":
             return _print(
                 _doctor(
@@ -557,6 +585,77 @@ def _print(payload: dict[str, Any], *, json_out: bool) -> int:
         return 0
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 1 if payload.get("ok") is False else 0
+
+
+def _handle_config(args: argparse.Namespace) -> int:
+    path = default_config_file()
+    if args.config_cmd == "path":
+        return _print({"ok": True, "path": str(path)}, json_out=args.json)
+    if args.config_cmd == "show":
+        return _print(
+            {
+                "ok": True,
+                "path": str(path),
+                "config": load_cli_config(path),
+                "effective": cli_defaults(path),
+            },
+            json_out=args.json,
+        )
+    if args.config_cmd == "clear":
+        cleared = clear_cli_config(path)
+        return _print({"ok": True, "path": str(cleared), "cleared": True}, json_out=args.json)
+    if args.config_cmd == "set":
+        updates = {
+            "runtime": args.runtime,
+            "containerd_privilege": args.containerd_privilege,
+            "state_root": str(args.state_root.expanduser()) if args.state_root else None,
+            "project": args.project,
+            "mcp_host": args.mcp_host,
+            "mcp_port": args.mcp_port,
+            "mcp_timeout": args.mcp_timeout,
+        }
+        updates = {key: value for key, value in updates.items() if value not in (None, "")}
+        if not updates:
+            raise RuntimeError("config set requires at least one default option")
+        config = load_cli_config(path)
+        config.update(updates)
+        saved = save_cli_config(config, path)
+        return _print(
+            {"ok": True, "path": str(saved), "config": load_cli_config(saved)},
+            json_out=args.json,
+        )
+    raise RuntimeError(f"unknown config command: {args.config_cmd}")
+
+
+def _apply_cli_defaults(args: argparse.Namespace, argv: list[str]) -> None:
+    defaults = cli_defaults()
+    if not _arg_present(argv, "--runtime") and defaults.get("runtime"):
+        args.runtime = str(defaults["runtime"])
+    if (
+        not _arg_present(argv, "--containerd-privilege")
+        and defaults.get("containerd_privilege")
+    ):
+        args.containerd_privilege = str(defaults["containerd_privilege"])
+    if not _arg_present(argv, "--state-root") and defaults.get("state_root"):
+        args.state_root = Path(str(defaults["state_root"])).expanduser()
+    if not _arg_present(argv, "--project") and defaults.get("project"):
+        args.project = str(defaults["project"])
+    if args.cmd == "mcp":
+        if not _arg_present(argv, "--host") and defaults.get("mcp_host"):
+            args.host = str(defaults["mcp_host"])
+        if not _arg_present(argv, "--port") and defaults.get("mcp_port"):
+            args.port = int(defaults["mcp_port"])
+        if (
+            args.mcp_cmd in {"start", "stop", "restart"}
+            and not _arg_present(argv, "--timeout")
+            and defaults.get("mcp_timeout")
+        ):
+            args.timeout = float(defaults["mcp_timeout"])
+
+
+def _arg_present(argv: list[str], option: str) -> bool:
+    prefix = f"{option}="
+    return any(arg == option or arg.startswith(prefix) for arg in argv)
 
 
 def _doctor(
