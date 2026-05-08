@@ -13,6 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from workerbee.containerd_helper import (
     containerd_privilege_env,
@@ -21,7 +22,7 @@ from workerbee.containerd_helper import (
     stop_containerd_helper,
     temporary_containerd_privilege_env,
 )
-from workerbee.http import request
+from workerbee.http import request, request_https_via_loopback
 from workerbee.ingress import global_ingress_status, load_global_ingress_info
 from workerbee.paths import default_state_root
 from workerbee.runtime_support import CONTAINERD_RUNTIME
@@ -294,23 +295,49 @@ def _wait_ready(config: MCPDaemonConfig, *, timeout: float) -> dict[str, Any]:
         if _daemon_process_ready(config) and _tcp_ready(config.host, config.port):
             ingress = load_global_ingress_info(config.state_root) or {}
             dashboard_url = str(ingress.get("dashboard_url") or "")
-            if dashboard_url:
-                try:
-                    request(_dashboard_health_url(dashboard_url), timeout=2.0, verify_tls=False)
-                    _raise_if_dead(config)
-                    return {
-                        "dashboard_url": dashboard_url,
-                        "global_dashboard": ingress,
-                        "ready_at": time.time(),
-                    }
-                except OSError:
-                    pass
+            if dashboard_url and _dashboard_healthy(dashboard_url):
+                _raise_if_dead(config)
+                return {
+                    "dashboard_url": dashboard_url,
+                    "global_dashboard": ingress,
+                    "ready_at": time.time(),
+                }
         time.sleep(0.25)
     raise TimeoutError(f"WorkerBee MCP did not become ready at {config.mcp_url}")
 
 
 def _dashboard_health_url(dashboard_url: str) -> str:
     return f"{dashboard_url.rstrip('/')}/healthz"
+
+
+def _dashboard_healthy(dashboard_url: str) -> bool:
+    parsed = urlsplit(dashboard_url)
+    try:
+        result = request(_dashboard_health_url(dashboard_url), timeout=2.0, verify_tls=False)
+        if int(getattr(result, "status", 200)) == 200:
+            return True
+    except OSError:
+        pass
+    loopback = _loopback_dashboard_health_url(parsed)
+    if not loopback:
+        return False
+    try:
+        result = request_https_via_loopback(
+            loopback,
+            timeout=2.0,
+            server_hostname=parsed.hostname or "dashboard.workerbee.localhost",
+            host_header=parsed.netloc,
+            verify_tls=False,
+        )
+    except OSError:
+        return False
+    return int(getattr(result, "status", 200)) == 200
+
+
+def _loopback_dashboard_health_url(parsed: SplitResult) -> str | None:
+    if parsed.scheme != "https" or not parsed.port:
+        return None
+    return urlunsplit((parsed.scheme, f"127.0.0.1:{parsed.port}", "/healthz", "", ""))
 
 
 def _raise_if_dead(config: MCPDaemonConfig) -> None:

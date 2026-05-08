@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import socket
 import ssl
 import time
 import urllib.error
@@ -10,6 +11,7 @@ import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 @dataclass(slots=True)
@@ -33,20 +35,26 @@ def request(
     *,
     method: str = "GET",
     token: str | None = None,
+    headers: dict[str, str] | None = None,
     data: bytes | None = None,
     json_body: Any | None = None,
     timeout: float = 5.0,
     verify_tls: bool = True,
     ca_bundle: str | Path | None = None,
 ) -> HTTPResult:
-    headers: dict[str, str] = {}
+    request_headers: dict[str, str] = dict(headers or {})
     payload = data
     if json_body is not None:
         payload = json.dumps(json_body).encode("utf-8")
-        headers["Content-Type"] = "application/json"
+        request_headers["Content-Type"] = "application/json"
     if token:
-        headers["Authorization"] = f"Bearer {token}"
-    req = urllib.request.Request(url, data=payload, headers=headers, method=method)  # noqa: S310
+        request_headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(  # noqa: S310
+        url,
+        data=payload,
+        headers=request_headers,
+        method=method,
+    )
     context = None
     if url.startswith("https://") and ca_bundle:
         context = ssl.create_default_context(cafile=str(ca_bundle))
@@ -65,6 +73,71 @@ def request(
             body=exc.read(),
             headers={str(k): str(v) for k, v in exc.headers.items()},
         )
+
+
+def request_https_via_loopback(
+    url: str,
+    *,
+    server_hostname: str,
+    host_header: str,
+    timeout: float = 5.0,
+    verify_tls: bool = True,
+    ca_bundle: str | Path | None = None,
+) -> HTTPResult:
+    parsed = urlsplit(url)
+    if parsed.scheme != "https":
+        raise ValueError("loopback HTTPS probe requires an https:// URL")
+    if "\r" in host_header or "\n" in host_header:
+        raise ValueError("invalid Host header")
+    port = int(parsed.port or 443)
+    target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
+    context = (
+        ssl.create_default_context(cafile=str(ca_bundle))
+        if verify_tls and ca_bundle
+        else ssl.create_default_context()
+        if verify_tls
+        else ssl._create_unverified_context()  # noqa: S323 - local dev certs only
+    )
+    with (
+        socket.create_connection(("127.0.0.1", port), timeout=timeout) as raw_sock,
+        context.wrap_socket(raw_sock, server_hostname=server_hostname) as sock,
+    ):
+        sock.settimeout(timeout)
+        payload = (
+            f"GET {target} HTTP/1.1\r\n"
+            f"Host: {host_header}\r\n"
+            "User-Agent: workerbee-local-probe\r\n"
+            "Accept: application/json\r\n"
+            "Connection: close\r\n"
+            "\r\n"
+        ).encode("ascii")
+        sock.sendall(payload)
+        raw = _read_all(sock)
+    head, _, body = raw.partition(b"\r\n\r\n")
+    lines = head.split(b"\r\n")
+    if not lines:
+        raise OSError("empty HTTPS response")
+    status_parts = lines[0].decode("iso-8859-1", errors="replace").split()
+    if len(status_parts) < 2:
+        raise OSError(f"invalid HTTPS response status: {lines[0]!r}")
+    headers: dict[str, str] = {}
+    for line in lines[1:]:
+        key, separator, value = line.partition(b":")
+        if separator:
+            headers[key.decode("iso-8859-1").strip()] = value.decode(
+                "iso-8859-1",
+                errors="replace",
+            ).strip()
+    return HTTPResult(status=int(status_parts[1]), body=body, headers=headers)
+
+
+def _read_all(sock: ssl.SSLSocket) -> bytes:
+    chunks: list[bytes] = []
+    while True:
+        chunk = sock.recv(65536)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
 
 
 def wait_for_http(

@@ -12,9 +12,9 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
-from workerbee.http import request, wait_for_http
+from workerbee.http import request, request_https_via_loopback, wait_for_http
 from workerbee.ports import choose_port
 from workerbee.runtime_support import (
     CONTAINERD_RUNTIME,
@@ -522,15 +522,64 @@ def _global_dashboard_health_probe(info: dict[str, Any]) -> dict[str, Any]:
             ca_bundle=ca_bundle if ca_ready else None,
             verify_tls=ca_ready,
         )
+        if result.status == 200:
+            return {
+                "ok": True,
+                "url": health_url,
+                "status": result.status,
+            }
+        primary_error = None
+        primary_status = result.status
+    except Exception as exc:  # noqa: BLE001 - status probe only
+        primary_error = str(exc)
+        primary_status = None
+    fallback = _loopback_dashboard_health_probe(parsed, ca_ready=ca_ready)
+    if fallback is not None:
+        fallback["primary_url"] = health_url
+        if primary_error is not None:
+            fallback["primary_error"] = primary_error
+        if primary_status is not None:
+            fallback["primary_status"] = primary_status
+        return fallback
+    return {
+        "ok": False,
+        "url": health_url,
+        "error": primary_error,
+        "status": primary_status,
+    }
+
+
+def _loopback_dashboard_health_probe(
+    parsed: SplitResult,
+    *,
+    ca_ready: bool,
+) -> dict[str, Any] | None:
+    if parsed.scheme != "https" or not parsed.port:
+        return None
+    health_url = urlunsplit((parsed.scheme, f"127.0.0.1:{parsed.port}", "/healthz", "", ""))
+    try:
+        result = request_https_via_loopback(
+            health_url,
+            timeout=1.0,
+            server_hostname=parsed.hostname or "dashboard.workerbee.localhost",
+            host_header=parsed.netloc,
+            verify_tls=False,
+        )
     except Exception as exc:  # noqa: BLE001 - status probe only
         return {
             "ok": False,
             "url": health_url,
+            "host_header": parsed.netloc,
+            "method": "loopback-host-header",
+            "ca_ready": ca_ready,
             "error": str(exc),
         }
     return {
         "ok": result.status == 200,
         "url": health_url,
+        "host_header": parsed.netloc,
+        "method": "loopback-host-header",
+        "ca_ready": ca_ready,
         "status": result.status,
     }
 

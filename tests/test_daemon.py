@@ -800,6 +800,61 @@ def test_global_ingress_status_uses_https_health_when_runtime_probe_fails(
     assert status["probe_error"] == "helper busy"
 
 
+def test_global_ingress_status_falls_back_to_loopback_health_probe(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    ca = global_dir / "caddy-local-root.crt"
+    ca.write_text("cert", encoding="utf-8")
+    (global_dir / "ingress.json").write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "runtime": "podman",
+                "caddy_container": "workerbee-caddy-test",
+                "dashboard_url": "https://dashboard.workerbee.localhost:19443/",
+                "https_port": 19443,
+                "dashboard_port": 18090,
+                "ca_bundle": str(ca),
+            }
+        ),
+        encoding="utf-8",
+    )
+    requests: list[tuple[str, dict[str, object]]] = []
+    loopback_requests: list[tuple[str, dict[str, object]]] = []
+
+    def fake_run(_cmd: list[str], **_kwargs):
+        return SimpleNamespace(returncode=0, stdout="")
+
+    def fake_request(url: str, **kwargs):
+        requests.append((url, kwargs))
+        raise OSError("DNS lookup failed")
+
+    def fake_loopback_request(url: str, **kwargs):
+        loopback_requests.append((url, kwargs))
+        return SimpleNamespace(status=200)
+
+    monkeypatch.setattr("workerbee.ingress.subprocess.run", fake_run)
+    monkeypatch.setattr("workerbee.ingress.request", fake_request)
+    monkeypatch.setattr(
+        "workerbee.ingress.request_https_via_loopback",
+        fake_loopback_request,
+    )
+
+    status = global_ingress_status(tmp_path)
+
+    assert status["running"] is True
+    assert status["https_running"] is True
+    assert status["health_probe"]["method"] == "loopback-host-header"
+    assert status["health_probe"]["primary_error"] == "DNS lookup failed"
+    assert requests[0][0] == "https://dashboard.workerbee.localhost:19443/healthz"
+    assert loopback_requests[0][0] == "https://127.0.0.1:19443/healthz"
+    assert loopback_requests[0][1]["server_hostname"] == "dashboard.workerbee.localhost"
+    assert loopback_requests[0][1]["host_header"] == "dashboard.workerbee.localhost:19443"
+
+
 def test_global_ingress_status_reports_running_container(
     tmp_path: Path,
     monkeypatch,

@@ -142,6 +142,44 @@ def test_wait_ready_probes_dashboard_health_endpoint(
     assert urls == ["https://dashboard.workerbee.localhost:19443/healthz"]
 
 
+def test_wait_ready_falls_back_to_loopback_dashboard_probe(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, runtime="podman", port=9876)
+    requests: list[tuple[str, dict[str, Any]]] = []
+    loopback_requests: list[tuple[str, dict[str, Any]]] = []
+    monkeypatch.setattr("workerbee.mcp_daemon._raise_if_dead", lambda _config: None)
+    monkeypatch.setattr("workerbee.mcp_daemon._daemon_process_ready", lambda _config: True)
+    monkeypatch.setattr("workerbee.mcp_daemon._tcp_ready", lambda _host, _port: True)
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.load_global_ingress_info",
+        lambda _root: {"dashboard_url": "https://dashboard.workerbee.localhost:19443/"},
+    )
+
+    def fake_request(url: str, **kwargs):
+        requests.append((url, kwargs))
+        raise OSError("DNS lookup failed")
+
+    def fake_loopback_request(url: str, **kwargs):
+        loopback_requests.append((url, kwargs))
+        return type("Response", (), {"status": 200})()
+
+    monkeypatch.setattr("workerbee.mcp_daemon.request", fake_request)
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.request_https_via_loopback",
+        fake_loopback_request,
+    )
+
+    result = _wait_ready(config, timeout=1)
+
+    assert result["dashboard_url"] == "https://dashboard.workerbee.localhost:19443/"
+    assert requests[0][0] == "https://dashboard.workerbee.localhost:19443/healthz"
+    assert loopback_requests[0][0] == "https://127.0.0.1:19443/healthz"
+    assert loopback_requests[0][1]["server_hostname"] == "dashboard.workerbee.localhost"
+    assert loopback_requests[0][1]["host_header"] == "dashboard.workerbee.localhost:19443"
+
+
 def test_dashboard_health_url_normalizes_trailing_slash() -> None:
     assert (
         _dashboard_health_url("https://dashboard.workerbee.localhost:19443/")
