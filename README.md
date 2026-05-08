@@ -256,6 +256,28 @@ with the system under test, run WorkerBee against direct containerd explicitly:
 workerbee --runtime containerd --containerd-privilege sudo-helper mcp start
 ```
 
+On Ubuntu/Debian hosts that also run MicroK8s with NVIDIA GPU Operator, the
+operator toolkit can mutate MicroK8s' containerd template and signal MicroK8s
+containerd. Before direct-containerd test runs on such a host, use the portable
+dev guard:
+
+```bash
+scripts/dev/microk8s-nvidia-guard status
+scripts/dev/microk8s-nvidia-guard apply
+```
+
+The guard is detection-driven and exits no-op on hosts without MicroK8s, without
+NVIDIA GPU Operator, or where the toolkit is not targeting MicroK8s containerd.
+When applicable, it temporarily suspends the owning Flux Kustomization and GPU
+Operator HelmRelease, following parent Kustomization labels when necessary so
+GitOps does not immediately re-apply the HelmRelease. It disables only the
+NVIDIA toolkit component, verifies MicroK8s health, and records rollback state
+under `/tmp`. Restore the previous state after the test window with:
+
+```bash
+scripts/dev/microk8s-nvidia-guard rollback
+```
+
 Containerized k1s profiles are only available in direct containerd mode. They
 are intended for advanced k1s development, not ordinary app-stack use. WorkerBee
 currently ships these built-in profiles:
