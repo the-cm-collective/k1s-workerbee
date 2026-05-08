@@ -105,6 +105,45 @@ workerbee export-k8s
 workerbee stop --purge
 ```
 
+## NixOS Local Development
+
+The simplest NixOS path is to use Nix for host tools and native library
+compatibility, while keeping WorkerBee itself in an editable Python virtual
+environment. This avoids packaging every Python dependency in Nix and keeps the
+release wheel path representative.
+
+```bash
+direnv allow
+scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse
+uv venv .venv
+uv pip install -e '.[dev]' --find-links dist/workerbee-wheelhouse
+workerbee doctor
+```
+
+The dev shell provides Python, `uv`, `ruff`, `node`, `jq`, `imagemagick`, and on
+Linux, `nerdctl` plus CNI plugins for direct containerd development. Podman or
+Docker daemon setup remains a host prerequisite for the default runtime path.
+If `k1s-workerbee-runtime` is already available from your configured package
+index, the local wheelhouse build and `--find-links` option can be omitted.
+
+For the advanced direct containerd verification path, use the repo-local helper:
+
+```bash
+scripts/dev/wb-containerd mcp-restart
+scripts/dev/wb-containerd mcp-status
+scripts/dev/wb-containerd mcp-stop
+```
+
+The helper defaults to `/tmp/workerbee-containerd-verify`,
+`127.0.0.1:8765`, and `sudo-helper`. Override with
+`WORKERBEE_CONTAINERD_STATE_ROOT`, `WORKERBEE_MCP_HOST`,
+`WORKERBEE_MCP_PORT`, or `WORKERBEE_MCP_TIMEOUT` when needed. It also accepts
+normal WorkerBee arguments after applying the direct containerd defaults:
+
+```bash
+scripts/dev/wb-containerd --project k1s-dev profile list
+```
+
 The MCP daemon is intentionally shared. Multiple coding agents can connect to
 the same local MCP server URL and operate on separate project scopes by passing
 distinct `project` values to WorkerBee tools. The daemon stores those projects

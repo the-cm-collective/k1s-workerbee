@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+workerbee_bin="${WORKERBEE_BIN:-$repo_root/.venv/bin/workerbee}"
+state_root="${WORKERBEE_CONTAINERD_STATE_ROOT:-/tmp/workerbee-containerd-verify}"
+host="${WORKERBEE_MCP_HOST:-127.0.0.1}"
+port="${WORKERBEE_MCP_PORT:-8765}"
+timeout="${WORKERBEE_MCP_TIMEOUT:-90}"
+
+if [[ ! -x "$workerbee_bin" ]]; then
+  cat >&2 <<EOF
+workerbee executable not found: $workerbee_bin
+
+Create the editable dev venv first:
+  scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse
+  uv venv .venv
+  uv pip install -e '.[dev]' --find-links dist/workerbee-wheelhouse
+EOF
+  exit 127
+fi
+
+refresh_sudo() {
+  if [[ "${WORKERBEE_REFRESH_SUDO:-1}" != "0" ]] && command -v sudo >/dev/null 2>&1; then
+    sudo -v
+  fi
+}
+
+base=(
+  "$workerbee_bin"
+  --runtime containerd
+  --containerd-privilege sudo-helper
+  --state-root "$state_root"
+)
+
+case "${1:-}" in
+  mcp-start)
+    shift
+    refresh_sudo
+    exec "${base[@]}" --json mcp start --host "$host" --port "$port" --timeout "$timeout" "$@"
+    ;;
+  mcp-restart)
+    shift
+    refresh_sudo
+    exec "${base[@]}" --json mcp restart --host "$host" --port "$port" --timeout "$timeout" "$@"
+    ;;
+  mcp-stop)
+    shift
+    refresh_sudo
+    exec "${base[@]}" --json mcp stop --host "$host" --port "$port" --timeout "$timeout" "$@"
+    ;;
+  mcp-status)
+    shift
+    exec "${base[@]}" --json mcp status --host "$host" --port "$port" "$@"
+    ;;
+  *)
+    exec "${base[@]}" "$@"
+    ;;
+esac
