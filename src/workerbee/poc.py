@@ -83,7 +83,7 @@ def write_stack_files(
     runtime: str = "auto",
     ingress_domain: str | None = None,
 ) -> POCArtifacts:
-    spec_dir = state_dir / "specs"
+    spec_dir = state_dir / "artifacts" / "poc-specs"
     data_dir = state_dir / "poc-data"
     spec_dir.mkdir(parents=True, exist_ok=True)
     data_dir.mkdir(parents=True, exist_ok=True)
@@ -100,22 +100,16 @@ def write_stack_files(
     }
     store_urls = ",".join(
         [
-            f"http://ae-{POC_NAMESPACE}--store:8080",
-            f"http://app-{POC_NAMESPACE}--store:8080",
-            *_containerd_peer_urls(runtime=runtime, app="store"),
+            *_runtime_peer_urls(runtime=runtime, app="store"),
             f"http://host.containers.internal:{service_ports['store']}",
             f"http://host.docker.internal:{service_ports['store']}",
-            urls["store"],
         ]
     )
     api_urls = ",".join(
         [
-            f"http://ae-{POC_NAMESPACE}--api:8080",
-            f"http://app-{POC_NAMESPACE}--api:8080",
-            *_containerd_peer_urls(runtime=runtime, app="api"),
+            *_runtime_peer_urls(runtime=runtime, app="api"),
             f"http://host.containers.internal:{service_ports['api']}",
             f"http://host.docker.internal:{service_ports['api']}",
-            urls["api"],
         ]
     )
     api_ingress_host = f"api.{ingress_domain}" if ingress_domain else "api.workerbee.local"
@@ -305,6 +299,27 @@ def write_stack_files(
         image_tags=image_tags,
         urls=urls,
     )
+
+
+def _runtime_peer_urls(*, runtime: str, app: str) -> list[str]:
+    if runtime == CONTAINERD_RUNTIME:
+        return [f"http://{_containerd_poc_container_name(app)}:8080"]
+    app_key = f"{POC_NAMESPACE}--{app}"
+    revision_container = f"ae-{app_key}-rev1-0"
+    if runtime == "docker":
+        hosts = [revision_container, f"app-{app_key}", f"app-{app_key}-rev1"]
+    elif runtime == "podman":
+        hosts = [revision_container, f"ae-{app_key}", f"ae-{app_key}-rev1"]
+    else:
+        hosts = [
+            revision_container,
+            f"ae-{app_key}",
+            f"ae-{app_key}-rev1",
+            f"app-{app_key}",
+            f"app-{app_key}-rev1",
+        ]
+    seen: set[str] = set()
+    return [f"http://{host}:8080" for host in hosts if not (host in seen or seen.add(host))]
 
 
 def _containerd_peer_urls(*, runtime: str, app: str) -> list[str]:

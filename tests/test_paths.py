@@ -42,6 +42,64 @@ def test_project_slug_and_state_dir(tmp_path: Path, monkeypatch) -> None:
     assert sup.state_dir == tmp_path / "state"
 
 
+def test_poc_service_ports_use_state_scoped_high_range(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "workerbee.supervisor.resolve_k1s_runtime",
+        lambda **_: K1sRuntime(
+            source="installed",
+            python_executable="/usr/bin/python",
+            k1s_root=None,
+            pythonpath=None,
+            ae_origin="/site-packages/ae/__init__.py",
+        ),
+    )
+    sup = WorkerBeeSupervisor(
+        project="demo",
+        state_dir=tmp_path / "projects" / "demo",
+        runtime="podman",
+        cwd=tmp_path,
+    )
+
+    ports = sup._allocate_poc_service_ports("podman")  # noqa: SLF001
+
+    assert set(ports) == {"store", "api", "frontend"}
+    assert len(set(ports.values())) == 3
+    assert all(22000 <= port <= 29999 for port in ports.values())
+    assert set(ports.values()).isdisjoint({19080, 19081, 19082})
+
+
+def test_parse_published_host_ports() -> None:
+    from workerbee.supervisor import _parse_published_host_ports  # noqa: PLC0415
+
+    assert _parse_published_host_ports(
+        "0.0.0.0:22080->8080/tcp, [::]:22081->8080/tcp\n"
+        "127.0.0.1:22082->8080/tcp"
+    ) == {22080, 22081, 22082}
+
+
+def test_cli_option_normalization_handles_dash_prefixed_tokens() -> None:
+    from workerbee.supervisor import (  # noqa: PLC0415
+        _mask_sensitive_args,
+        _normalize_cli_option_args,
+    )
+
+    args = _normalize_cli_option_args(["--server", "http://local", "--token", "-dash", "status"])
+
+    assert args == ["--server", "http://local", "--token=-dash", "status"]
+    assert _mask_sensitive_args(["python", "-m", "ae.cli", *args]) == [
+        "python",
+        "-m",
+        "ae.cli",
+        "--server",
+        "http://local",
+        "--token=***",
+        "status",
+    ]
+
+
 def test_k1s_runtime_apply_env_prepends_pythonpath() -> None:
     runtime = K1sRuntime(
         source="sibling",

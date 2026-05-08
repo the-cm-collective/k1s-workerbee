@@ -37,6 +37,46 @@ def test_write_stack_files_contains_representative_features(tmp_path: Path) -> N
     assert artifacts.urls["frontend"] == "http://127.0.0.1:19082"
 
 
+def test_write_stack_files_uses_runtime_peer_urls_for_podman(tmp_path: Path) -> None:
+    artifacts = write_stack_files(
+        state_dir=tmp_path,
+        project="demo",
+        image_tags={
+            "store": "store:test",
+            "api": "api:test",
+            "frontend": "frontend:test",
+        },
+        service_ports={"store": 22080, "api": 22081, "frontend": 22082},
+        runtime="podman",
+    )
+
+    text = "\n".join(path.read_text(encoding="utf-8") for path in artifacts.manifests)
+
+    assert "http://ae-workerbee-poc--store-rev1-0:8080" in text
+    assert "http://ae-workerbee-poc--store:8080" in text
+    assert "http://127.0.0.1:22080" not in text
+
+
+def test_write_stack_files_uses_runtime_peer_urls_for_docker(tmp_path: Path) -> None:
+    artifacts = write_stack_files(
+        state_dir=tmp_path,
+        project="demo",
+        image_tags={
+            "store": "store:test",
+            "api": "api:test",
+            "frontend": "frontend:test",
+        },
+        service_ports={"store": 22080, "api": 22081, "frontend": 22082},
+        runtime="docker",
+    )
+
+    text = "\n".join(path.read_text(encoding="utf-8") for path in artifacts.manifests)
+
+    assert "http://ae-workerbee-poc--store-rev1-0:8080" in text
+    assert "http://app-workerbee-poc--store:8080" in text
+    assert "http://127.0.0.1:22080" not in text
+
+
 def test_write_stack_files_can_scope_ingress_hosts(tmp_path: Path) -> None:
     artifacts = write_stack_files(
         state_dir=tmp_path,

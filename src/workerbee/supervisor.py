@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -124,11 +125,7 @@ class WorkerBeeSupervisor:
         apishim_port = _env_int("WORKERBEE_APISHIM_PORT") or choose_port(
             18445, start=18445, end=18545
         )
-        service_ports = {
-            "store": choose_port(19080, start=19080, end=19107),
-            "api": choose_port(19081, start=19280, end=19320),
-            "frontend": choose_port(19082, start=19321, end=19360),
-        }
+        service_ports = self._allocate_poc_service_ports(runtime)
 
         admin_token = _reuse_or_token(existing, "admin_token")
         read_token = _reuse_or_token(existing, "read_token")
@@ -279,10 +276,11 @@ class WorkerBeeSupervisor:
                 )
             )
 
-        if info.runtime == CONTAINERD_RUNTIME:
-            validation = self._validate_poc_containerd(info, timeout_seconds=timeout_seconds)
-        else:
-            validation = validate_poc_urls(artifacts.urls, timeout_seconds=timeout_seconds)
+        validation = self._validate_poc_runtime(
+            info,
+            urls=artifacts.urls,
+            timeout_seconds=timeout_seconds,
+        )
         return {
             "stack": info.public_dict(),
             "manifests": [str(p) for p in artifacts.manifests],
@@ -441,8 +439,7 @@ class WorkerBeeSupervisor:
 
     def export_k8s(self) -> dict[str, Any]:
         info = self.start()
-        manifest_dir = self.state_dir / "specs"
-        manifests = sorted(manifest_dir.glob("*.yaml"))
+        manifests = self._poc_manifest_paths()
         if not manifests:
             raise RuntimeError("no POC manifests found; run workerbee deploy-poc first")
         out_dir = self.state_dir / "artifacts" / "k8s"
@@ -476,6 +473,14 @@ class WorkerBeeSupervisor:
         )
         files.append(str(combined_file))
         return {"output_dir": str(out_dir), "files": files}
+
+    def _poc_manifest_paths(self) -> list[Path]:
+        artifact_dir = self.state_dir / "artifacts" / "poc-specs"
+        manifests = sorted(artifact_dir.glob("*.yaml"))
+        if manifests:
+            return manifests
+        legacy_dir = self.state_dir / "specs"
+        return sorted(legacy_dir.glob("*.yaml"))
 
     def apishim_smoke(self) -> dict[str, Any]:
         info = self.start()
@@ -587,8 +592,9 @@ class WorkerBeeSupervisor:
     ) -> dict[str, Any]:
         stack = info or self.start()
         env = self._base_env(stack)
+        cmd_args = _normalize_cli_option_args(args)
         proc = subprocess.run(
-            [self.python_executable, "-m", "ae.cli", *args],
+            [self.python_executable, "-m", "ae.cli", *cmd_args],
             cwd=self.cwd,
             env=env,
             text=True,
@@ -596,7 +602,7 @@ class WorkerBeeSupervisor:
             timeout=timeout,
         )
         result = {
-            "cmd": _mask_sensitive_args([self.python_executable, "-m", "ae.cli", *args]),
+            "cmd": _mask_sensitive_args([self.python_executable, "-m", "ae.cli", *cmd_args]),
             "returncode": proc.returncode,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
@@ -615,8 +621,9 @@ class WorkerBeeSupervisor:
         env = self.k1s_runtime.apply_env(os.environ.copy())
         if env_overrides:
             env.update(env_overrides)
+        cmd_args = _normalize_cli_option_args(args)
         proc = subprocess.run(
-            [self.python_executable, "-m", "ae.cli", *args],
+            [self.python_executable, "-m", "ae.cli", *cmd_args],
             cwd=self.cwd,
             env=env,
             text=True,
@@ -624,7 +631,7 @@ class WorkerBeeSupervisor:
             timeout=timeout,
         )
         result = {
-            "cmd": _mask_sensitive_args([self.python_executable, "-m", "ae.cli", *args]),
+            "cmd": _mask_sensitive_args([self.python_executable, "-m", "ae.cli", *cmd_args]),
             "returncode": proc.returncode,
             "stdout": proc.stdout,
             "stderr": proc.stderr,
@@ -716,8 +723,71 @@ class WorkerBeeSupervisor:
                     ["docker", "network", "create", network],
                     check=True,
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+                stderr=subprocess.DEVNULL,
+            )
+
+    def _allocate_poc_service_ports(self, runtime: str) -> dict[str, int]:
+        start = 22000
+        end = 29999
+        base = _poc_service_port_base(
+            state_root=self.state_dir.parent.parent,
+            project=self.project,
+            start=start,
+            end=end,
+        )
+        blocked = self._runtime_published_host_ports(runtime)
+        reserved: set[int] = set()
+        return {
+            "store": choose_port(
+                base,
+                start=start,
+                end=end,
+                reserved=reserved,
+                blocked=blocked,
+            ),
+            "api": choose_port(
+                base + 1,
+                start=start,
+                end=end,
+                reserved=reserved,
+                blocked=blocked,
+            ),
+            "frontend": choose_port(
+                base + 2,
+                start=start,
+                end=end,
+                reserved=reserved,
+                blocked=blocked,
+            ),
+        }
+
+    def _runtime_published_host_ports(self, runtime: str) -> set[int]:
+        if runtime == "podman":
+            cmd = ["podman", "ps", "-a", "--format", "{{.Ports}}"]
+        elif runtime == "docker":
+            cmd = ["docker", "ps", "-a", "--format", "{{.Ports}}"]
+        elif runtime == CONTAINERD_RUNTIME:
+            cmd = runtime_command_args(
+                CONTAINERD_RUNTIME,
+                state_root=self.state_dir.parent.parent,
+                project=self.project,
+                args=["ps", "-a", "--format", "{{.Ports}}"],
+            )
+        else:
+            return set()
+        try:
+            proc = subprocess.run(
+                cmd,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=8,
+            )
+        except Exception:
+            return set()
+        if proc.returncode != 0:
+            return set()
+        return _parse_published_host_ports(proc.stdout)
 
     def _base_env(self, info: StackInfo) -> dict[str, str]:
         env = self.k1s_runtime.apply_env(os.environ.copy())
@@ -903,11 +973,11 @@ class WorkerBeeSupervisor:
         )
 
     def _reset_poc(self, info: StackInfo) -> None:
-        spec_dir = self.state_dir / "specs"
-        for app in POC_APPS:
-            spec = spec_dir / f"{app}.yaml"
-            if spec.exists():
-                spec.unlink()
+        for spec_dir in (self.state_dir / "specs", self.state_dir / "artifacts" / "poc-specs"):
+            for app in POC_APPS:
+                spec = spec_dir / f"{app}.yaml"
+                if spec.exists():
+                    spec.unlink()
         for app in reversed(POC_APPS):
             with suppress(Exception):
                 self.run_ae(
@@ -1266,6 +1336,15 @@ class WorkerBeeSupervisor:
         *,
         timeout_seconds: float = 90.0,
     ) -> dict[str, Any]:
+        return self._validate_poc_runtime(info, timeout_seconds=timeout_seconds)
+
+    def _validate_poc_runtime(
+        self,
+        info: StackInfo,
+        *,
+        urls: dict[str, str] | None = None,
+        timeout_seconds: float = 90.0,
+    ) -> dict[str, Any]:
         checks = {
             "store": ("store", "/healthz", "json"),
             "api": ("api", "/healthz", "json"),
@@ -1276,11 +1355,11 @@ class WorkerBeeSupervisor:
         deadline = time.monotonic() + timeout_seconds
         last_errors: dict[str, str] = {}
         while time.monotonic() < deadline:
-            result: dict[str, Any] = {"mode": "containerd-exec"}
+            result: dict[str, Any] = {"mode": f"{info.runtime}-exec"}
             ok = True
             for name, (app, path, output) in checks.items():
                 try:
-                    probe = self._containerd_http_probe(info, app=app, path=path)
+                    probe = self._runtime_http_probe(info, app=app, path=path)
                 except Exception as exc:  # noqa: BLE001
                     last_errors[name] = str(exc)
                     ok = False
@@ -1297,14 +1376,25 @@ class WorkerBeeSupervisor:
                 )
             if ok:
                 result["ok"] = True
+                if urls:
+                    result["host_urls"] = self._best_effort_host_url_validation(urls)
                 return result
             time.sleep(1.0)
         raise TimeoutError(
-            "containerd POC containers did not become ready: "
+            f"{info.runtime} POC containers did not become ready: "
             f"{json.dumps(last_errors, indent=2)}"
         )
 
     def _containerd_http_probe(
+        self,
+        info: StackInfo,
+        *,
+        app: str,
+        path: str,
+    ) -> dict[str, Any]:
+        return self._runtime_http_probe(info, app=app, path=path)
+
+    def _runtime_http_probe(
         self,
         info: StackInfo,
         *,
@@ -1346,11 +1436,36 @@ class WorkerBeeSupervisor:
             raise RuntimeError(str(probe["error"]))
         return probe
 
+    def _best_effort_host_url_validation(self, urls: dict[str, str]) -> dict[str, Any]:
+        try:
+            result = validate_poc_urls(urls, timeout_seconds=5.0)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc), "urls": urls}
+        return {"ok": True, "result": result, "urls": urls}
+
 
 def _slug(value: str) -> str:
     out = "".join(ch.lower() if ch.isalnum() else "-" for ch in value.strip())
     out = "-".join(part for part in out.split("-") if part)
     return out or "default"
+
+
+def _poc_service_port_base(*, state_root: Path, project: str, start: int, end: int) -> int:
+    span = max(1, int(end) - int(start) - 2)
+    slots = max(1, span // 10)
+    digest = hashlib.blake2s(
+        f"{state_root.resolve()}:{project}".encode(),
+        digest_size=4,
+    ).hexdigest()
+    return int(start) + (int(digest, 16) % slots) * 10
+
+
+def _parse_published_host_ports(text: str) -> set[int]:
+    ports: set[int] = set()
+    for match in re.finditer(r"(?:^|[\s,])(?:[^,\s]*:)?(\d+)->\d+/(?:tcp|udp)", text):
+        with suppress(ValueError):
+            ports.add(int(match.group(1)))
+    return ports
 
 
 def project_slug(value: str) -> str:
@@ -1372,13 +1487,13 @@ def _reuse_or_token(existing: StackInfo | None, field_name: str) -> str:
         value = getattr(existing, field_name, "")
         if value:
             return str(value)
-    return secrets.token_urlsafe(32)
+    return _safe_cli_token(32)
 
 
 def _stable_secret(path: Path) -> str:
     if path.exists():
         return path.read_text(encoding="utf-8").strip()
-    value = secrets.token_urlsafe(48)
+    value = _safe_cli_token(48)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(value, encoding="utf-8")
     return value
@@ -1418,9 +1533,34 @@ def _split_lines(raw: str) -> list[str]:
     return [line.strip() for line in raw.splitlines() if line.strip()]
 
 
+def _safe_cli_token(nbytes: int) -> str:
+    value = secrets.token_urlsafe(nbytes)
+    if value and (value[0].isalnum()):
+        return value
+    return f"t{value}"
+
+
+def _normalize_cli_option_args(args: list[str]) -> list[str]:
+    normalized: list[str] = []
+    idx = 0
+    while idx < len(args):
+        value = args[idx]
+        if value in {"--token", "--password"} and idx + 1 < len(args):
+            normalized.append(f"{value}={args[idx + 1]}")
+            idx += 2
+            continue
+        normalized.append(value)
+        idx += 1
+    return normalized
+
+
 def _mask_sensitive_args(args: list[str]) -> list[str]:
     masked = list(args)
     for idx, value in enumerate(masked[:-1]):
         if value in {"--token", "--password"}:
             masked[idx + 1] = "***"
+    for idx, value in enumerate(masked):
+        for option in ("--token=", "--password="):
+            if value.startswith(option):
+                masked[idx] = f"{option}***"
     return masked

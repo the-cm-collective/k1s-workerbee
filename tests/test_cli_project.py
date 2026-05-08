@@ -156,6 +156,62 @@ def test_explicit_cli_flags_override_defaults(tmp_path: Path, monkeypatch) -> No
     assert config.port == 7777
 
 
+def test_containerd_supervisor_command_uses_state_root_and_privilege(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    captured = {}
+
+    class FakeSupervisor:
+        def __init__(self, *, project, runtime, state_dir, cwd):
+            captured["project"] = project
+            captured["runtime"] = runtime
+            captured["state_dir"] = state_dir
+            captured["cwd"] = cwd
+            self.state_dir = state_dir
+
+        def deploy_poc_stack(self, *, timeout_seconds):
+            captured["timeout"] = timeout_seconds
+            captured["helper_env"] = cli.os.environ.get("WORKERBEE_NERDCTL_BIN")
+            return {"ok": True, "state_dir": str(self.state_dir)}
+
+    def fake_ensure_containerd_privilege(**kwargs):
+        captured["privilege_kwargs"] = kwargs
+        return {"runtime": "containerd", "effective_mode": "sudo-helper"}
+
+    monkeypatch.setattr(cli, "WorkerBeeSupervisor", FakeSupervisor)
+    monkeypatch.setattr(cli, "ensure_containerd_privilege", fake_ensure_containerd_privilege)
+    monkeypatch.setattr(
+        cli,
+        "containerd_privilege_env",
+        lambda _privilege: {"WORKERBEE_NERDCTL_BIN": str(tmp_path / "workerbee-nerdctl")},
+    )
+
+    rc = cli.main(
+        [
+            "--json",
+            "--state-root",
+            str(tmp_path),
+            "--runtime",
+            "containerd",
+            "--containerd-privilege",
+            "sudo-helper",
+            "--project",
+            "demo",
+            "deploy-poc",
+            "--timeout",
+            "1",
+        ]
+    )
+
+    assert rc == 0
+    assert captured["state_dir"] == tmp_path / "projects" / "demo"
+    assert captured["privilege_kwargs"]["state_root"] == tmp_path
+    assert captured["privilege_kwargs"]["runtime"] == "containerd"
+    assert captured["privilege_kwargs"]["mode"] == "sudo-helper"
+    assert captured["helper_env"] == str(tmp_path / "workerbee-nerdctl")
+
+
 def test_doctor_reports_requested_runtime(tmp_path: Path, monkeypatch) -> None:
     calls: list[str] = []
 

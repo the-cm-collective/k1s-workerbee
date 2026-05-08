@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -45,8 +46,8 @@ from workerbee.mcp_daemon import (
     stop_mcp_daemon,
 )
 from workerbee.mcp_server import serve_mcp
-from workerbee.paths import default_state_root
-from workerbee.runtime_support import runtime_diagnostics
+from workerbee.paths import daemon_project_state_dir, default_state_root
+from workerbee.runtime_support import CONTAINERD_RUNTIME, runtime_diagnostics
 from workerbee.supervisor import WorkerBeeSupervisor
 from workerbee.trust import trust_install, trust_status, trust_uninstall
 
@@ -444,10 +445,11 @@ def main(argv: list[str] | None = None) -> int:
                     ),
                     json_out=args.json,
                 )
+        supervisor_project = args.project or "default"
         sup = WorkerBeeSupervisor(
-            project=args.project or "default",
+            project=supervisor_project,
             runtime=args.runtime,
-            state_dir=args.state_dir,
+            state_dir=_supervisor_state_dir(args, supervisor_project),
             cwd=args.cwd,
         )
         if args.cmd == "manifest":
@@ -489,11 +491,16 @@ def main(argv: list[str] | None = None) -> int:
                         result["containerd_privilege"] = privilege
                         return _print(result, json_out=args.json)
                 return _print(
-                    deploy_local_stage(
+                    _run_supervisor_action(
+                        args=args,
                         supervisor=sup,
-                        stage_dir=args.stage,
-                        namespace=args.namespace,
-                        timeout=args.timeout,
+                        containerd_privilege=containerd_privilege,
+                        action=lambda: deploy_local_stage(
+                            supervisor=sup,
+                            stage_dir=args.stage,
+                            namespace=args.namespace,
+                            timeout=args.timeout,
+                        ),
                     ),
                     json_out=args.json,
                 )
@@ -520,45 +527,169 @@ def main(argv: list[str] | None = None) -> int:
                 json_out=args.json,
             )
         if args.cmd == "start":
-            info = sup.start()
-            return _print(info.public_dict(), json_out=args.json)
+            return _print(
+                _run_supervisor_action(
+                    args=args,
+                    supervisor=sup,
+                    containerd_privilege=containerd_privilege,
+                    action=lambda: sup.start().public_dict(),
+                ),
+                json_out=args.json,
+            )
         if args.cmd == "stop":
-            return _print(sup.stop(purge=args.purge), json_out=args.json)
+            return _print(
+                _run_supervisor_action(
+                    args=args,
+                    supervisor=sup,
+                    containerd_privilege=containerd_privilege,
+                    action=lambda: sup.stop(purge=args.purge),
+                ),
+                json_out=args.json,
+            )
         if args.cmd == "status":
             return _print(sup.status(), json_out=args.json)
         if args.cmd == "tls-info":
-            return _print(sup.tls_info(), json_out=args.json)
+            return _print(
+                _run_supervisor_action(
+                    args=args,
+                    supervisor=sup,
+                    containerd_privilege=containerd_privilege,
+                    action=sup.tls_info,
+                ),
+                json_out=args.json,
+            )
         if args.cmd == "reset":
-            return _print(sup.reset(), json_out=args.json)
+            return _print(
+                _run_supervisor_action(
+                    args=args,
+                    supervisor=sup,
+                    containerd_privilege=containerd_privilege,
+                    action=sup.reset,
+                ),
+                json_out=args.json,
+            )
         if args.cmd == "poc-status":
-            return _print(sup.poc_status(), json_out=args.json)
+            return _print(
+                _run_supervisor_action(
+                    args=args,
+                    supervisor=sup,
+                    containerd_privilege=containerd_privilege,
+                    action=sup.poc_status,
+                ),
+                json_out=args.json,
+            )
         if args.cmd == "build-image":
-            return _print(sup.build_image(args.context, tag=args.tag), json_out=args.json)
+            return _print(
+                _run_supervisor_action(
+                    args=args,
+                    supervisor=sup,
+                    containerd_privilege=containerd_privilege,
+                    action=lambda: sup.build_image(args.context, tag=args.tag),
+                ),
+                json_out=args.json,
+            )
         if args.cmd == "deploy":
             return _print(
-                sup.deploy_manifest(args.file, namespace=args.namespace, timeout=args.timeout),
+                _run_supervisor_action(
+                    args=args,
+                    supervisor=sup,
+                    containerd_privilege=containerd_privilege,
+                    action=lambda: sup.deploy_manifest(
+                        args.file,
+                        namespace=args.namespace,
+                        timeout=args.timeout,
+                    ),
+                ),
                 json_out=args.json,
             )
         if args.cmd == "deploy-poc":
-            return _print(sup.deploy_poc_stack(timeout_seconds=args.timeout), json_out=args.json)
+            return _print(
+                _run_supervisor_action(
+                    args=args,
+                    supervisor=sup,
+                    containerd_privilege=containerd_privilege,
+                    action=lambda: sup.deploy_poc_stack(timeout_seconds=args.timeout),
+                ),
+                json_out=args.json,
+            )
         if args.cmd == "apishim-smoke":
-            return _print(sup.apishim_smoke(), json_out=args.json)
+            return _print(
+                _run_supervisor_action(
+                    args=args,
+                    supervisor=sup,
+                    containerd_privilege=containerd_privilege,
+                    action=sup.apishim_smoke,
+                ),
+                json_out=args.json,
+            )
         if args.cmd == "logs":
-            return _print(sup.logs(app=args.app, tail=args.tail), json_out=args.json)
+            return _print(
+                _run_supervisor_action(
+                    args=args,
+                    supervisor=sup,
+                    containerd_privilege=containerd_privilege,
+                    action=lambda: sup.logs(app=args.app, tail=args.tail),
+                ),
+                json_out=args.json,
+            )
         if args.cmd == "exec":
             command = list(args.command)
             if command and command[0] == "--":
                 command = command[1:]
             if not command:
                 command = ["sh", "-c", "id && pwd"]
-            return _print(sup.run_exec(args.app, command), json_out=args.json)
+            return _print(
+                _run_supervisor_action(
+                    args=args,
+                    supervisor=sup,
+                    containerd_privilege=containerd_privilege,
+                    action=lambda: sup.run_exec(args.app, command),
+                ),
+                json_out=args.json,
+            )
         if args.cmd == "export-k8s":
-            return _print(sup.export_k8s(), json_out=args.json)
+            return _print(
+                _run_supervisor_action(
+                    args=args,
+                    supervisor=sup,
+                    containerd_privilege=containerd_privilege,
+                    action=sup.export_k8s,
+                ),
+                json_out=args.json,
+            )
     except Exception as exc:  # noqa: BLE001
         print(f"workerbee: {exc}", file=sys.stderr)
         return 1
     parser.error(f"unsupported command: {args.cmd}")
     return 2
+
+
+def _supervisor_state_dir(args: argparse.Namespace, project: str) -> Path | None:
+    if args.state_dir is not None:
+        return args.state_dir
+    if args.state_root is not None:
+        return daemon_project_state_dir(project, state_root=args.state_root)
+    return None
+
+
+def _run_supervisor_action(
+    *,
+    args: argparse.Namespace,
+    supervisor: WorkerBeeSupervisor,
+    containerd_privilege: str,
+    action: Callable[[], dict[str, Any]],
+) -> dict[str, Any]:
+    if str(args.runtime).lower() != CONTAINERD_RUNTIME:
+        return action()
+    privilege = ensure_containerd_privilege(
+        state_root=supervisor.state_dir.parent.parent,
+        runtime=args.runtime,
+        mode=containerd_privilege,
+    )
+    with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
+        result = action()
+    result.setdefault("containerd_privilege", privilege)
+    return result
 
 
 def _print(payload: dict[str, Any], *, json_out: bool) -> int:
