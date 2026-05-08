@@ -75,13 +75,6 @@ use WorkerBee MCP for local image builds, manifest staging/deploy, status, logs,
 HTTPS ingress probes, dashboard URLs, cleanup, and artifact export.
 ```
 
-For local release testing against the internal Gitea release assets:
-
-```bash
-WORKERBEE_INSTALL_BASE_URL=https://gitea.core.home.arpa/m4xx3d0ut/k1s-workerbee/releases/download/v0.1.0 \
-  sh -c "$(curl -fsSL https://gitea.core.home.arpa/m4xx3d0ut/k1s-workerbee/releases/download/v0.1.0/install-workerbee.sh)"
-```
-
 Build and install from a local wheelhouse:
 
 ```bash
@@ -90,6 +83,20 @@ python -m venv .venv
 . .venv/bin/activate
 python -m pip install --no-index --find-links dist/workerbee-wheelhouse k1s-workerbee
 workerbee doctor
+```
+
+The public one-line installer expects each GitHub release to include these
+assets:
+
+```text
+install-workerbee.sh
+workerbee-wheelhouse.tar.gz
+```
+
+The default installer URL resolves through GitHub's latest-release redirect:
+
+```text
+https://github.com/the-cm-collective/k1s-workerbee/releases/latest/download/install-workerbee.sh
 ```
 
 Source checkout smoke workflow:
