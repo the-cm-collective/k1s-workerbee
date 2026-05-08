@@ -1,6 +1,7 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+from workerbee.ingress import ProjectIngressConfig
 from workerbee.k1s_runtime import K1sRuntime
 from workerbee.paths import daemon_project_state_dir, default_state_dir, default_state_root
 from workerbee.runtime_support import (
@@ -154,6 +155,134 @@ def test_containerd_supervisor_env_is_state_scoped(tmp_path: Path, monkeypatch) 
     assert env["AE_NERDCTL_BIN"] == "nerdctl"
     assert env["AE_CONTAINERD_CNI_CONF_DIR"] == str(state_dir / "containerd-cni-net.d")
     assert env["NETCONFPATH"] == env["AE_CONTAINERD_CNI_CONF_DIR"]
+    assert env["AE_APISHIM_PUBLIC_BASE"] == "https://127.0.0.1:18445"
+    assert env["AE_DASHBOARD_BOOTSTRAP_TOKEN"] == "admin-token"  # noqa: S105
+
+
+def test_supervisor_stack_ingress_publishes_dashboard_and_apishim(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "workerbee.supervisor.resolve_k1s_runtime",
+        lambda **_: K1sRuntime(
+            source="installed",
+            python_executable="/usr/bin/python",
+            k1s_root=None,
+            pythonpath=None,
+            ae_origin="/site-packages/ae/__init__.py",
+        ),
+    )
+    state_dir = tmp_path / "projects" / "demo"
+    ingress = ProjectIngressConfig(
+        project="demo",
+        domain="demo.workerbee.localhost",
+        https_port=19443,
+        sites_dir=state_dir / "caddy",
+        caddy_container="workerbee-caddy-test",
+        caddy_file="/etc/caddy/Caddyfile",
+        host_alias="127.0.0.1",
+        ca_bundle=tmp_path / "ca.crt",
+        global_dashboard_url="https://dashboard.workerbee.localhost:19443/",
+    )
+    sup = WorkerBeeSupervisor(
+        project="demo",
+        state_dir=state_dir,
+        runtime="containerd",
+        ingress=ingress,
+    )
+    monkeypatch.setattr(sup, "_reload_ingress", lambda: None)
+    info = StackInfo(
+        project="demo",
+        state_dir=str(state_dir),
+        k1s_root=None,
+        k1s_runtime_source="installed",
+        python_executable="/usr/bin/python",
+        ae_origin="/site-packages/ae/__init__.py",
+        runtime="containerd",
+        network=containerd_network_name(tmp_path, "demo"),
+        controller_port=19108,
+        apishim_port=18445,
+        dashboard_url="http://127.0.0.1:19108/dashboard",
+        controller_url="http://127.0.0.1:19108",
+        apishim_url="https://127.0.0.1:18445",
+        admin_token="-".join(["admin", "token"]),
+        read_token="-".join(["read", "token"]),
+        apishim_token="-".join(["shim", "token"]),
+        ingress=ingress.public_dict(),
+    )
+
+    refreshed = sup._refresh_stack_ingress_info(info)  # noqa: SLF001
+    env = sup._base_env(refreshed)  # noqa: SLF001
+
+    route = (state_dir / "caddy" / "k1s-stack.caddy").read_text(encoding="utf-8")
+    assert "https://k1s.demo.workerbee.localhost" in route
+    assert "https://k1s-api.demo.workerbee.localhost" in route
+    assert "reverse_proxy 127.0.0.1:19108" in route
+    assert "reverse_proxy https://127.0.0.1:18445" in route
+    assert "tls_insecure_skip_verify" in route
+    assert refreshed.dashboard_url == "https://k1s.demo.workerbee.localhost:19443/dashboard"
+    assert refreshed.ingress_urls["api_healthz"] == (
+        "https://k1s-api.demo.workerbee.localhost:19443/healthz"
+    )
+    assert env["AE_APISHIM_PUBLIC_BASE"] == (
+        "https://k1s-api.demo.workerbee.localhost:19443"
+    )
+    assert sup._stack_requires_ingress_restart(refreshed) is False  # noqa: SLF001
+
+
+def test_supervisor_stack_ingress_detects_legacy_loopback_dashboard(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "workerbee.supervisor.resolve_k1s_runtime",
+        lambda **_: K1sRuntime(
+            source="installed",
+            python_executable="/usr/bin/python",
+            k1s_root=None,
+            pythonpath=None,
+            ae_origin="/site-packages/ae/__init__.py",
+        ),
+    )
+    state_dir = tmp_path / "projects" / "demo"
+    ingress = ProjectIngressConfig(
+        project="demo",
+        domain="demo.workerbee.localhost",
+        https_port=19443,
+        sites_dir=state_dir / "caddy",
+        caddy_container="workerbee-caddy-test",
+        caddy_file="/etc/caddy/Caddyfile",
+        host_alias="127.0.0.1",
+        ca_bundle=tmp_path / "ca.crt",
+        global_dashboard_url="https://dashboard.workerbee.localhost:19443/",
+    )
+    sup = WorkerBeeSupervisor(
+        project="demo",
+        state_dir=state_dir,
+        runtime="containerd",
+        ingress=ingress,
+    )
+    info = StackInfo(
+        project="demo",
+        state_dir=str(state_dir),
+        k1s_root=None,
+        k1s_runtime_source="installed",
+        python_executable="/usr/bin/python",
+        ae_origin="/site-packages/ae/__init__.py",
+        runtime="containerd",
+        network=containerd_network_name(tmp_path, "demo"),
+        controller_port=19108,
+        apishim_port=18445,
+        dashboard_url="http://127.0.0.1:19108/dashboard",
+        controller_url="http://127.0.0.1:19108",
+        apishim_url="https://127.0.0.1:18445",
+        admin_token="-".join(["admin", "token"]),
+        read_token="-".join(["read", "token"]),
+        apishim_token="-".join(["shim", "token"]),
+    )
+
+    assert sup._stack_requires_ingress_restart(info) is True  # noqa: SLF001
 
 
 def test_containerd_supervisor_env_passes_helper_nerdctl_to_k1s(

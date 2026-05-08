@@ -69,6 +69,7 @@ class StackInfo:
     apishim_pid: int | None = None
     service_ports: dict[str, int] = field(default_factory=dict)
     ingress: dict[str, Any] = field(default_factory=dict)
+    ingress_urls: dict[str, str] = field(default_factory=dict)
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -102,11 +103,13 @@ class WorkerBeeSupervisor:
     def start(self) -> StackInfo:
         existing = self.load_stack()
         if existing and self._controller_healthy(existing) and self._apishim_healthy(existing):
-            if self.ingress:
-                existing.ingress = self.ingress.public_dict()
-                self._write_stack(existing)
-            return existing
-        if existing:
+            if self._stack_requires_ingress_restart(existing):
+                self.stop(purge=False)
+            else:
+                if self.ingress:
+                    self._refresh_stack_ingress_info(existing)
+                return existing
+        elif existing:
             self.stop(purge=False)
 
         runtime = self._resolve_runtime()
@@ -130,6 +133,11 @@ class WorkerBeeSupervisor:
         admin_token = _reuse_or_token(existing, "admin_token")
         read_token = _reuse_or_token(existing, "read_token")
         apishim_token = _reuse_or_token(existing, "apishim_token")
+        ingress_urls = self._write_stack_ingress_sites(
+            controller_port=controller_port,
+            apishim_port=apishim_port,
+        )
+        dashboard_url = ingress_urls.get("dashboard") or f"http://127.0.0.1:{controller_port}/dashboard"
 
         info = StackInfo(
             project=self.project,
@@ -142,7 +150,7 @@ class WorkerBeeSupervisor:
             network=network,
             controller_port=controller_port,
             apishim_port=apishim_port,
-            dashboard_url=f"http://127.0.0.1:{controller_port}/dashboard",
+            dashboard_url=dashboard_url,
             controller_url=f"http://127.0.0.1:{controller_port}",
             apishim_url=f"https://127.0.0.1:{apishim_port}",
             admin_token=admin_token,
@@ -150,6 +158,7 @@ class WorkerBeeSupervisor:
             apishim_token=apishim_token,
             service_ports=service_ports,
             ingress=self.ingress.public_dict() if self.ingress else {"enabled": False},
+            ingress_urls=ingress_urls,
         )
 
         self._write_stack(info)
@@ -173,6 +182,8 @@ class WorkerBeeSupervisor:
             verify_tls=False,
             ok_statuses={200},
         )
+        if self.ingress:
+            self._reload_ingress()
         return info
 
     def stop(self, *, purge: bool = False) -> dict[str, Any]:
@@ -184,6 +195,7 @@ class WorkerBeeSupervisor:
                     _terminate_pid(pid)
                     stopped.append(pid)
             self._cleanup_runtime(info, purge=purge)
+            self._remove_stack_ingress_site()
         elif purge and self._resolve_runtime() == CONTAINERD_RUNTIME:
             self._cleanup_containerd_runtime(
                 network=containerd_network_name(self.state_dir.parent.parent, self.project),
@@ -291,7 +303,13 @@ class WorkerBeeSupervisor:
             "validation": validation,
         }
 
-    def build_image(self, context: Path, *, tag: str | None = None) -> dict[str, Any]:
+    def build_image(
+        self,
+        context: Path,
+        *,
+        tag: str | None = None,
+        dockerfile: Path | None = None,
+    ) -> dict[str, Any]:
         runtime = self._resolve_runtime()
         build_context = context.expanduser().resolve()
         if not build_context.is_dir():
@@ -306,6 +324,7 @@ class WorkerBeeSupervisor:
             state_root=self.state_dir.parent.parent,
             project=self.project,
             context=build_context,
+            dockerfile=dockerfile,
             tag=image_tag,
             labels=labels,
         )
@@ -623,6 +642,140 @@ class WorkerBeeSupervisor:
                     urls.append(self.ingress.url(host))
         return urls
 
+    def _stack_requires_ingress_restart(self, info: StackInfo) -> bool:
+        if not self.ingress:
+            return False
+        expected = self._stack_ingress_urls(
+            controller_port=info.controller_port,
+            apishim_port=info.apishim_port,
+        )
+        if not expected:
+            return False
+        return (
+            info.dashboard_url != expected.get("dashboard")
+            or info.ingress_urls.get("api") != expected.get("api")
+        )
+
+    def _refresh_stack_ingress_info(self, info: StackInfo) -> StackInfo:
+        if not self.ingress:
+            return info
+        previous_urls = dict(info.ingress_urls)
+        previous_dashboard = info.dashboard_url
+        previous_ingress = dict(info.ingress)
+        ingress_urls = self._write_stack_ingress_sites(
+            controller_port=info.controller_port,
+            apishim_port=info.apishim_port,
+        )
+        if not ingress_urls:
+            return info
+        info.ingress = self.ingress.public_dict()
+        info.ingress_urls = ingress_urls
+        info.dashboard_url = ingress_urls.get("dashboard") or info.dashboard_url
+        if (
+            previous_urls != info.ingress_urls
+            or previous_dashboard != info.dashboard_url
+            or previous_ingress != info.ingress
+        ):
+            self._write_stack(info)
+        self._reload_ingress()
+        return info
+
+    def _write_stack_ingress_sites(
+        self,
+        *,
+        controller_port: int,
+        apishim_port: int,
+    ) -> dict[str, str]:
+        if not self.ingress:
+            return {}
+        urls = self._stack_ingress_urls(
+            controller_port=controller_port,
+            apishim_port=apishim_port,
+        )
+        controller_host = f"k1s.{self.project}.workerbee.localhost"
+        legacy_dash_host = f"k1s-dash.{self.project}.workerbee.localhost"
+        api_host = f"k1s-api.{self.project}.workerbee.localhost"
+        site = self.ingress.sites_dir / "k1s-stack.caddy"
+        site.parent.mkdir(parents=True, exist_ok=True)
+        content = f"""# Generated by WorkerBee stack supervisor.
+https://{controller_host}, https://{legacy_dash_host} {{
+    header -Strict-Transport-Security
+    tls internal
+    reverse_proxy {self.ingress.host_alias}:{controller_port}
+}}
+
+https://{api_host} {{
+    header -Strict-Transport-Security
+    tls internal
+    reverse_proxy https://{self.ingress.host_alias}:{apishim_port} {{
+        transport http {{
+            tls_insecure_skip_verify
+        }}
+    }}
+}}
+"""
+        if not site.is_file() or site.read_text(encoding="utf-8") != content:
+            site.write_text(content, encoding="utf-8")
+        return urls
+
+    def _stack_ingress_urls(
+        self,
+        *,
+        controller_port: int,
+        apishim_port: int,
+    ) -> dict[str, str]:
+        _ = (controller_port, apishim_port)
+        if not self.ingress:
+            return {}
+        controller_host = f"k1s.{self.project}.workerbee.localhost"
+        legacy_dash_host = f"k1s-dash.{self.project}.workerbee.localhost"
+        api_host = f"k1s-api.{self.project}.workerbee.localhost"
+        return {
+            "controller": self.ingress.url(controller_host, "/"),
+            "dashboard": self.ingress.url(controller_host, "/dashboard"),
+            "docs": self.ingress.url(controller_host, "/docs"),
+            "swagger": self.ingress.url(controller_host, "/swagger"),
+            "redoc": self.ingress.url(controller_host, "/redoc"),
+            "controller_openapi": self.ingress.url(controller_host, "/openapi.json"),
+            "controller_health": self.ingress.url(controller_host, "/health"),
+            "apishim": self.ingress.url(api_host, "/"),
+            "api": self.ingress.url(api_host, "/"),
+            "api_healthz": self.ingress.url(api_host, "/healthz"),
+            "api_openapi_v2": self.ingress.url(api_host, "/openapi/v2"),
+            "api_openapi_v3": self.ingress.url(api_host, "/openapi/v3"),
+            "api_swagger_json": self.ingress.url(api_host, "/swagger.json"),
+            "legacy_dashboard": self.ingress.url(legacy_dash_host, "/dashboard"),
+        }
+
+    def _reload_ingress(self) -> None:
+        if not self.ingress:
+            return
+        subprocess.run(
+            runtime_command_args(
+                self._resolve_runtime(),
+                state_root=self.state_dir.parent.parent,
+                project=None,
+                system=True,
+                args=[
+                    "exec",
+                    self.ingress.caddy_container,
+                    "caddy",
+                    "reload",
+                    "--config",
+                    self.ingress.caddy_file,
+                ],
+            ),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    def _remove_stack_ingress_site(self) -> None:
+        if not self.ingress:
+            return
+        with suppress(OSError):
+            (self.ingress.sites_dir / "k1s-stack.caddy").unlink()
+
     # k1s command helpers ------------------------------------------
     def run_ae(
         self,
@@ -692,6 +845,7 @@ class WorkerBeeSupervisor:
             data.setdefault("python_executable", self.python_executable)
             data.setdefault("ae_origin", self.k1s_runtime.ae_origin)
             data.setdefault("ingress", {"enabled": False})
+            data.setdefault("ingress_urls", {})
             return StackInfo(**data)
         except Exception:
             return None
@@ -869,10 +1023,12 @@ class WorkerBeeSupervisor:
                 "AE_APISHIM_READ_TOKEN": info.read_token,
                 "AE_APISHIM_DB": str(self.state_dir / "apishim.db"),
                 "AE_APISHIM_SERVER": info.apishim_url,
+                "AE_APISHIM_PUBLIC_BASE": self._public_apishim_base(info),
                 "AE_APISHIM_TLS_CERT": str(self.state_dir / "apishim.crt"),
                 "AE_APISHIM_TLS_KEY": str(self.state_dir / "apishim.key"),
                 "AE_APISHIM_CA_BUNDLE": str(self.state_dir / "apishim.ca.crt"),
                 "AE_APISHIM_SESSION_SECRET": _stable_secret(self.state_dir / "session.secret"),
+                "AE_DASHBOARD_BOOTSTRAP_TOKEN": info.admin_token,
                 "AE_ALLOW_PLAINTEXT_SECRETS": "1",
             }
         )
@@ -915,6 +1071,17 @@ class WorkerBeeSupervisor:
         elif info.runtime == "docker":
             env["AE_DOCKER_NETWORK"] = info.network
         return env
+
+    def _public_apishim_base(self, info: StackInfo) -> str:
+        if self.ingress:
+            urls = info.ingress_urls or self._stack_ingress_urls(
+                controller_port=info.controller_port,
+                apishim_port=info.apishim_port,
+            )
+            public = urls.get("api") or urls.get("apishim")
+            if public:
+                return public.rstrip("/")
+        return info.apishim_url.rstrip("/")
 
     def _start_apishim(self, info: StackInfo) -> int:
         env = self._base_env(info)

@@ -122,16 +122,18 @@ queues, or integration behavior that benefits from a running local stack.
    committed repo script.
 4. Use WorkerBee MCP to build local images, prepare or stage manifests, validate manifests, deploy
    locally, inspect status/logs, probe HTTPS ingress, and export k1s/Kubernetes/Helm artifacts.
+   For repo-root image builds with nested Dockerfiles, pass `dockerfile="path/to/Dockerfile"`.
 5. In lazy mode, do not start the stack until deployment or an explicit project start is needed.
 6. If WorkerBee reports `PROJECT_STOPPED`, tell the user WorkerBee is disabled for this project
    and show `workerbee project mode start --project <project>`.
 7. Iterate against the live app through status, logs, exec, and `workerbee_v1_ingress_probe` until
-   the requested behavior is verified.
+   the requested behavior is verified. Use probe `headers` for signed requests such as S3 PUTs.
 8. Export artifacts with `workerbee_v1_bundle_export` when the implementation is ready to hand off.
 
 For staged WorkerBee manifests, app logs and exec default to the WorkerBee project namespace.
 Use `app="namespace/name"` or pass `namespace` only when inspecting a non-default namespace;
-do not guess generated runtime container names.
+do not guess generated runtime container names. Manifest validate/deploy/export accepts either the
+absolute `stage_dir` returned by prepare or the named stage under project `artifacts/staged`.
 
 For k1s controller/runtime development only, use explicit direct-containerd WorkerBee profile tools:
 start a profile with `workerbee_v1_profile_start`, deploy staged manifests with
@@ -158,9 +160,12 @@ def runbook_payload() -> dict[str, Any]:
         "loop": [
             "Call workerbee_v1_session_start(cwd, goal) and keep the returned project.",
             "Build images with local shell scripts or workerbee_v1_image_build.",
+            "Use image_build dockerfile=... for repo-root builds with nested Dockerfiles.",
             "Prepare/stage manifests, validate them, deploy locally, then inspect status/logs.",
+            "Use named stages or returned stage_dir values for manifest operations.",
             "Use app names and the optional namespace field for logs/exec, not container names.",
             "Probe WorkerBee HTTPS ingress through workerbee_v1_ingress_probe.",
+            "Pass probe headers for signed request checks such as presigned S3 PUTs.",
             "Iterate until the running app is correct, then export k1s/k8s/helm artifacts.",
         ],
         "k1s_profile_loop": [

@@ -4,11 +4,14 @@ import json
 from pathlib import Path
 from typing import Any
 
+from workerbee.contract import WorkerBeeError
 from workerbee.mcp_daemon import (
     MCPDaemonConfig,
     _dashboard_health_url,
+    _wait_for_port_release,
     _wait_ready,
     mcp_daemon_status,
+    restart_mcp_daemon,
     start_mcp_daemon,
     stop_mcp_daemon,
 )
@@ -94,6 +97,132 @@ def test_start_mcp_daemon_fails_fast_when_port_is_in_use(
     assert result["ok"] is False
     assert result["started"] is False
     assert result["error"]["code"] == "MCP_PORT_IN_USE"
+
+
+def test_restart_mcp_daemon_waits_for_port_release(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, runtime="podman", port=9876)
+    checks = [
+        {"ok": False, "error": {"code": "MCP_PORT_IN_USE", "message": "busy"}},
+        {"ok": True},
+    ]
+    starts: list[float] = []
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.stop_mcp_daemon",
+        lambda _config: {"ok": True, "stopped": True},
+    )
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon._mcp_port_available",
+        lambda _config: checks.pop(0),
+    )
+    monkeypatch.setattr("workerbee.mcp_daemon.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.start_mcp_daemon",
+        lambda _config, *, timeout: starts.append(timeout) or {"ok": True, "started": True},
+    )
+
+    result = restart_mcp_daemon(config, timeout=3)
+
+    assert result["ok"] is True
+    assert result["port_release"]["ok"] is True
+    assert starts == [3]
+
+
+def test_wait_for_port_release_stops_matching_orphan(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, runtime="podman", port=9876)
+    checks = [
+        {"ok": False, "error": {"code": "MCP_PORT_IN_USE", "message": "busy"}},
+        {"ok": True},
+    ]
+    killed: list[int] = []
+    alive = {"4321": True}
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon._mcp_port_available",
+        lambda _config: checks.pop(0),
+    )
+    monkeypatch.setattr("workerbee.mcp_daemon._orphan_mcp_pids", lambda _config: [4321])
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon._terminate_process_group",
+        lambda pid, *, timeout: (killed.append(pid), alive.update({"4321": False})),  # noqa: ARG005
+    )
+    monkeypatch.setattr("workerbee.mcp_daemon._pid_alive", lambda _pid: alive["4321"])
+    monkeypatch.setattr("workerbee.mcp_daemon.time.sleep", lambda _seconds: None)
+
+    result = _wait_for_port_release(config, timeout=3)
+
+    assert result["ok"] is True
+    assert killed == [4321]
+    assert result["orphan_cleanup"]["stopped_orphan_pids"] == [4321]
+
+
+def test_restart_mcp_daemon_does_not_start_when_port_stays_busy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, runtime="podman", port=9876)
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.stop_mcp_daemon",
+        lambda _config: {"ok": True, "stopped": True},
+    )
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon._wait_for_port_release",
+        lambda _config, *, timeout: {  # noqa: ARG005
+            "ok": False,
+            "error": {"code": "MCP_PORT_IN_USE", "message": "busy"},
+        },
+    )
+
+    def fail_start(*_args, **_kwargs):
+        raise AssertionError("restart should not spawn while the MCP port is busy")
+
+    monkeypatch.setattr("workerbee.mcp_daemon.start_mcp_daemon", fail_start)
+
+    result = restart_mcp_daemon(config, timeout=3)
+
+    assert result["ok"] is False
+    assert result["start"]["error"]["code"] == "MCP_PORT_IN_USE"
+
+
+def test_start_mcp_daemon_returns_structured_containerd_privilege_error(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(
+        state_root=tmp_path,
+        runtime="containerd",
+        containerd_privilege="sudo-helper",
+        port=9876,
+    )
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.containerd_privilege_status",
+        lambda **_kwargs: {"enabled": True, "helper": {"responsive": False}},
+    )
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.ensure_containerd_privilege",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            WorkerBeeError(
+                code="CONTAINERD_HELPER_START_FAILED",
+                message="helper did not start",
+                retryable=True,
+            )
+        ),
+    )
+
+    def fail_popen(*_args, **_kwargs):
+        raise AssertionError("daemon should not spawn after privilege setup failure")
+
+    monkeypatch.setattr("workerbee.mcp_daemon.subprocess.Popen", fail_popen)
+
+    result = start_mcp_daemon(config, timeout=1)
+
+    assert result["ok"] is False
+    assert result["started"] is False
+    assert result["error"]["code"] == "CONTAINERD_HELPER_START_FAILED"
 
 
 def test_wait_ready_raises_when_child_exits(
@@ -328,6 +457,31 @@ def test_stop_mcp_daemon_without_metadata_still_stops_global_ingress(
     assert result["stopped"] is False
     assert result["global_ingress_stop"]["stopped"] is True
     assert calls == ["ingress"]
+
+
+def test_stop_mcp_daemon_without_metadata_stops_matching_orphan(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, runtime="podman", port=9876)
+    alive = {"value": True}
+    monkeypatch.setattr("workerbee.mcp_daemon._orphan_mcp_pids", lambda _config: [4321])
+    monkeypatch.setattr("workerbee.mcp_daemon._pid_alive", lambda _pid: alive["value"])
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon._terminate_process_group",
+        lambda _pid, *, timeout: alive.update(value=False),  # noqa: ARG005
+    )
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon._stop_global_ingress",
+        lambda *_args: {"ok": True, "stopped": True},
+    )
+
+    result = stop_mcp_daemon(config, timeout=1)
+
+    assert result["stopped"] is True
+    assert result["running"] is False
+    assert result["orphan_pids"] == [4321]
+    assert result["stopped_orphan_pids"] == [4321]
 
 
 def test_stop_mcp_daemon_without_metadata_uses_containerd_privilege(

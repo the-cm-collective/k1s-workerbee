@@ -230,12 +230,23 @@ Staged deployment workflow:
 
 ```bash
 workerbee manifest prepare --name demo --template frontend-api-store
-workerbee manifest validate --stage ~/.local/share/workerbee/projects/default/artifacts/staged/demo
-workerbee manifest deploy-local --stage ~/.local/share/workerbee/projects/default/artifacts/staged/demo
-workerbee bundle export --stage ~/.local/share/workerbee/projects/default/artifacts/staged/demo --format k1s
+workerbee manifest validate --stage demo
+workerbee manifest deploy-local --stage demo
+workerbee bundle export --stage demo --format k1s
 ```
 
-`manifest prepare --source <file-or-dir>` can stage native k1s YAML or practical Kubernetes YAML. Kubernetes input is applied through the k1s shim `ae apply --k8s` path and should keep exactly one workload plus matching Service/Ingress documents per file. Native k1s manifests are the required input when exporting a native k1s bundle; Kubernetes input can be exported as Kubernetes YAML or a Helm skeleton.
+`--stage` accepts either the absolute `stage_dir` returned by prepare or the named stage under the project `artifacts/staged` directory. `manifest prepare --source <file-or-dir>` can stage native k1s YAML or practical Kubernetes YAML. Kubernetes input is applied through the k1s shim `ae apply --k8s` path and should keep exactly one workload plus matching Service/Ingress documents per file. Native k1s manifests are the required input when exporting a native k1s bundle; Kubernetes input can be exported as Kubernetes YAML or a Helm skeleton.
+
+`workerbee_v1_ingress_probe` supports `GET`, `HEAD`, `POST`, `PUT`,
+`PATCH`, and `DELETE` plus `json_body`, raw `body`, and custom `headers`.
+Use headers for signed smoke tests such as S3 presigned `PUT`; WorkerBee
+intentionally blocks overriding `Host` and `Content-Length`.
+
+Image builds support repo-root contexts with nested Dockerfiles:
+
+```bash
+workerbee build-image . --dockerfile backend/Dockerfile --tag workerbee-demo-api:dev
+```
 
 WorkerBee prefers an installed `k1s-workerbee-runtime` package. For source development it
 falls back to a sibling k1s checkout at `../k1s`. Override with

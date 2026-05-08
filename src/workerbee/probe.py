@@ -53,6 +53,7 @@ def probe_workerbee_url(
     body_contains: str | None = None,
     json_body: dict[str, Any] | None = None,
     body: str | None = None,
+    headers: dict[str, str] | None = None,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
     method = method.upper()
@@ -85,17 +86,18 @@ def probe_workerbee_url(
         )
 
     data = None
-    headers = {"Accept": "application/json, text/plain, */*"}
+    request_headers = _validated_request_headers(headers)
+    request_headers.setdefault("Accept", "application/json, text/plain, */*")
     if json_body is not None:
         data = json.dumps(json_body).encode("utf-8")
-        headers["Content-Type"] = "application/json"
+        _set_default_header(request_headers, "Content-Type", "application/json")
     elif body is not None:
         data = body.encode("utf-8")
-        headers["Content-Type"] = "text/plain; charset=utf-8"
+        _set_default_header(request_headers, "Content-Type", "text/plain; charset=utf-8")
     request = urllib.request.Request(  # noqa: S310 - restricted localhost URL
         url,
         data=data,
-        headers=headers,
+        headers=request_headers,
         method=method,
     )
     context = ssl.create_default_context(cafile=str(ca_bundle))
@@ -190,3 +192,34 @@ def _selected_headers(headers: dict[str, str]) -> dict[str, str]:
         for key, value in headers.items()
         if key.lower() in SELECTED_HEADERS or key.lower().startswith("x-workerbee-")
     }
+
+
+def _validated_request_headers(headers: dict[str, str] | None) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key, value in (headers or {}).items():
+        name = str(key).strip()
+        if not name:
+            raise WorkerBeeError(code="VALIDATION_FAILED", message="header name cannot be empty")
+        lowered = name.lower()
+        if lowered == "host":
+            raise WorkerBeeError(
+                code="VALIDATION_FAILED",
+                message="ingress probe does not allow overriding the Host header",
+            )
+        if lowered == "content-length":
+            raise WorkerBeeError(
+                code="VALIDATION_FAILED",
+                message="ingress probe does not allow overriding Content-Length",
+            )
+        if any(ch in name for ch in "\r\n") or any(ch in str(value) for ch in "\r\n"):
+            raise WorkerBeeError(
+                code="VALIDATION_FAILED",
+                message="ingress probe headers cannot contain newline characters",
+            )
+        out[name] = str(value)
+    return out
+
+
+def _set_default_header(headers: dict[str, str], name: str, value: str) -> None:
+    if not any(key.lower() == name.lower() for key in headers):
+        headers[name] = value

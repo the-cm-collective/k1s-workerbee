@@ -220,6 +220,68 @@ def test_probe_posts_json_body(
     assert captured["content_type"] == "application/json"
 
 
+def test_probe_allows_custom_signed_headers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ca = tmp_path / "root.crt"
+    ca.write_text("fake", encoding="utf-8")
+    ingress = {"https_port": 19443, "ca_bundle": str(ca)}
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        status = 200
+        headers = {"Content-Type": "text/plain"}
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"uploaded"
+
+    def fake_urlopen(request: urllib.request.Request, **_kwargs: object) -> FakeResponse:
+        captured["method"] = request.get_method()
+        captured["content_type"] = request.headers.get("Content-type")
+        captured["data"] = request.data
+        return FakeResponse()
+
+    monkeypatch.setattr(ssl, "create_default_context", lambda **_kwargs: object())
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+
+    result = probe_workerbee_url(
+        project="demo",
+        ingress_info=ingress,
+        url="https://s3.demo.workerbee.localhost:19443/object",
+        method="PUT",
+        body="payload",
+        headers={"Content-Type": "video/webm"},
+        expected_status=200,
+    )
+
+    assert result["ok"] is True
+    assert captured["method"] == "PUT"
+    assert captured["content_type"] == "video/webm"
+    assert captured["data"] == b"payload"
+
+
+def test_probe_rejects_host_header_override(tmp_path: Path) -> None:
+    ca = tmp_path / "root.crt"
+    ca.write_text("fake", encoding="utf-8")
+    ingress = {"https_port": 19443, "ca_bundle": str(ca)}
+
+    with pytest.raises(WorkerBeeError) as exc:
+        probe_workerbee_url(
+            project="demo",
+            ingress_info=ingress,
+            url="https://app.demo.workerbee.localhost:19443/",
+            headers={"Host": "example.com"},
+        )
+    assert exc.value.code == "VALIDATION_FAILED"
+
+
 def test_probe_rejects_invalid_body_options(tmp_path: Path) -> None:
     ca = tmp_path / "root.crt"
     ca.write_text("fake", encoding="utf-8")

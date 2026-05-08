@@ -167,6 +167,42 @@ def validate_stage(stage_dir: Path) -> dict[str, Any]:
     }
 
 
+def resolve_stage_dir(supervisor: WorkerBeeSupervisor, stage: Path | str) -> Path:
+    raw = Path(stage).expanduser()
+    candidates: list[Path] = []
+    if raw.is_absolute():
+        candidates.append(raw)
+    else:
+        candidates.append(raw.resolve())
+        if len(raw.parts) == 1:
+            stage_ref = _stage_ref(
+                supervisor.state_dir,
+                project=supervisor.project,
+                name=raw.name,
+            )
+            candidates.append(stage_ref.stage_dir)
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate.resolve()
+    available = []
+    staged_root = supervisor.state_dir / "artifacts" / "staged"
+    if staged_root.is_dir():
+        available = sorted(path.name for path in staged_root.iterdir() if path.is_dir())
+    raise WorkerBeeError(
+        code="STAGE_NOT_FOUND",
+        message=f"staged manifest bundle not found: {stage}",
+        details={
+            "stage": str(stage),
+            "checked": [str(item) for item in candidates],
+            "available_stages": available,
+        },
+        remediation=(
+            "Pass an absolute stage_dir from manifest_prepare or a named stage under "
+            "the project artifacts/staged directory."
+        ),
+    )
+
+
 def deploy_local_stage(
     *,
     supervisor: WorkerBeeSupervisor,

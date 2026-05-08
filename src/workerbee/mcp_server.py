@@ -22,6 +22,7 @@ from workerbee.manifests import (
     deploy_remote_k1s_stage,
     export_bundle,
     prepare_stage,
+    resolve_stage_dir,
     validate_stage,
 )
 from workerbee.paths import default_state_root
@@ -333,6 +334,7 @@ def serve_mcp(
         body_contains: str | None = None,
         json_body: dict[str, Any] | None = None,
         body: str | None = None,
+        headers: dict[str, str] | None = None,
         timeout: float = 10.0,
     ) -> dict[str, Any]:
         """Probe a WorkerBee-managed local HTTPS ingress URL with the WorkerBee CA."""
@@ -349,6 +351,7 @@ def serve_mcp(
                 body_contains=body_contains,
                 json_body=json_body,
                 body=body,
+                headers=headers,
                 timeout=timeout,
             ),
         )
@@ -357,6 +360,7 @@ def serve_mcp(
     def workerbee_v1_image_build(
         context: str,
         tag: str | None = None,
+        dockerfile: str | None = None,
         project: str = "default",
     ) -> dict[str, Any]:
         """Build a local image context."""
@@ -365,7 +369,11 @@ def serve_mcp(
             project,
             lambda: daemon.with_project(
                 project,
-                lambda supervisor: supervisor.build_image(Path(context), tag=tag),
+                lambda supervisor: supervisor.build_image(
+                    Path(context),
+                    tag=tag,
+                    dockerfile=Path(dockerfile) if dockerfile else None,
+                ),
             ),
         )
 
@@ -394,7 +402,14 @@ def serve_mcp(
     @mcp.tool()
     def workerbee_v1_manifest_validate(stage: str, project: str = "default") -> dict[str, Any]:
         """Validate staged manifest files."""
-        return protect("ManifestValidate", project, lambda: validate_stage(Path(stage)))
+        return protect(
+            "ManifestValidate",
+            project,
+            lambda: daemon.with_project(
+                project,
+                lambda supervisor: validate_stage(resolve_stage_dir(supervisor, stage)),
+            ),
+        )
 
     @mcp.tool()
     def workerbee_v1_manifest_deploy_local(
@@ -457,7 +472,7 @@ def serve_mcp(
                 project,
                 lambda supervisor: deploy_remote_k1s_stage(
                     supervisor=supervisor,
-                    stage_dir=Path(stage),
+                    stage_dir=resolve_stage_dir(supervisor, stage),
                     server=server,
                     token=token,
                     namespace=namespace,
@@ -482,7 +497,7 @@ def serve_mcp(
                 project,
                 lambda supervisor: export_bundle(
                     supervisor=supervisor,
-                    stage_dir=Path(stage),
+                    stage_dir=resolve_stage_dir(supervisor, stage),
                     fmt=format,
                     namespace=namespace,
                 ),

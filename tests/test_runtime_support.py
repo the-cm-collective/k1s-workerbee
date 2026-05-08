@@ -104,6 +104,37 @@ def test_docker_build_uses_containerfile_when_no_dockerfile(
     assert calls[0][4:6] == ["-f", str(containerfile)]
 
 
+def test_docker_build_accepts_explicit_dockerfile_with_repo_root_context(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "repo"
+    dockerfile = context / "backend" / "Dockerfile"
+    dockerfile.parent.mkdir(parents=True)
+    dockerfile.write_text("FROM scratch\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="ok")
+
+    monkeypatch.setattr("workerbee.runtime_support.subprocess.run", fake_run)
+
+    result = build_image_with_runtime(
+        runtime="docker",
+        state_root=tmp_path,
+        project="demo",
+        context=context,
+        dockerfile=Path("backend/Dockerfile"),
+        tag="workerbee-demo:test",
+    )
+
+    assert result["ok"] is True
+    assert result["dockerfile"] == str(dockerfile)
+    assert ["-f", str(dockerfile)] == calls[0][4:6]
+    assert calls[0][-1] == str(context)
+
+
 def test_containerd_fallback_build_loads_image_from_state_local_tar(
     tmp_path: Path,
     monkeypatch,
@@ -146,6 +177,47 @@ def test_containerd_fallback_build_loads_image_from_state_local_tar(
     assert result["build_backend"] == "podman-save-load"
     assert calls[-1][-3:] == ["load", "-i", calls[-1][-1]]
     assert not list((tmp_path / "global" / "image-transfer").glob("*.tar"))
+
+
+def test_containerd_build_skips_nerdctl_when_buildctl_missing_and_fallback_exists(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    context.mkdir()
+    calls: list[list[str]] = []
+
+    def fake_which(name: str) -> str | None:
+        if name == "buildctl":
+            return None
+        return f"/bin/{name}"
+
+    def fake_run(cmd: list[str], **kwargs):
+        calls.append(cmd)
+        assert kwargs.get("stdin") is None
+        if cmd[:2] == ["podman", "build"]:
+            return SimpleNamespace(returncode=0, stdout="podman build ok")
+        if cmd[:3] == ["podman", "save", "-o"]:
+            Path(cmd[3]).write_text("tar", encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout="podman save ok")
+        if cmd[0] == "nerdctl" and "load" in cmd:
+            return SimpleNamespace(returncode=0, stdout="nerdctl load ok")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr("workerbee.runtime_support.shutil.which", fake_which)
+    monkeypatch.setattr("workerbee.runtime_support.subprocess.run", fake_run)
+
+    result = build_image_with_runtime(
+        runtime="containerd",
+        state_root=tmp_path,
+        project="demo",
+        context=context,
+        tag="workerbee-demo:test",
+    )
+
+    assert result["ok"] is True
+    assert result["attempts"][0]["skipped"] is True
+    assert not any(cmd[0] == "nerdctl" and "build" in cmd for cmd in calls)
 
 
 def test_containerd_cli_wrapper_routes_caddy_exec_to_system_namespace(tmp_path: Path) -> None:

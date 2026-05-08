@@ -216,6 +216,7 @@ class K1sProfileRunner:
                     descriptor,
                     index=index,
                     host_port=controller_port + index,
+                    apishim_host_port=apishim_port,
                     apishim_token=tokens["apishim_token"],
                     admin_token=tokens["admin_token"],
                     read_token=tokens["read_token"],
@@ -912,6 +913,7 @@ class K1sProfileRunner:
         *,
         index: int,
         host_port: int,
+        apishim_host_port: int,
         apishim_token: str,
         admin_token: str,
         read_token: str,
@@ -927,8 +929,10 @@ class K1sProfileRunner:
                 "AE_API_READ_TOKEN": read_token,
                 "AE_API_SCALER_TOKEN": admin_token,
                 "AE_APISHIM_SERVER": f"http://{self._component_name(descriptor, 'apishim')}:8445",
+                "AE_APISHIM_PUBLIC_BASE": self._profile_apishim_public_base(apishim_host_port),
                 "AE_APISHIM_TOKEN": apishim_token,
                 "AE_APISHIM_READ_TOKEN": read_token,
+                "AE_DASHBOARD_BOOTSTRAP_TOKEN": admin_token,
             }
         )
         image = os.getenv("WORKERBEE_K1S_PROFILE_PYTHON_IMAGE", DEFAULT_K1S_PYTHON_IMAGE)
@@ -965,6 +969,11 @@ class K1sProfileRunner:
             container_port=9108,
             url=f"http://127.0.0.1:{host_port}",
         )
+
+    def _profile_apishim_public_base(self, apishim_port: int) -> str:
+        if self.ingress:
+            return self.ingress.url(f"k1s-api.{self.project}.workerbee.localhost", "/").rstrip("/")
+        return f"http://127.0.0.1:{int(apishim_port)}"
 
     def _run_component(
         self,

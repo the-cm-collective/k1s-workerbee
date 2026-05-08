@@ -18,10 +18,12 @@ from urllib.parse import SplitResult, urlsplit, urlunsplit
 from workerbee.containerd_helper import (
     containerd_privilege_env,
     containerd_privilege_status,
+    containerd_privilege_summary,
     ensure_containerd_privilege,
     stop_containerd_helper,
     temporary_containerd_privilege_env,
 )
+from workerbee.contract import WorkerBeeError
 from workerbee.http import request, request_https_via_loopback
 from workerbee.ingress import global_ingress_status, load_global_ingress_info
 from workerbee.paths import default_state_root
@@ -80,17 +82,20 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
     status = mcp_daemon_status(config)
     if status["running"]:
         if config.runtime == CONTAINERD_RUNTIME:
-            privilege = ensure_containerd_privilege(
-                state_root=config.state_root,
-                runtime=config.runtime,
-                mode=config.containerd_privilege,
-            )
+            try:
+                privilege = ensure_containerd_privilege(
+                    state_root=config.state_root,
+                    runtime=config.runtime,
+                    mode=config.containerd_privilege,
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _start_error(config, exc, code="CONTAINERD_PRIVILEGE_FAILED")
             refreshed = mcp_daemon_status(config)
             return {
                 **refreshed,
                 "ok": bool(privilege.get("ok", True)),
                 "started": False,
-                "containerd_privilege": privilege,
+                "containerd_privilege": containerd_privilege_summary(privilege),
                 "containerd_privilege_mode": privilege.get("effective_mode"),
             }
         return {**status, "ok": True, "started": False}
@@ -100,6 +105,7 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
             stale_stop["containerd_cleanup"].get("ok")
         ):
             return {**stale_stop, "ok": False, "started": False}
+    orphan_cleanup = _stop_matching_orphan_mcp_daemons(config, timeout=5.0)
     port_check = _mcp_port_available(config)
     if not port_check["ok"]:
         return {
@@ -108,13 +114,31 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
             "started": False,
             "running": False,
             "error": port_check["error"],
+            "orphan_cleanup": orphan_cleanup,
         }
     config.global_dir.mkdir(parents=True, exist_ok=True)
-    privilege = ensure_containerd_privilege(
-        state_root=config.state_root,
-        runtime=config.runtime,
-        mode=config.containerd_privilege,
-    )
+    try:
+        privilege = ensure_containerd_privilege(
+            state_root=config.state_root,
+            runtime=config.runtime,
+            mode=config.containerd_privilege,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return _start_error(config, exc, code="CONTAINERD_PRIVILEGE_FAILED")
+    if privilege.get("ok") is False:
+        return _start_error(
+            config,
+            WorkerBeeError(
+                code="CONTAINERD_PRIVILEGE_FAILED",
+                message="WorkerBee containerd privilege setup did not complete",
+                details={"containerd_privilege": privilege},
+                retryable=True,
+                remediation=(
+                    "Check containerd socket access, sudo-helper status, and "
+                    "WorkerBee containerd helper logs."
+                ),
+            ),
+        )
     child_privilege_mode = (
         "unprivileged"
         if privilege.get("effective_mode") == "sudo-helper"
@@ -152,11 +176,11 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
             close_fds=True,
             env=child_env,
         )
-    except Exception:
+    except Exception as exc:  # noqa: BLE001
         if _helper_started(privilege):
             with suppress(Exception):
                 stop_containerd_helper(config.state_root)
-        raise
+        return _start_error(config, exc, code="MCP_SPAWN_FAILED")
     finally:
         log.close()
     metadata = {
@@ -176,10 +200,9 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
     _write_metadata(config.metadata_file, metadata)
     try:
         ready = _wait_ready(config, timeout=timeout)
-    except Exception:
-        with suppress(Exception):
-            stop_mcp_daemon(config, timeout=5.0)
-        raise
+    except Exception as exc:  # noqa: BLE001
+        _cleanup_failed_start(config, privilege)
+        return _start_error(config, exc, code="MCP_NOT_READY")
     metadata.update(ready)
     _write_metadata(config.metadata_file, metadata)
     return {**mcp_daemon_status(config), "ok": True, "started": True}
@@ -188,17 +211,24 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
 def stop_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 10.0) -> dict[str, Any]:
     metadata = _read_metadata(config.metadata_file)
     if not metadata:
+        orphan_pids = _orphan_mcp_pids(config)
+        for pid in orphan_pids:
+            _terminate_process_group(pid, timeout=timeout)
+        remaining_orphans = [pid for pid in orphan_pids if _pid_alive(pid)]
+        stopped_orphans = [pid for pid in orphan_pids if pid not in remaining_orphans]
         privilege = _ensure_stop_privilege(config)
         metadata = _metadata_with_privilege(config, metadata, privilege)
         global_ingress_stop = _stop_global_ingress(config, metadata)
         helper_stop = _stop_temporary_helper(config, privilege)
         return {
             **_base_status(config),
-            "running": False,
-            "stopped": False,
+            "running": bool(remaining_orphans),
+            "stopped": bool(orphan_pids) and not remaining_orphans,
+            "orphan_pids": orphan_pids,
+            "stopped_orphan_pids": stopped_orphans,
             "global_ingress_stop": global_ingress_stop,
             "containerd_helper_stop": helper_stop,
-            "containerd_privilege": privilege,
+            "containerd_privilege": containerd_privilege_summary(privilege),
         }
     pid = _metadata_pid(metadata)
     if pid is None or not _pid_alive(pid):
@@ -248,8 +278,18 @@ def stop_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 10.0) -> dict[s
 
 def restart_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[str, Any]:
     stop = stop_mcp_daemon(config)
+    port_release = _wait_for_port_release(config, timeout=min(max(timeout, 1.0), 10.0))
+    if not port_release["ok"]:
+        start = {
+            **_base_status(config),
+            "ok": False,
+            "started": False,
+            "running": False,
+            "error": port_release["error"],
+        }
+        return {"ok": False, "stop": stop, "start": start, "port_release": port_release}
     start = start_mcp_daemon(config, timeout=timeout)
-    return {"ok": bool(start.get("ok")), "stop": stop, "start": start}
+    return {"ok": bool(start.get("ok")), "stop": stop, "start": start, "port_release": port_release}
 
 
 def mcp_daemon_status(config: MCPDaemonConfig) -> dict[str, Any]:
@@ -260,10 +300,12 @@ def mcp_daemon_status(config: MCPDaemonConfig) -> dict[str, Any]:
             **status,
             "running": False,
             "stale": False,
-            "containerd_privilege": containerd_privilege_status(
-                state_root=config.state_root,
-                runtime=config.runtime,
-                mode=config.containerd_privilege,
+            "containerd_privilege": containerd_privilege_summary(
+                containerd_privilege_status(
+                    state_root=config.state_root,
+                    runtime=config.runtime,
+                    mode=config.containerd_privilege,
+                )
             ),
         }
     pid = _metadata_pid(metadata)
@@ -280,10 +322,12 @@ def mcp_daemon_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "stale": stale,
         "dashboard_url": ingress.get("dashboard_url") or metadata.get("dashboard_url"),
         "global_dashboard": ingress,
-        "containerd_privilege": containerd_privilege_status(
-            state_root=config.state_root,
-            runtime=runtime,
-            mode=privilege_mode,
+        "containerd_privilege": containerd_privilege_summary(
+            containerd_privilege_status(
+                state_root=config.state_root,
+                runtime=runtime,
+                mode=privilege_mode,
+            )
         ),
     }
 
@@ -388,6 +432,78 @@ def _mcp_port_available(config: MCPDaemonConfig) -> dict[str, Any]:
     return {"ok": True}
 
 
+def _wait_for_port_release(config: MCPDaemonConfig, *, timeout: float) -> dict[str, Any]:
+    deadline = time.monotonic() + max(timeout, 0.0)
+    last = _mcp_port_available(config)
+    orphan_cleanup: dict[str, Any] | None = None
+    while not last["ok"] and time.monotonic() < deadline:
+        if orphan_cleanup is None:
+            orphan_cleanup = _stop_matching_orphan_mcp_daemons(config, timeout=2.0)
+        time.sleep(0.2)
+        last = _mcp_port_available(config)
+    if last["ok"]:
+        return {
+            "ok": True,
+            "host": config.host,
+            "port": config.port,
+            "orphan_cleanup": orphan_cleanup,
+        }
+    error = dict(last.get("error") or {})
+    error["message"] = (
+        "WorkerBee MCP port did not become available after stopping the previous daemon"
+    )
+    error["remediation"] = (
+        "Inspect the process still listening on the MCP port, stop it, then retry "
+        "`workerbee mcp restart`."
+    )
+    return {
+        "ok": False,
+        "host": config.host,
+        "port": config.port,
+        "error": error,
+        "orphan_cleanup": orphan_cleanup,
+    }
+
+
+def _start_error(
+    config: MCPDaemonConfig,
+    exc: Exception,
+    *,
+    code: str = "MCP_START_FAILED",
+) -> dict[str, Any]:
+    if isinstance(exc, WorkerBeeError):
+        error = exc.public_dict()
+    else:
+        error = WorkerBeeError(
+            code=code,
+            message=str(exc),
+            details={
+                "mcp_url": config.mcp_url,
+                "state_root": str(config.state_root),
+                "log_file": str(config.log_file),
+            },
+            retryable=True,
+            remediation="Inspect WorkerBee MCP logs, correct the runtime issue, then retry.",
+        ).public_dict()
+    return {
+        **_base_status(config),
+        "ok": False,
+        "started": False,
+        "running": False,
+        "error": error,
+    }
+
+
+def _cleanup_failed_start(config: MCPDaemonConfig, privilege: dict[str, Any]) -> None:
+    with suppress(Exception):
+        stop_mcp_daemon(config, timeout=5.0)
+    with suppress(OSError):
+        config.metadata_file.unlink()
+    if _helper_started(privilege):
+        with suppress(Exception):
+            stop_containerd_helper(config.state_root)
+
+
 def _port_owner_details(host: str, port: int) -> dict[str, Any]:
     details: dict[str, Any] = {"host": host, "port": int(port)}
     for label, argv in (
@@ -462,14 +578,9 @@ def _pid_alive(pid: int) -> bool:
 def _pid_matches_metadata(pid: int, config: MCPDaemonConfig, metadata: dict[str, Any]) -> bool:
     if str(metadata.get("state_root") or "") != str(config.state_root):
         return False
-    proc_cmdline = Path("/proc") / str(pid) / "cmdline"
-    if not proc_cmdline.is_file():
+    parts = _proc_cmdline_parts(pid)
+    if not parts:
         return True
-    try:
-        raw = proc_cmdline.read_bytes().decode("utf-8", errors="replace")
-    except OSError:
-        return True
-    parts = [part for part in raw.split("\0") if part]
     joined = " ".join(parts)
     return (
         "-m workerbee" in joined
@@ -477,6 +588,78 @@ def _pid_matches_metadata(pid: int, config: MCPDaemonConfig, metadata: dict[str,
         and "serve" in parts
         and str(config.state_root) in joined
     )
+
+
+def _orphan_mcp_pids(config: MCPDaemonConfig) -> list[int]:
+    proc_root = Path("/proc")
+    if not proc_root.is_dir():
+        return []
+    pids: list[int] = []
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        pid = int(entry.name)
+        if pid == os.getpid():
+            continue
+        parts = _proc_cmdline_parts(pid)
+        if parts and _argv_matches_mcp_config(parts, config):
+            pids.append(pid)
+    return pids
+
+
+def _stop_matching_orphan_mcp_daemons(
+    config: MCPDaemonConfig,
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    orphan_pids = _orphan_mcp_pids(config)
+    for pid in orphan_pids:
+        _terminate_process_group(pid, timeout=timeout)
+    remaining = [pid for pid in orphan_pids if _pid_alive(pid)]
+    return {
+        "ok": not remaining,
+        "orphan_pids": orphan_pids,
+        "stopped_orphan_pids": [pid for pid in orphan_pids if pid not in remaining],
+        "remaining_orphan_pids": remaining,
+    }
+
+
+def _proc_cmdline_parts(pid: int) -> list[str]:
+    proc_cmdline = Path("/proc") / str(pid) / "cmdline"
+    if not proc_cmdline.is_file():
+        return []
+    try:
+        raw = proc_cmdline.read_bytes().decode("utf-8", errors="replace")
+    except OSError:
+        return []
+    return [part for part in raw.split("\0") if part]
+
+
+def _argv_matches_mcp_config(parts: list[str], config: MCPDaemonConfig) -> bool:
+    if "mcp" not in parts or "serve" not in parts:
+        return False
+    executable = Path(parts[0]).name if parts else ""
+    module_workerbee = "-m" in parts and "workerbee" in parts
+    executable_workerbee = executable.startswith("workerbee")
+    if not module_workerbee and not executable_workerbee:
+        return False
+    state_root = _argv_option(parts, "--state-root")
+    if not state_root or Path(state_root).expanduser().resolve() != config.state_root.resolve():
+        return False
+    port = _argv_option(parts, "--port")
+    if port != str(config.port):
+        return False
+    host = _argv_option(parts, "--host")
+    return host in (None, config.host)
+
+
+def _argv_option(parts: list[str], name: str) -> str | None:
+    if name not in parts:
+        return None
+    index = parts.index(name) + 1
+    if index >= len(parts):
+        return None
+    return parts[index]
 
 
 def _terminate_process_group(pid: int, *, timeout: float) -> None:

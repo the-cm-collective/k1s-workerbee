@@ -35,6 +35,35 @@ def test_daemon_uses_state_root_for_project_supervisors(tmp_path: Path, monkeypa
     assert sup.state_dir == tmp_path / "projects" / "my-project"
 
 
+def test_capabilities_surface_probe_and_image_build_hints(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "workerbee.daemon.runtime_diagnostics",
+        lambda *_args, **_kwargs: {"ok": True, "selected": "podman"},
+    )
+    monkeypatch.setattr(
+        "workerbee.daemon.containerd_privilege_status",
+        lambda **_kwargs: {"enabled": False},
+    )
+    monkeypatch.setattr(
+        "workerbee.k1s_runtime.resolve_k1s_runtime",
+        lambda **_kwargs: K1sRuntime(
+            source="installed",
+            python_executable="/usr/bin/python",
+            k1s_root=None,
+            pythonpath=None,
+            ae_origin="/site-packages/ae/__init__.py",
+        ),
+    )
+
+    payload = WorkerBeeDaemon(state_root=tmp_path, runtime="podman").capabilities()
+
+    probe = payload["tool_hints"]["workerbee_v1_ingress_probe"]
+    assert "PUT" in probe["methods"]
+    assert probe["headers"] is True
+    assert probe["body_fields"] == ["json_body", "body"]
+    assert "dockerfile" in payload["tool_hints"]["workerbee_v1_image_build"]
+
+
 def test_global_ingress_project_config_is_localhost_scoped(tmp_path: Path) -> None:
     ingress = GlobalIngress(
         state_root=tmp_path,

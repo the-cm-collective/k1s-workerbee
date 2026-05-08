@@ -517,23 +517,26 @@ def build_image_with_runtime(
     project: str,
     context: Path,
     tag: str,
+    dockerfile: Path | None = None,
     labels: list[str] | None = None,
     timeout: int = 300,
 ) -> dict[str, Any]:
     selected = resolve_runtime(runtime)
     build_context = context.expanduser().resolve()
+    build_file = _resolve_dockerfile(build_context, dockerfile)
     label_values = labels or workerbee_runtime_labels(state_root=state_root, project=project)
     if selected == CONTAINERD_RUNTIME:
         return _build_image_containerd(
             state_root=state_root,
             project=project,
             context=build_context,
+            dockerfile=build_file,
             tag=tag,
             labels=label_values,
             timeout=timeout,
         )
     cmd = [selected, "build", "-t", tag]
-    cmd.extend(_container_build_file_args(build_context))
+    cmd.extend(_container_build_file_args(build_context, build_file))
     for label in label_values:
         cmd.extend(["--label", label])
     cmd.append(str(build_context))
@@ -550,6 +553,7 @@ def build_image_with_runtime(
         "build_backend": selected,
         "tag": tag,
         "context": str(build_context),
+        "dockerfile": str(build_file) if build_file else None,
         "labels": label_values,
         "cmd": cmd,
         "stdout": proc.stdout,
@@ -665,43 +669,57 @@ def _build_image_containerd(
     state_root: Path,
     project: str,
     context: Path,
+    dockerfile: Path | None,
     tag: str,
     labels: list[str],
     timeout: int,
 ) -> dict[str, Any]:
     base = containerd_base_args(state_root=state_root, project=project)
-    cmd = [*base, "build", "-t", tag]
-    cmd.extend(_container_build_file_args(context))
-    for label in labels:
-        cmd.extend(["--label", label])
-    cmd.append(str(context))
-    proc = subprocess.run(
-        cmd,
-        text=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        timeout=timeout,
-    )
-    attempts = [{"backend": "nerdctl", "returncode": proc.returncode, "stdout": proc.stdout}]
-    if proc.returncode == 0:
-        return {
-            "ok": True,
-            "runtime": CONTAINERD_RUNTIME,
-            "build_backend": "nerdctl",
-            "tag": tag,
-            "context": str(context),
-            "labels": labels,
-            "cmd": cmd,
-            "stdout": proc.stdout,
-        }
-    for fallback in ("podman", "docker"):
-        if shutil.which(fallback) is None:
-            continue
+    attempts: list[dict[str, Any]] = []
+    fallbacks = [fallback for fallback in ("podman", "docker") if shutil.which(fallback)]
+    if shutil.which(buildctl_binary()) is None and fallbacks:
+        attempts.append(
+            {
+                "backend": "nerdctl",
+                "skipped": True,
+                "reason": f"{buildctl_binary()} not found; using image save/load fallback",
+            }
+        )
+    else:
+        cmd = [*base, "build", "-t", tag]
+        cmd.extend(_container_build_file_args(context, dockerfile))
+        for label in labels:
+            cmd.extend(["--label", label])
+        cmd.append(str(context))
+        proc = subprocess.run(
+            cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
+        attempts.append(
+            {"backend": "nerdctl", "returncode": proc.returncode, "stdout": proc.stdout}
+        )
+        if proc.returncode == 0:
+            return {
+                "ok": True,
+                "runtime": CONTAINERD_RUNTIME,
+                "build_backend": "nerdctl",
+                "tag": tag,
+                "context": str(context),
+                "dockerfile": str(dockerfile) if dockerfile else None,
+                "labels": labels,
+                "cmd": cmd,
+                "stdout": proc.stdout,
+            }
+    for fallback in fallbacks:
         result = _build_with_fallback_and_load(
             fallback=fallback,
             containerd_base=base,
             state_root=state_root,
             context=context,
+            dockerfile=dockerfile,
             tag=tag,
             labels=labels,
             timeout=timeout,
@@ -714,6 +732,7 @@ def _build_image_containerd(
                 "build_backend": f"{fallback}-save-load",
                 "tag": tag,
                 "context": str(context),
+                "dockerfile": str(dockerfile) if dockerfile else None,
                 "labels": labels,
                 "cmd": result["cmd"],
                 "stdout": result["stdout"],
@@ -726,6 +745,7 @@ def _build_image_containerd(
                 "runtime": CONTAINERD_RUNTIME,
                 "tag": tag,
                 "context": str(context),
+                "dockerfile": str(dockerfile) if dockerfile else None,
                 "labels": labels,
                 "attempts": attempts,
             },
@@ -740,12 +760,13 @@ def _build_with_fallback_and_load(
     containerd_base: list[str],
     state_root: Path,
     context: Path,
+    dockerfile: Path | None,
     tag: str,
     labels: list[str],
     timeout: int,
 ) -> dict[str, Any]:
     build_cmd = [fallback, "build", "-t", tag]
-    build_cmd.extend(_container_build_file_args(context))
+    build_cmd.extend(_container_build_file_args(context, dockerfile))
     for label in labels:
         build_cmd.extend(["--label", label])
     build_cmd.append(str(context))
@@ -882,7 +903,20 @@ def _cleanup_images(cmd: RuntimeCommand, *, execute: bool) -> list[dict[str, Any
     return images
 
 
-def _container_build_file_args(context: Path) -> list[str]:
+def _resolve_dockerfile(context: Path, dockerfile: Path | None) -> Path | None:
+    if dockerfile is None:
+        return None
+    raw = dockerfile.expanduser()
+    candidates = [raw] if raw.is_absolute() else [context / raw, raw.resolve()]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    raise FileNotFoundError(f"Dockerfile not found: {dockerfile}")
+
+
+def _container_build_file_args(context: Path, dockerfile: Path | None = None) -> list[str]:
+    if dockerfile is not None:
+        return ["-f", str(dockerfile)]
     if (context / "Dockerfile").is_file():
         return []
     containerfile = context / "Containerfile"

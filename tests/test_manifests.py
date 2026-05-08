@@ -9,6 +9,7 @@ from workerbee.manifests import (
     deploy_remote_k1s_stage,
     export_bundle,
     prepare_stage,
+    resolve_stage_dir,
     validate_stage,
 )
 from workerbee.supervisor import WorkerBeeSupervisor
@@ -46,6 +47,16 @@ def test_prepare_and_validate_native_stage(tmp_path: Path, monkeypatch) -> None:
     assert (Path(prepared["stage_dir"]) / "bundle.json").is_file()
     images = Path(prepared["stage_dir"]) / "images.json"
     assert "workerbee-demo-app-api:dev" in images.read_text(encoding="utf-8")
+
+
+def test_named_stage_resolves_under_project_artifacts(tmp_path: Path, monkeypatch) -> None:
+    sup = _supervisor(tmp_path, monkeypatch)
+    prepared = prepare_stage(supervisor=sup, name="RawForm Rerun", template="stateless-web")
+
+    resolved = resolve_stage_dir(sup, "rawform-rerun")
+
+    assert resolved == Path(prepared["stage_dir"]).resolve()
+    assert validate_stage(resolved)["ok"] is True
 
 
 def test_remote_deploy_uses_controller_apply_and_masks_token(tmp_path: Path, monkeypatch) -> None:

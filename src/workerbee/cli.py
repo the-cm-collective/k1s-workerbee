@@ -25,6 +25,7 @@ from workerbee.containerd_access import release_containerd_socket_access
 from workerbee.containerd_helper import (
     containerd_privilege_env,
     containerd_privilege_status,
+    containerd_privilege_summary,
     ensure_containerd_privilege,
     stop_containerd_helper,
     temporary_containerd_privilege_env,
@@ -36,6 +37,7 @@ from workerbee.manifests import (
     deploy_remote_k1s_stage,
     export_bundle,
     prepare_stage,
+    resolve_stage_dir,
     validate_stage,
 )
 from workerbee.mcp_daemon import (
@@ -184,6 +186,13 @@ def build_parser() -> argparse.ArgumentParser:
     build = sub.add_parser("build-image", help="Build a local image with the configured runtime")
     build.add_argument("context", type=Path)
     build.add_argument("--tag", default=None)
+    build.add_argument(
+        "-f",
+        "--dockerfile",
+        type=Path,
+        default=None,
+        help="Dockerfile path, relative to the build context by default",
+    )
     deploy_native = sub.add_parser("deploy", help="Apply a native k1s manifest")
     deploy_native.add_argument("-f", "--file", type=Path, required=True)
     deploy_native.add_argument("-n", "--namespace", default=None)
@@ -338,7 +347,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 else:
                     result = {"ok": False, "error": f"unknown profile command: {args.profile_cmd}"}
-                result["containerd_privilege"] = privilege
+                result["containerd_privilege"] = containerd_privilege_summary(privilege)
                 return _print(result, json_out=args.json)
         if args.cmd == "validate":
             daemon = WorkerBeeDaemon(
@@ -360,7 +369,7 @@ def main(argv: list[str] | None = None) -> int:
                         k1s_root=args.k1s_root,
                         timeout=args.timeout,
                     )
-                    result["containerd_privilege"] = privilege
+                    result["containerd_privilege"] = containerd_privilege_summary(privilege)
                     return _print(result, json_out=args.json)
             if args.scenario == "profile-workload":
                 privilege = ensure_containerd_privilege(
@@ -375,7 +384,7 @@ def main(argv: list[str] | None = None) -> int:
                         k1s_root=args.k1s_root,
                         timeout=args.timeout,
                     )
-                    result["containerd_privilege"] = privilege
+                    result["containerd_privilege"] = containerd_privilege_summary(privilege)
                     return _print(result, json_out=args.json)
         if args.cmd == "project":
             cwd = args.project_cwd or args.cwd or Path.cwd()
@@ -466,7 +475,10 @@ def main(argv: list[str] | None = None) -> int:
                     json_out=args.json,
                 )
             if args.manifest_cmd == "validate":
-                return _print(validate_stage(args.stage), json_out=args.json)
+                return _print(
+                    validate_stage(resolve_stage_dir(sup, args.stage)),
+                    json_out=args.json,
+                )
             if args.manifest_cmd == "deploy-local":
                 if args.target == "profile":
                     daemon = WorkerBeeDaemon(
@@ -490,7 +502,7 @@ def main(argv: list[str] | None = None) -> int:
                             timeout=args.timeout,
                             k1s_root=args.k1s_root,
                         )
-                        result["containerd_privilege"] = privilege
+                        result["containerd_privilege"] = containerd_privilege_summary(privilege)
                         return _print(result, json_out=args.json)
                 return _print(
                     _run_supervisor_action(
@@ -499,7 +511,7 @@ def main(argv: list[str] | None = None) -> int:
                         containerd_privilege=containerd_privilege,
                         action=lambda: deploy_local_stage(
                             supervisor=sup,
-                            stage_dir=args.stage,
+                            stage_dir=resolve_stage_dir(sup, args.stage),
                             namespace=args.namespace,
                             timeout=args.timeout,
                         ),
@@ -510,7 +522,7 @@ def main(argv: list[str] | None = None) -> int:
                 return _print(
                     deploy_remote_k1s_stage(
                         supervisor=sup,
-                        stage_dir=args.stage,
+                        stage_dir=resolve_stage_dir(sup, args.stage),
                         server=args.server,
                         token=args.token,
                         namespace=args.namespace,
@@ -522,7 +534,7 @@ def main(argv: list[str] | None = None) -> int:
             return _print(
                 export_bundle(
                     supervisor=sup,
-                    stage_dir=args.stage,
+                    stage_dir=resolve_stage_dir(sup, args.stage),
                     fmt=args.format,
                     namespace=args.namespace,
                 ),
@@ -586,7 +598,11 @@ def main(argv: list[str] | None = None) -> int:
                     args=args,
                     supervisor=sup,
                     containerd_privilege=containerd_privilege,
-                    action=lambda: sup.build_image(args.context, tag=args.tag),
+                    action=lambda: sup.build_image(
+                        args.context,
+                        tag=args.tag,
+                        dockerfile=args.dockerfile,
+                    ),
                 ),
                 json_out=args.json,
             )
@@ -698,7 +714,7 @@ def _run_supervisor_action(
     )
     with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
         result = action()
-    result.setdefault("containerd_privilege", privilege)
+    result.setdefault("containerd_privilege", containerd_privilege_summary(privilege))
     return result
 
 
@@ -826,6 +842,7 @@ def _doctor(
         checks["k1s_root"] = str(runtime.k1s_root) if runtime.k1s_root else None
         checks["k1s_python"] = runtime.python_executable
         checks["ae_origin"] = runtime.ae_origin
+        checks["ae_version"] = getattr(runtime, "ae_version", None)
         env = runtime.apply_env(os.environ.copy())
         proc = subprocess.run(
             [runtime.python_executable, "-m", "ae.cli", "--help"],

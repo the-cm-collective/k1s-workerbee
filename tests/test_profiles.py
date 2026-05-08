@@ -270,3 +270,64 @@ def test_existing_profile_start_refreshes_ingress_routes(
         "https://k1s-dash.demo.workerbee.localhost:19443/dashboard"
     )
     assert (tmp_path / "global" / "caddy-sites" / "demo" / "k1s-profile.caddy").is_file()
+
+
+def test_profile_controller_dashboard_uses_public_apishim_ingress(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("workerbee.profiles.resolve_runtime", lambda _runtime: "containerd")
+    monkeypatch.setattr("workerbee.profiles.port_is_free", lambda _port: True)
+    monkeypatch.setattr("workerbee.profiles.wait_for_http", lambda *_args, **_kwargs: None)
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):  # noqa: ANN001
+        commands.append([str(part) for part in cmd])
+        if "network" in cmd and "inspect" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "run" in cmd:
+            name = cmd[cmd.index("--name") + 1]
+            return subprocess.CompletedProcess(cmd, 0, f"{name}-id\n", "")
+        if "ps" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("workerbee.profiles.subprocess.run", fake_run)
+    runner = K1sProfileRunner(
+        project="demo",
+        state_root=tmp_path,
+        runtime="containerd",
+        k1s_root=tmp_path / "k1s",
+        ingress=ProjectIngressConfig(
+            project="demo",
+            domain="demo.workerbee.localhost",
+            https_port=19443,
+            sites_dir=tmp_path / "global" / "caddy-sites" / "demo",
+            caddy_container="workerbee-caddy-test",
+            caddy_file="/etc/caddy/Caddyfile",
+            host_alias="host.docker.internal",
+            ca_bundle=tmp_path / "global" / "caddy-local-root.crt",
+            global_dashboard_url="https://dashboard.workerbee.localhost:19443/",
+        ),
+    )
+
+    result = runner.start(profile="k1s-dev-min-sqlite", timeout=0.01)
+
+    controller_cmd = next(
+        cmd
+        for cmd in commands
+        if "run" in cmd and cmd[cmd.index("--name") + 1].endswith("-controller-0")
+    )
+    env = {
+        controller_cmd[index + 1].split("=", 1)[0]: controller_cmd[index + 1].split("=", 1)[1]
+        for index, value in enumerate(controller_cmd[:-1])
+        if value == "-e"
+    }
+    apishim = next(
+        component
+        for component in result["profile"]["components"]
+        if component["role"] == "apishim"
+    )
+    assert env["AE_APISHIM_SERVER"] == f"http://{apishim['name']}:8445"
+    assert env["AE_APISHIM_PUBLIC_BASE"] == "https://k1s-api.demo.workerbee.localhost:19443"
+    assert env["AE_DASHBOARD_BOOTSTRAP_TOKEN"] == env["AE_API_ADMIN_TOKEN"]

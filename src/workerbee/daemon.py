@@ -29,7 +29,7 @@ from workerbee.agent import (
     runbook_payload,
     user_message_for_session,
 )
-from workerbee.containerd_helper import containerd_privilege_status
+from workerbee.containerd_helper import containerd_privilege_status, containerd_privilege_summary
 from workerbee.contract import WorkerBeeError
 from workerbee.http import request
 from workerbee.ingress import (
@@ -690,7 +690,7 @@ class WorkerBeeDaemon:
         timeout: int = 180,
         k1s_root: str | Path | None = None,
     ) -> dict[str, Any]:
-        from workerbee.manifests import deploy_local_stage
+        from workerbee.manifests import deploy_local_stage, resolve_stage_dir
 
         name = project_slug(project or self.default_project)
         target = _normalize_deploy_target(target)
@@ -699,7 +699,7 @@ class WorkerBeeDaemon:
                 name,
                 lambda supervisor: deploy_local_stage(
                     supervisor=supervisor,
-                    stage_dir=stage,
+                    stage_dir=resolve_stage_dir(supervisor, stage),
                     namespace=namespace,
                     timeout=timeout,
                 ),
@@ -717,7 +717,7 @@ class WorkerBeeDaemon:
                 result = deploy_profile_stage(
                     supervisor=supervisor,
                     profile_runner=self._profile_runner(name, k1s_root=k1s_root),
-                    stage_dir=stage,
+                    stage_dir=resolve_stage_dir(supervisor, stage),
                     profile=profile,
                     namespace=namespace,
                     timeout=timeout,
@@ -767,6 +767,19 @@ class WorkerBeeDaemon:
     def capabilities(self) -> dict[str, Any]:
         from workerbee import __version__
         from workerbee.contract import API_VERSION, MCP_TOOL_NAMES
+        from workerbee.k1s_runtime import resolve_k1s_runtime
+
+        try:
+            k1s_runtime = resolve_k1s_runtime(cwd=self.cwd)
+            k1s = {
+                "source": k1s_runtime.source,
+                "python": k1s_runtime.python_executable,
+                "root": str(k1s_runtime.k1s_root) if k1s_runtime.k1s_root else None,
+                "ae_origin": k1s_runtime.ae_origin,
+                "ae_version": k1s_runtime.ae_version,
+            }
+        except Exception as exc:  # noqa: BLE001
+            k1s = {"error": str(exc)}
 
         return {
             "api_version": API_VERSION,
@@ -782,6 +795,23 @@ class WorkerBeeDaemon:
                     "explicit project override, otherwise git repo basename + branch + cwd hash"
                 ),
                 "ingress_probe": "WorkerBee-managed localhost HTTPS hosts only",
+            },
+            "tool_hints": {
+                "workerbee_v1_ingress_probe": {
+                    "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+                    "body_fields": ["json_body", "body"],
+                    "headers": True,
+                    "notes": (
+                        "Use headers for signed requests such as S3 presigned PUTs; "
+                        "Host and Content-Length are intentionally blocked."
+                    ),
+                },
+                "workerbee_v1_image_build": {
+                    "dockerfile": (
+                        "Set dockerfile for repo-root builds with nested Dockerfiles, "
+                        "for example dockerfile='backend/Dockerfile'."
+                    )
+                },
             },
             "templates": [
                 "frontend-api",
@@ -806,6 +836,7 @@ class WorkerBeeDaemon:
                 },
             },
             "bundle_formats": ["k1s", "k8s", "helm"],
+            "k1s_runtime": k1s,
             "k1s_profiles": {
                 "runtime_requirement": "containerd",
                 "host_k1s_processes": False,
@@ -813,9 +844,11 @@ class WorkerBeeDaemon:
                 "workload_targets": ["profile"],
             },
             "runtime": runtime_diagnostics(self.runtime_requested, state_root=self.state_root),
-            "containerd_privilege": containerd_privilege_status(
-                state_root=self.state_root,
-                runtime=self.runtime_requested,
+            "containerd_privilege": containerd_privilege_summary(
+                containerd_privilege_status(
+                    state_root=self.state_root,
+                    runtime=self.runtime_requested,
+                )
             ),
         }
 
@@ -1042,6 +1075,7 @@ class WorkerBeeDaemon:
         body_contains: str | None = None,
         json_body: dict[str, Any] | None = None,
         body: str | None = None,
+        headers: dict[str, str] | None = None,
         timeout: float = 10.0,
     ) -> dict[str, Any]:
         name = project_slug(project or self.default_project)
@@ -1057,6 +1091,7 @@ class WorkerBeeDaemon:
             body_contains=body_contains,
             json_body=json_body,
             body=body,
+            headers=headers,
             timeout=timeout,
         )
         result["project"] = name

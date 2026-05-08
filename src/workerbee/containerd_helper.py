@@ -90,6 +90,51 @@ def containerd_privilege_status(
     return status
 
 
+def containerd_privilege_summary(privilege: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Return a normal-output summary without raw expected socket-denied probes."""
+
+    if privilege is None:
+        return None
+    effective = str(privilege.get("effective_mode") or "")
+    helper = _helper_summary(privilege.get("helper"))
+    summary: dict[str, Any] = {
+        key: privilege[key]
+        for key in (
+            "ok",
+            "enabled",
+            "requested_mode",
+            "effective_mode",
+            "runtime",
+            "state_root",
+            "address",
+        )
+        if key in privilege
+    }
+    summary["helper"] = helper
+    if effective == "sudo-helper":
+        summary["socket_access"] = "sudo-helper"
+        summary["unprivileged_access"] = "denied_expected"
+    elif effective == "unprivileged":
+        summary["socket_access"] = "unprivileged"
+        summary["unprivileged_access"] = "ok"
+    elif effective == "off":
+        summary["socket_access"] = "not_required"
+    return summary
+
+
+def _helper_summary(helper: object) -> dict[str, Any] | None:
+    if not isinstance(helper, dict):
+        return None
+    status = helper.get("status") if isinstance(helper.get("status"), dict) else helper
+    out: dict[str, Any] = {}
+    for key in ("started", "running", "responsive", "pid", "socket", "wrapper"):
+        if key in helper:
+            out[key] = helper[key]
+        elif isinstance(status, dict) and key in status:
+            out[key] = status[key]
+    return out
+
+
 def ensure_containerd_privilege(
     *,
     state_root: Path,

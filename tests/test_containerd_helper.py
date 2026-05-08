@@ -11,6 +11,7 @@ from workerbee import containerd_helper
 from workerbee.containerd_helper import (
     _handle_remove_tree,
     containerd_privilege_env,
+    containerd_privilege_summary,
     effective_containerd_privilege_mode,
     ensure_containerd_helper,
     ensure_containerd_privilege,
@@ -96,6 +97,38 @@ def test_containerd_privilege_env_synthesizes_from_helper_status(tmp_path: Path)
     assert env["WORKERBEE_NERDCTL_BIN"] == str(wrapper)
     assert env["AE_NERDCTL_BIN"] == str(wrapper)
     assert env["WORKERBEE_CONTAINERD_HELPER_SOCKET"] == str(socket)
+
+
+def test_containerd_privilege_summary_suppresses_expected_probe_details(tmp_path: Path) -> None:
+    summary = containerd_privilege_summary(
+        {
+            "ok": True,
+            "enabled": True,
+            "requested_mode": "sudo-helper",
+            "effective_mode": "sudo-helper",
+            "runtime": "containerd",
+            "state_root": str(tmp_path),
+            "helper": {
+                "status": {
+                    "running": True,
+                    "responsive": True,
+                    "pid": 123,
+                    "socket": str(tmp_path / "helper.sock"),
+                }
+            },
+            "unprivileged_probe": {
+                "ok": False,
+                "code": "CONTAINERD_SOCKET_PERMISSION_DENIED",
+                "message": "permission denied",
+            },
+        }
+    )
+
+    assert summary is not None
+    assert summary["socket_access"] == "sudo-helper"
+    assert summary["unprivileged_access"] == "denied_expected"
+    assert "unprivileged_probe" not in summary
+    assert "CONTAINERD_SOCKET_PERMISSION_DENIED" not in str(summary)
 
 
 def test_helper_remove_tree_is_limited_to_project_state(tmp_path: Path) -> None:
