@@ -1,8 +1,36 @@
 # K1S WorkerBee MCP
 
-WorkerBee is a local MCP workbench for running lightweight k1s stacks while agents build and test cloud-native applications.
+<p align="center">
+  <img src="docs/assets/k1s-workerbee-hero.jpg" alt="K1S WorkerBee" width="640">
+</p>
 
-The current POC can use an installed `k1s-workerbee-runtime` wheel or a sibling `../k1s` checkout without modifying k1s. The default app-stack workflow starts a lightweight local k1s workbench, exposes project dashboards, provides a global MCP dashboard, deploys a representative native k1s app stack, exposes app ingress through local HTTPS, and exports Kubernetes YAML artifacts. Advanced k1s profile workflows are direct-containerd only and containerize every k1s profile component.
+WorkerBee is a local MCP workbench that gives coding agents a project-scoped
+k1s-powered app engine for building, deploying, probing, and exporting
+cloud-native applications on a developer machine.
+
+WorkerBee v0.1 can use an installed `k1s-workerbee-runtime` wheel or a sibling
+`../k1s` checkout without modifying k1s. The default workflow uses Podman or
+Docker for ordinary app validation. Advanced k1s controller/runtime development
+uses explicit direct containerd mode, where every k1s profile component is
+containerized and scoped under WorkerBee-owned namespaces.
+
+## Capabilities
+
+- Shared local MCP daemon for one or more agents, with project-scoped state,
+  runtime resources, dashboards, and ingress.
+- Immediate global dashboard at `https://dashboard.workerbee.localhost:19443/`
+  with project lifecycle controls and self-healing k1s profile ingress links.
+- Local HTTPS ingress through Caddy under `*.workerbee.localhost`; CA trust is
+  explicit and optional through `workerbee trust`.
+- Agent workflow for image builds, native k1s manifest staging/deploy,
+  status/log inspection, bounded exec, HTTPS probes, cleanup, and iteration.
+- Artifact handoff as native k1s bundles, Kubernetes YAML, Helm skeletons, and
+  image metadata.
+- Advanced direct containerd profiles for k1s development, including sqlite,
+  etcd, direct containerd workload, and HA-min profile shapes.
+- End-to-end profile workload validation with a realtime frontend/backend/db
+  stack, dashboard/docs/API health checks, HTTPS ingress probes, WebSocket
+  validation, logs/status, and exported handoff artifacts.
 
 ## Quickstart
 
@@ -64,7 +92,7 @@ python -m pip install --no-index --find-links dist/workerbee-wheelhouse k1s-work
 workerbee doctor
 ```
 
-Source checkout workflow:
+Source checkout smoke workflow:
 
 ```bash
 python -m pip install -e .[dev] --find-links dist/workerbee-wheelhouse
@@ -77,7 +105,12 @@ workerbee export-k8s
 workerbee stop --purge
 ```
 
-The MCP daemon is intentionally shared. Multiple coding agents can connect to the same local MCP server URL and operate on separate project scopes by passing distinct `project` values to WorkerBee tools. The daemon stores those projects under a global state root, defaults to `WORKERBEE_HOME`, then `$XDG_DATA_HOME/workerbee`, then `~/.local/share/workerbee`, and exposes a global dashboard as soon as MCP starts.
+The MCP daemon is intentionally shared. Multiple coding agents can connect to
+the same local MCP server URL and operate on separate project scopes by passing
+distinct `project` values to WorkerBee tools. The daemon stores those projects
+under a global state root, defaults to `WORKERBEE_HOME`, then
+`$XDG_DATA_HOME/workerbee`, then `~/.local/share/workerbee`, and exposes a
+global dashboard as soon as MCP starts.
 
 Agents should start each repo session with `workerbee_v1_session_start`. WorkerBee derives a stable project id from the Git repository name plus the current branch plus a cwd hash, persists the cwd for that project, and returns dashboard URLs plus the cloud-native runbook. This lets two Codex sessions share one MCP daemon while still building and deploying against the correct checkout and branch. Outside Git, WorkerBee uses the cwd basename plus the cwd hash. Explicit `--project` or MCP `project` values override this derived identity.
 
@@ -145,13 +178,16 @@ When a project deploys app ingress through the MCP daemon, WorkerBee scopes host
 The MCP SDK is installed by the package dependency. In a source checkout, build the
 wheelhouse first or provide equivalent dependency links before running `workerbee mcp start`.
 
-For container-orchestration development where Podman or Docker would interfere with the system under test, run WorkerBee against direct containerd explicitly:
+For container-orchestration development where Podman or Docker would interfere
+with the system under test, run WorkerBee against direct containerd explicitly:
 
 ```bash
 workerbee --runtime containerd --containerd-privilege sudo-helper mcp start
 ```
 
-Containerized k1s profiles are only available in this direct-containerd mode. They are intended for advanced k1s development, not ordinary app-stack use. WorkerBee currently ships these built-in profiles:
+Containerized k1s profiles are only available in direct containerd mode. They
+are intended for advanced k1s development, not ordinary app-stack use. WorkerBee
+currently ships these built-in profiles:
 
 ```text
 k1s-dev-min-sqlite          1 controller + API shim/dashboard + sqlite
@@ -221,7 +257,13 @@ project-scoped API, checks dashboard/docs/API health, probes HTTPS app ingress,
 verifies a WebSocket echo path, collects workload status, and exports k1s,
 Kubernetes, and Helm handoff artifacts.
 
-This path uses `nerdctl` against the configured containerd socket, but scopes WorkerBee work into state-root-hashed namespaces such as `workerbee-<state-hash>-system` and `workerbee-<state-hash>-<project>`. It also uses state-local nerdctl data roots, state-local CNI config directories, and state-hash-scoped project networks. WorkerBee must never target reserved namespaces such as `ae`, `k8s.io`, `moby`, or `default`; those may belong to a real k1s/Kubernetes runtime on the same host.
+This path uses `nerdctl` against the configured containerd socket, but scopes
+WorkerBee work into state-root-hashed namespaces such as
+`workerbee-<state-hash>-system` and `workerbee-<state-hash>-<project>`. It also
+uses state-local nerdctl data roots, state-local CNI config directories, and
+state-hash-scoped project networks. WorkerBee must never target reserved
+namespaces such as `ae`, `k8s.io`, `moby`, or `default`; those may belong to a
+real k1s/Kubernetes runtime on the same host.
 
 When `--runtime containerd` is explicitly selected, WorkerBee MCP defaults to `--containerd-privilege auto`. Auto first tries unprivileged `nerdctl`; if that fails, WorkerBee prompts once with `sudo` and starts a state-scoped root helper. The helper exposes a WorkerBee-owned Unix socket and a generated `nerdctl` wrapper under the WorkerBee state root, validates every command, and only allows WorkerBee state-hash namespaces plus state-local data/CNI paths. This never runs for `--runtime auto`, Docker, or Podman. Use `--containerd-privilege unprivileged` if you preconfigured rootless/system access yourself.
 

@@ -1,8 +1,14 @@
-# WorkerBee POC Scope
+# WorkerBee v0.1 Scope
 
-## Implemented POC
+## Implemented Baseline
 
-The POC starts a local, single-node k1s stack from a sibling `../k1s` checkout without modifying k1s. It runs the controller and Kubernetes API shim as host processes, stores state in WorkerBee-local SQLite files, and exposes the k1s dashboard as soon as the stack starts.
+WorkerBee now has two validation paths:
+
+- The default app-stack path starts a local, single-node k1s workbench from an
+  installed `k1s-workerbee-runtime` package or a sibling `../k1s` checkout
+  without modifying k1s.
+- The advanced profile path runs containerized k1s controller/runtime profiles
+  in explicit direct containerd mode for k1s development.
 
 The representative app stack is deployed through native k1s manifests, not Helm. It includes:
 
@@ -10,12 +16,15 @@ The representative app stack is deployed through native k1s manifests, not Helm.
 - `api`: backend service that calls `store`, consumes config and secret projections, exposes health and app-check endpoints, declares ingress, and uses resource/security settings.
 - `frontend`: HTTP frontend that calls `api`, exposes health and UI endpoints, and declares ingress paths.
 
-The POC flow builds local images with Podman, Docker, or explicit direct containerd, applies the native k1s manifests, queries native k1s status, fetches logs, validates the live app chain, checks API shim pod visibility, and exports Kubernetes YAML artifacts.
+The default flow builds local images with Podman, Docker, or explicit direct
+containerd, applies native k1s manifests, queries native k1s status, fetches
+logs, validates the live app chain, checks API shim pod visibility, and exports
+handoff artifacts.
 
-An advanced direct-containerd profile path now covers k1s development cases where
+An advanced direct containerd profile path now covers k1s development cases where
 the app under test is a k1s control-plane stack rather than an ordinary workload.
 Those profiles containerize every k1s subsystem: controllers, API shim,
-dashboard, etcd, NATS, and direct-containerd workload runtime support. This path
+dashboard, etcd, NATS, and direct containerd workload runtime support. This path
 is intentionally not available on Podman or Docker because it validates k1s
 against host containerd semantics while preserving WorkerBee state-hash namespace
 boundaries.
@@ -30,8 +39,9 @@ WorkerBee now has the planned shared MCP shape:
 - `workerbee mcp start` starts the background daemon, `workerbee mcp stop` stops the daemon plus global dashboard/Caddy ingress, and `workerbee mcp serve` remains the foreground/debug path. MCP port conflicts fail fast instead of silently selecting another port.
 - The MCP daemon starts a global dashboard immediately and prints the URL before serving MCP traffic. The dashboard lists all known project-scoped stacks under the daemon state root, including branch metadata when available.
 - A global Caddy edge is started for local HTTPS. Project app hosts are scoped as `app.<project>.workerbee.localhost` and `api.<project>.workerbee.localhost`, with Caddy using its internal local CA.
-- Native k1s manifest deploys and the POC stack return browser-ready ingress URLs when the MCP daemon provides ingress configuration.
-- Direct-containerd k1s profiles publish controller and API ingress under the
+- Native k1s manifest deploys and the default app stack return browser-ready
+  ingress URLs when the MCP daemon provides ingress configuration.
+- Direct containerd k1s profiles publish controller and API ingress under the
   project namespace. The canonical controller host is
   `https://k1s.<project>.workerbee.localhost:19443/`; the API shim host is
   `https://k1s-api.<project>.workerbee.localhost:19443/`.
@@ -49,9 +59,10 @@ WorkerBee now has the planned shared MCP shape:
 - CA trust remains explicit. `workerbee trust status` reports the generated Caddy CA path, and `workerbee trust install` performs the OS/user trust-store install only when requested.
 - The wheelhouse flow can package `k1s-workerbee` plus `k1s-workerbee-runtime`, so users only need the WorkerBee wheelhouse and a supported container runtime.
 
-## v0.1 Scope
+## v0.1 Capability Baseline
 
-The immediate v0.1 hardening work should turn the POC into a reliable distributable local agent workbench:
+The v0.1 baseline is a distributable local agent workbench with these core
+capabilities:
 
 - MCP contract: register v1-only `workerbee_v1_*` tool names, stable result envelopes, stable errors, version/capabilities reporting, and dashboard URL notification semantics.
 - Runtime support: harden Podman rootless, Podman rootful, Docker Linux, Docker Desktop, and explicit direct containerd behavior, especially Caddy host reachability and port cleanup.
@@ -63,6 +74,14 @@ The immediate v0.1 hardening work should turn the POC into a reliable distributa
 - Artifact handoff: export native k1s bundles, Kubernetes YAML, Helm chart skeletons, and image metadata suitable for registry handoff.
 - Packaging: publish repeatable wheels/wheelhouses, ship a one-line installer, document active-venv versus standalone install behavior, provide source-development fallbacks without requiring k1s project edits, and include best-effort macOS install/trust guidance until macOS validation is complete.
 
+## Remaining v0.1 Validation
+
+- Complete host matrix smoke checks for rootless/rootful Podman, Docker Linux,
+  Docker Desktop, and direct containerd.
+- Validate macOS and Windows trust-store guidance on real hosts.
+- Keep richer resource summaries, events, and ingress health on the k1s-side RFC
+  track instead of duplicating k1s observability in WorkerBee.
+
 ## Later Phase
 
 After v0.1, the larger product scope is to make WorkerBee an agent-native cloud-native simulator:
@@ -73,5 +92,5 @@ After v0.1, the larger product scope is to make WorkerBee an agent-native cloud-
 - DNS options beyond `*.localhost`, including private dev domains, wildcard local DNS, and team-shared smoke-test tunnels where explicitly enabled.
 - Stronger global dashboard UX with resource graphs, logs, events, app links, and per-project cleanup controls.
 - MCP server auth and explicit network exposure modes for cases where the server is not bound only to loopback.
-- CI mode for headless POC validation and artifact export.
+- CI mode for headless validation and artifact export.
 - Plugin-like extension points for project-specific app stacks and verification recipes.
