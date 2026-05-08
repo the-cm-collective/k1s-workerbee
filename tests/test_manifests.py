@@ -5,6 +5,7 @@ from typing import Any
 from workerbee.k1s_runtime import K1sRuntime
 from workerbee.manifests import (
     deploy_local_stage,
+    deploy_profile_stage,
     deploy_remote_k1s_stage,
     export_bundle,
     prepare_stage,
@@ -52,8 +53,15 @@ def test_remote_deploy_uses_controller_apply_and_masks_token(tmp_path: Path, mon
     prepared = prepare_stage(supervisor=sup, name="Demo Bundle", template="stateless-web")
     calls: list[list[str]] = []
 
-    def fake_run(_self, args: list[str], *, timeout: int = 60) -> dict[str, Any]:
+    def fake_run(
+        _self,
+        args: list[str],
+        *,
+        timeout: int = 60,
+        env_overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         assert timeout == 180
+        assert env_overrides is None
         calls.append(args)
         return {"cmd": ["python", "-m", "ae.cli", "--token", "***"], "returncode": 0}
 
@@ -165,6 +173,99 @@ spec:
 
     assert result["ok"] is True
     assert calls == [(manifest.resolve(), "demo", 55)]
+
+
+def test_profile_deploy_uses_internal_profile_connection(tmp_path: Path, monkeypatch) -> None:
+    sup = _supervisor(tmp_path, monkeypatch)
+    prepared = prepare_stage(supervisor=sup, name="Realtime", template="realtime-web-db")
+    calls: list[tuple[list[str], dict[str, str] | None]] = []
+
+    def fake_run(
+        _self,
+        args: list[str],
+        *,
+        timeout: int = 60,
+        env_overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        assert timeout == 77
+        calls.append((args, env_overrides))
+        return {"cmd": ["python", "-m", "ae.cli", "--token", "***"], "returncode": 0}
+
+    class FakeProfileRunner:
+        def connection(
+            self,
+            *,
+            profile: str | None = None,
+            timeout: float = 180.0,
+        ) -> dict[str, Any]:
+            assert profile == "k1s-dev-min-sqlite"
+            assert timeout == 77.0
+            ca_bundle = str(tmp_path / "workerbee-ca.pem")
+            return {
+                "profile": profile,
+                "server": "https://k1s.demo-app.workerbee.localhost:19443/",
+                "api_server": "https://k1s-api.demo-app.workerbee.localhost:19443/",
+                "ca_bundle": ca_bundle,
+                "admin_token": "-".join(["admin", "token"]),
+                "urls": {"dashboard": "https://k1s.demo-app.workerbee.localhost:19443/dashboard"},
+            }
+
+    sup.run_ae_cli = MethodType(fake_run, sup)  # type: ignore[method-assign]
+    result = deploy_profile_stage(
+        supervisor=sup,
+        profile_runner=FakeProfileRunner(),
+        stage_dir=Path(prepared["stage_dir"]),
+        profile="k1s-dev-min-sqlite",
+        namespace="demo",
+        timeout=77,
+    )
+
+    assert result["ok"] is True
+    assert result["target"] == "profile"
+    assert result["server"] == "https://k1s.demo-app.workerbee.localhost:19443/"
+    assert len(calls) == 3
+    assert calls[0][0][:5] == [
+        "--server",
+        "https://k1s.demo-app.workerbee.localhost:19443/",
+        "--token",
+        "-".join(["admin", "token"]),
+        "apply",
+    ]
+    ca_bundle = str(tmp_path / "workerbee-ca.pem")
+    assert calls[0][1] == {
+        "AE_APISHIM_CA_BUNDLE": ca_bundle,
+        "SSL_CERT_FILE": ca_bundle,
+        "REQUESTS_CA_BUNDLE": ca_bundle,
+    }
+
+
+def test_realtime_template_contains_websocket_ingress(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("workerbee.manifests.port_is_free", lambda _port, **_kwargs: True)
+    sup = _supervisor(tmp_path, monkeypatch)
+    prepared = prepare_stage(supervisor=sup, name="Realtime", template="realtime-web-db")
+
+    validation = validate_stage(Path(prepared["stage_dir"]))
+    backend = Path(prepared["stage_dir"]) / "manifests" / "backend.k1s.yaml"
+    frontend = Path(prepared["stage_dir"]) / "manifests" / "frontend.k1s.yaml"
+    db = Path(prepared["stage_dir"]) / "manifests" / "db.k1s.yaml"
+    backend_text = backend.read_text(encoding="utf-8")
+    frontend_text = frontend.read_text(encoding="utf-8")
+    db_text = db.read_text(encoding="utf-8")
+
+    assert validation["ok"] is True
+    assert validation["required_controller_scopes"] == [
+        "demo-app/backend",
+        "demo-app/db",
+        "demo-app/frontend",
+    ]
+    assert "workerbee-demo-app-realtime-backend:dev" in validation["images"]
+    assert "host: api.demo-app.workerbee.localhost" in backend_text
+    assert "path: /" in backend_text
+    assert "- /ws" not in backend_text
+    assert "host.containers.internal" in backend_text
+    assert "host.containers.internal" in frontend_text
+    assert "port: 8080\n    targetPort: 8080" not in db_text
+    assert "wss://api.demo-app.workerbee.localhost:19443/ws" in frontend_text
 
 
 def test_k1s_export_rejects_kubernetes_stage(tmp_path: Path, monkeypatch) -> None:

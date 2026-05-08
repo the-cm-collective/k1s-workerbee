@@ -28,7 +28,7 @@ workerbee = "workerbee.cli:main"
 package-dir = {"" = "src"}
 
 [tool.setuptools.package-data]
-"workerbee.assets" = ["dashboard/*", "poc/*/*"]
+"workerbee.assets" = ["dashboard/*", "poc/*/*", "realtime/*/*"]
 
 [tool.pytest.ini_options]
 addopts = "-q"

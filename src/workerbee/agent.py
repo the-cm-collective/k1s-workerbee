@@ -128,6 +128,12 @@ queues, or integration behavior that benefits from a running local stack.
 7. Iterate against the live app through status, logs, exec, and `workerbee_v1_ingress_probe` until
    the requested behavior is verified.
 8. Export artifacts with `workerbee_v1_bundle_export` when the implementation is ready to hand off.
+
+For k1s controller/runtime development only, use explicit direct-containerd WorkerBee profile tools:
+start a profile with `workerbee_v1_profile_start`, deploy staged manifests with
+`workerbee_v1_manifest_deploy_local(target="profile")`, inspect with
+`workerbee_v1_profile_workload_status` and `workerbee_v1_logs(target="profile")`, and use
+`workerbee_v1_profile_workload_validate` for the bundled realtime frontend/backend/db smoke test.
 """
 
 
@@ -151,6 +157,19 @@ def runbook_payload() -> dict[str, Any]:
             "Prepare/stage manifests, validate them, deploy locally, then inspect status/logs.",
             "Probe WorkerBee HTTPS ingress through workerbee_v1_ingress_probe.",
             "Iterate until the running app is correct, then export k1s/k8s/helm artifacts.",
+        ],
+        "k1s_profile_loop": [
+            "Use only with explicit direct-containerd WorkerBee MCP sessions.",
+            "Start a containerized profile with workerbee_v1_profile_start.",
+            "Deploy staged manifests with workerbee_v1_manifest_deploy_local(target='profile').",
+            (
+                "Inspect with workerbee_v1_profile_workload_status and "
+                "workerbee_v1_logs(target='profile')."
+            ),
+            (
+                "Run workerbee_v1_profile_workload_validate for the bundled realtime "
+                "WebSocket smoke test."
+            ),
         ],
         "temporary_files": (
             "Use /tmp or WorkerBee state for one-off helper scripts unless the user asked for "

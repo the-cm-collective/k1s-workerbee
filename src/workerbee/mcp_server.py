@@ -19,7 +19,6 @@ from workerbee.containerd_helper import (
 from workerbee.contract import protect
 from workerbee.daemon import WorkerBeeDaemon
 from workerbee.manifests import (
-    deploy_local_stage,
     deploy_remote_k1s_stage,
     export_bundle,
     prepare_stage,
@@ -261,8 +260,23 @@ def serve_mcp(
         app: str = "api",
         tail: int = 80,
         project: str = "default",
+        target: str = "workerbee",
+        profile: str | None = None,
+        namespace: str | None = None,
     ) -> dict[str, Any]:
         """Return recent logs for an app."""
+        if target == "profile":
+            return protect(
+                "Logs",
+                project,
+                lambda: daemon.profile_logs(
+                    app=app,
+                    project=project,
+                    profile=profile,
+                    namespace=namespace,
+                    tail=tail,
+                ),
+            )
         return protect(
             "Logs",
             project,
@@ -270,6 +284,23 @@ def serve_mcp(
                 project,
                 lambda supervisor: supervisor.logs(app=app, tail=tail),
                 require_active=True,
+            ),
+        )
+
+    @mcp.tool()
+    def workerbee_v1_profile_workload_status(
+        project: str = "default",
+        profile: str | None = None,
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        """Return workload status through a project-scoped k1s profile API."""
+        return protect(
+            "ProfileWorkloadStatus",
+            project,
+            lambda: daemon.profile_workload_status(
+                project=project,
+                profile=profile,
+                namespace=namespace,
             ),
         )
 
@@ -366,22 +397,41 @@ def serve_mcp(
         namespace: str | None = None,
         timeout: int = 180,
         project: str = "default",
+        target: str = "workerbee",
+        profile: str | None = None,
+        k1s_root: str | None = None,
     ) -> dict[str, Any]:
         """Apply staged native k1s or practical Kubernetes manifests locally."""
         return protect(
             "ManifestDeployLocal",
             project,
-            lambda: daemon.with_project(
-                project,
-                lambda supervisor: deploy_local_stage(
-                    supervisor=supervisor,
-                    stage_dir=Path(stage),
-                    namespace=namespace,
-                    timeout=timeout,
-                ),
-                require_active=True,
-                autostart=True,
-                start_reason="manifest_deploy_local",
+            lambda: daemon.manifest_deploy_local(
+                stage=Path(stage),
+                target=target,
+                profile=profile,
+                project=project,
+                namespace=namespace,
+                timeout=timeout,
+                k1s_root=k1s_root,
+            ),
+        )
+
+    @mcp.tool()
+    def workerbee_v1_profile_workload_validate(
+        profile: str,
+        project: str = "default",
+        k1s_root: str | None = None,
+        timeout: float = 240.0,
+    ) -> dict[str, Any]:
+        """Build, deploy, and probe the realtime workload on a k1s profile."""
+        return protect(
+            "ProfileWorkloadValidate",
+            project,
+            lambda: daemon.profile_workload_validate(
+                profile=profile,
+                project=project,
+                k1s_root=k1s_root,
+                timeout=timeout,
             ),
         )
 

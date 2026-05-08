@@ -345,19 +345,7 @@ https://dashboard.workerbee.localhost {{
         tmp.replace(self.ca_bundle)
 
     def _container_running(self) -> bool:
-        proc = subprocess.run(
-            runtime_command_args(
-                self.runtime,
-                state_root=self.state_root,
-                project=None,
-                system=True,
-                args=["ps", "-q", "--filter", f"name=^{self.container}$"],
-            ),
-            text=True,
-            capture_output=True,
-            timeout=10,
-        )
-        return bool(proc.stdout.strip())
+        return _caddy_container_running(self.state_root, self.runtime, self.container)
 
 
 def load_global_ingress_info(state_root: Path) -> dict[str, Any] | None:

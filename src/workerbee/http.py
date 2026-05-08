@@ -8,6 +8,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -36,6 +37,7 @@ def request(
     json_body: Any | None = None,
     timeout: float = 5.0,
     verify_tls: bool = True,
+    ca_bundle: str | Path | None = None,
 ) -> HTTPResult:
     headers: dict[str, str] = {}
     payload = data
@@ -46,7 +48,9 @@ def request(
         headers["Authorization"] = f"Bearer {token}"
     req = urllib.request.Request(url, data=payload, headers=headers, method=method)  # noqa: S310
     context = None
-    if url.startswith("https://") and not verify_tls:
+    if url.startswith("https://") and ca_bundle:
+        context = ssl.create_default_context(cafile=str(ca_bundle))
+    elif url.startswith("https://") and not verify_tls:
         context = ssl._create_unverified_context()  # noqa: S323 - local dev certs only
     try:
         with urllib.request.urlopen(req, timeout=timeout, context=context) as resp:  # noqa: S310

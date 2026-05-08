@@ -394,6 +394,7 @@ class WorkerBeeSupervisor:
         token: str,
         namespace: str | None = None,
         timeout: int = 180,
+        env_overrides: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         path = manifest.expanduser().resolve()
         if not path.is_file():
@@ -401,7 +402,7 @@ class WorkerBeeSupervisor:
         args = ["--server", server, "--token", token, "apply", "-f", str(path)]
         if namespace:
             args.extend(["--force-namespace", "-n", namespace])
-        result = self.run_ae_cli(args, timeout=timeout)
+        result = self.run_ae_cli(args, timeout=timeout, env_overrides=env_overrides)
         return {
             "ok": True,
             "project": self.project,
@@ -419,6 +420,7 @@ class WorkerBeeSupervisor:
         token: str,
         namespace: str | None = None,
         timeout: int = 180,
+        env_overrides: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         path = manifest.expanduser().resolve()
         if not path.is_file():
@@ -426,7 +428,7 @@ class WorkerBeeSupervisor:
         args = ["--server", server, "--token", token, "apply", "--k8s", "-f", str(path)]
         if namespace:
             args.extend(["--force-namespace", "-n", namespace])
-        result = self.run_ae_cli(args, timeout=timeout)
+        result = self.run_ae_cli(args, timeout=timeout, env_overrides=env_overrides)
         return {
             "ok": True,
             "project": self.project,
@@ -603,8 +605,16 @@ class WorkerBeeSupervisor:
             raise RuntimeError(json.dumps(result, indent=2))
         return result
 
-    def run_ae_cli(self, args: list[str], *, timeout: int = 60) -> dict[str, Any]:
+    def run_ae_cli(
+        self,
+        args: list[str],
+        *,
+        timeout: int = 60,
+        env_overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
         env = self.k1s_runtime.apply_env(os.environ.copy())
+        if env_overrides:
+            env.update(env_overrides)
         proc = subprocess.run(
             [self.python_executable, "-m", "ae.cli", *args],
             cwd=self.cwd,

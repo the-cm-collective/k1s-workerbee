@@ -170,7 +170,56 @@ workerbee --runtime containerd --project k1s-dev validate --scenario k1s-profile
 workerbee --runtime containerd --project k1s-dev profile stop --purge
 ```
 
-When run through the MCP daemon, profile dashboard/API ingress is published under the project namespace, for example `https://k1s-dash.k1s-dev.workerbee.localhost:19443/dashboard` and `https://k1s-api.k1s-dev.workerbee.localhost:19443/`.
+When run through the MCP daemon, profile controller/API ingress is published under the project namespace, for example `https://k1s.k1s-dev.workerbee.localhost:19443/dashboard` and `https://k1s-api.k1s-dev.workerbee.localhost:19443/`.
+
+The canonical profile controller URL is now `https://k1s.<project>.workerbee.localhost:19443/`.
+It exposes dashboard and docs paths such as:
+
+```text
+https://k1s.k1s-dev.workerbee.localhost:19443/dashboard
+https://k1s.k1s-dev.workerbee.localhost:19443/docs
+https://k1s.k1s-dev.workerbee.localhost:19443/redoc
+https://k1s-api.k1s-dev.workerbee.localhost:19443/
+```
+
+`k1s-dash.<project>.workerbee.localhost` remains a compatibility alias for the
+dashboard. WorkerBee profile workload operations use the project profile's
+internal admin token and WorkerBee's generated CA to call the exposed profile API;
+tokens are not returned in MCP or CLI results.
+
+Profile workload deploy/status/log/validate operations require the background
+MCP daemon for project-scoped Caddy ingress. To exercise the
+app-engine-in-app-engine path, start MCP, stage a realtime frontend/backend/db
+bundle, and deploy it into a running profile:
+
+```bash
+workerbee --runtime containerd --containerd-privilege sudo-helper mcp start
+workerbee --runtime containerd --project k1s-dev profile start --profile k1s-ha-min --k1s-root ../k1s
+workerbee --runtime containerd --project k1s-dev manifest prepare --name realtime --template realtime-web-db
+workerbee --runtime containerd --project k1s-dev manifest deploy-local \
+  --target profile \
+  --profile k1s-ha-min \
+  --stage .workerbee/k1s-dev/artifacts/staged/realtime
+workerbee --runtime containerd --project k1s-dev profile status
+```
+
+The MCP equivalents are `workerbee_v1_manifest_prepare`,
+`workerbee_v1_manifest_deploy_local(target="profile")`,
+`workerbee_v1_profile_workload_status`, and `workerbee_v1_logs(target="profile")`.
+For a single end-to-end validation, use:
+
+```bash
+workerbee --runtime containerd --project k1s-dev validate \
+  --scenario profile-workload \
+  --profile k1s-ha-min \
+  --k1s-root ../k1s
+```
+
+That validation builds the bundled realtime image contexts, starts the requested
+k1s profile, deploys native k1s manifests into the profile through the
+project-scoped API, checks dashboard/docs/API health, probes HTTPS app ingress,
+verifies a WebSocket echo path, collects workload status, and exports k1s,
+Kubernetes, and Helm handoff artifacts.
 
 This path uses `nerdctl` against the configured containerd socket, but scopes WorkerBee work into state-root-hashed namespaces such as `workerbee-<state-hash>-system` and `workerbee-<state-hash>-<project>`. It also uses state-local nerdctl data roots, state-local CNI config directories, and state-hash-scoped project networks. WorkerBee must never target reserved namespaces such as `ae`, `k8s.io`, `moby`, or `default`; those may belong to a real k1s/Kubernetes runtime on the same host.
 

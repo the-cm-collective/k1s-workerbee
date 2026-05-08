@@ -103,7 +103,7 @@ def build_parser() -> argparse.ArgumentParser:
     profile_stop.add_argument("--k1s-root", type=Path, default=None)
     profile_stop.add_argument("--purge", action="store_true")
     validate = sub.add_parser("validate", help="Run WorkerBee validation scenarios")
-    validate.add_argument("--scenario", choices=["k1s-profile"], required=True)
+    validate.add_argument("--scenario", choices=["k1s-profile", "profile-workload"], required=True)
     validate.add_argument("--profile", required=True)
     validate.add_argument("--k1s-root", type=Path, default=None)
     validate.add_argument("--timeout", type=float, default=180.0)
@@ -170,13 +170,16 @@ def build_parser() -> argparse.ArgumentParser:
     manifest_prepare.add_argument(
         "--template",
         default="frontend-api-store",
-        choices=["stateless-web", "frontend-api", "frontend-api-store"],
+        choices=["stateless-web", "frontend-api", "frontend-api-store", "realtime-web-db"],
     )
     manifest_prepare.add_argument("--source", type=Path, default=None)
     manifest_validate = manifest_sub.add_parser("validate", help="Validate staged files")
     manifest_validate.add_argument("--stage", type=Path, required=True)
     manifest_local = manifest_sub.add_parser("deploy-local", help="Deploy staged files locally")
     manifest_local.add_argument("--stage", type=Path, required=True)
+    manifest_local.add_argument("--target", choices=["workerbee", "profile"], default="workerbee")
+    manifest_local.add_argument("--profile", default=None)
+    manifest_local.add_argument("--k1s-root", type=Path, default=None)
     manifest_local.add_argument("-n", "--namespace", default=None)
     manifest_local.add_argument("--timeout", type=int, default=180)
     manifest_k1s = manifest_sub.add_parser("deploy-k1s", help="Deploy staged files to remote k1s")
@@ -328,6 +331,21 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     result["containerd_privilege"] = privilege
                     return _print(result, json_out=args.json)
+            if args.scenario == "profile-workload":
+                privilege = ensure_containerd_privilege(
+                    state_root=args.state_root or default_state_root(),
+                    runtime=args.runtime,
+                    mode=containerd_privilege,
+                )
+                with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
+                    result = daemon.profile_workload_validate(
+                        profile=args.profile,
+                        project=args.project,
+                        k1s_root=args.k1s_root,
+                        timeout=args.timeout,
+                    )
+                    result["containerd_privilege"] = privilege
+                    return _print(result, json_out=args.json)
         if args.cmd == "project":
             cwd = args.project_cwd or args.cwd or Path.cwd()
             project = args.project_name or args.project or derive_session_project(cwd)
@@ -418,6 +436,30 @@ def main(argv: list[str] | None = None) -> int:
             if args.manifest_cmd == "validate":
                 return _print(validate_stage(args.stage), json_out=args.json)
             if args.manifest_cmd == "deploy-local":
+                if args.target == "profile":
+                    daemon = WorkerBeeDaemon(
+                        state_root=args.state_root,
+                        runtime=args.runtime,
+                        default_project=args.project or "default",
+                        cwd=args.cwd,
+                    )
+                    privilege = ensure_containerd_privilege(
+                        state_root=args.state_root or default_state_root(),
+                        runtime=args.runtime,
+                        mode=containerd_privilege,
+                    )
+                    with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
+                        result = daemon.manifest_deploy_local(
+                            stage=args.stage,
+                            target="profile",
+                            profile=args.profile,
+                            project=args.project,
+                            namespace=args.namespace,
+                            timeout=args.timeout,
+                            k1s_root=args.k1s_root,
+                        )
+                        result["containerd_privilege"] = privilege
+                        return _print(result, json_out=args.json)
                 return _print(
                     deploy_local_stage(
                         supervisor=sup,

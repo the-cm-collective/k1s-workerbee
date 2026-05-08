@@ -12,6 +12,14 @@ The representative app stack is deployed through native k1s manifests, not Helm.
 
 The POC flow builds local images with Podman, Docker, or explicit direct containerd, applies the native k1s manifests, queries native k1s status, fetches logs, validates the live app chain, checks API shim pod visibility, and exports Kubernetes YAML artifacts.
 
+An advanced direct-containerd profile path now covers k1s development cases where
+the app under test is a k1s control-plane stack rather than an ordinary workload.
+Those profiles containerize every k1s subsystem: controllers, API shim,
+dashboard, etcd, NATS, and direct-containerd workload runtime support. This path
+is intentionally not available on Podman or Docker because it validates k1s
+against host containerd semantics while preserving WorkerBee state-hash namespace
+boundaries.
+
 ## Extended MCP/Ingress Scope
 
 WorkerBee now has the planned shared MCP shape:
@@ -23,6 +31,20 @@ WorkerBee now has the planned shared MCP shape:
 - The MCP daemon starts a global dashboard immediately and prints the URL before serving MCP traffic. The dashboard lists all known project-scoped stacks under the daemon state root, including branch metadata when available.
 - A global Caddy edge is started for local HTTPS. Project app hosts are scoped as `app.<project>.workerbee.localhost` and `api.<project>.workerbee.localhost`, with Caddy using its internal local CA.
 - Native k1s manifest deploys and the POC stack return browser-ready ingress URLs when the MCP daemon provides ingress configuration.
+- Direct-containerd k1s profiles publish controller and API ingress under the
+  project namespace. The canonical controller host is
+  `https://k1s.<project>.workerbee.localhost:19443/`; the API shim host is
+  `https://k1s-api.<project>.workerbee.localhost:19443/`.
+- Profile workload deploys require the background MCP daemon because profile
+  dashboard/API/app ingress is owned by the global Caddy edge. They apply staged
+  native k1s manifests through the project-scoped profile API using
+  WorkerBee-owned internal tokens and Caddy CA trust. The target is selected
+  with `manifest deploy-local --target profile` or MCP
+  `workerbee_v1_manifest_deploy_local(target="profile")`.
+- `workerbee_v1_profile_workload_validate` builds a bundled realtime
+  frontend/backend/db stack, deploys it into the selected k1s profile, validates
+  dashboard/docs/API health, probes HTTPS ingress, verifies a WebSocket round
+  trip, and exports k1s/Kubernetes/Helm artifacts.
 - `workerbee_v1_ingress_probe` gives agents a Caddy-CA-aware HTTPS probe restricted to WorkerBee-managed localhost hosts, so TLS trust setup is not required for automated smoke checks.
 - CA trust remains explicit. `workerbee trust status` reports the generated Caddy CA path, and `workerbee trust install` performs the OS/user trust-store install only when requested.
 - The wheelhouse flow can package `k1s-workerbee` plus `k1s-workerbee-runtime`, so users only need the WorkerBee wheelhouse and a supported container runtime.

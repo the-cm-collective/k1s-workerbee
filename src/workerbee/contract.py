@@ -23,6 +23,8 @@ MCP_TOOL_NAMES = [
     "workerbee_v1_profile_status",
     "workerbee_v1_profile_stop",
     "workerbee_v1_profile_validate",
+    "workerbee_v1_profile_workload_status",
+    "workerbee_v1_profile_workload_validate",
     "workerbee_v1_logs",
     "workerbee_v1_exec",
     "workerbee_v1_ingress_probe",

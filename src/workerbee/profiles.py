@@ -16,10 +16,10 @@ from typing import Any
 from urllib import request as urllib_request
 
 from workerbee.contract import WorkerBeeError
-from workerbee.http import wait_for_http
+from workerbee.http import request, wait_for_http
 from workerbee.ingress import ProjectIngressConfig
 from workerbee.paths import resolve_k1s_root
-from workerbee.ports import choose_port
+from workerbee.ports import port_is_free
 from workerbee.runtime_support import (
     CONTAINERD_RUNTIME,
     containerd_address,
@@ -183,8 +183,13 @@ class K1sProfileRunner:
         if info:
             self.stop(purge=False)
 
-        controller_port = choose_port(19608, start=19608, end=19708)
-        apishim_port = choose_port(18645, start=18645, end=18745)
+        controller_port = self._choose_profile_port(
+            19608,
+            start=19608,
+            end=19708,
+            span=descriptor.controllers,
+        )
+        apishim_port = self._choose_profile_port(18645, start=18645, end=18745)
         tokens = self._tokens()
         profile_dir = self._profile_dir(descriptor.name)
         components: list[K1sProfileComponent] = []
@@ -193,7 +198,7 @@ class K1sProfileRunner:
             components.append(
                 self._start_etcd(
                     descriptor,
-                    host_port=choose_port(12379, start=12379, end=12479),
+                    host_port=self._choose_profile_port(12379, start=12379, end=12479),
                 )
             )
         if descriptor.nats:
@@ -266,6 +271,8 @@ class K1sProfileRunner:
         self._require_containerd()
         components = [self._component_status(component) for component in info.components]
         running = bool(components) and all(bool(item.get("running")) for item in components)
+        if running:
+            info = self._refresh_ingress_info(info, _profile_descriptor(info.profile))
         leader = self._leader_status(info)
         return {
             "ok": True,
@@ -274,6 +281,164 @@ class K1sProfileRunner:
             "profile": info.public_dict(),
             "components": components,
             "leader": leader,
+        }
+
+    def connection(self, *, profile: str | None = None, timeout: float = 180.0) -> dict[str, Any]:
+        """Return an internal raw-token connection for WorkerBee-owned profile operations."""
+        info = self.load()
+        if profile:
+            descriptor = _profile_descriptor(profile)
+            needs_start = (
+                not info
+                or info.profile != descriptor.name
+                or not self._all_components_running(info)
+            )
+            if needs_start:
+                started = self.start(profile=descriptor.name, timeout=timeout)
+                info = self.load()
+                if not started.get("ok") or not info:
+                    raise WorkerBeeError(
+                        code="PROFILE_NOT_READY",
+                        message="k1s profile did not become ready",
+                        details={"profile": profile, "start": started},
+                        retryable=True,
+                    )
+        if not info:
+            raise WorkerBeeError(
+                code="PROFILE_NOT_RUNNING",
+                message="no k1s profile is running for this WorkerBee project",
+                remediation="Start a profile first, or pass --profile to start one for this apply.",
+            )
+        if not self._all_components_running(info):
+            raise WorkerBeeError(
+                code="PROFILE_NOT_RUNNING",
+                message="the recorded k1s profile is not running",
+                details={"profile": info.profile},
+                retryable=True,
+            )
+        info = self._refresh_ingress_info(info, _profile_descriptor(info.profile))
+        urls = info.ingress_urls
+        if not self.ingress or not urls.get("controller") or not urls.get("api"):
+            raise WorkerBeeError(
+                code="PROFILE_INGRESS_REQUIRED",
+                message="profile workload operations require running WorkerBee MCP ingress",
+                details={"project": self.project, "profile": info.profile},
+                remediation=(
+                    "Start WorkerBee MCP, then run profile start/status again so Caddy routes "
+                    "are available."
+                ),
+            )
+        ca_bundle = self.ingress.ca_bundle
+        if not ca_bundle.is_file():
+            raise WorkerBeeError(
+                code="CA_NOT_READY",
+                message="WorkerBee Caddy CA bundle is not ready",
+                details={"ca_bundle": str(ca_bundle)},
+                retryable=True,
+            )
+        return {
+            "ok": True,
+            "project": self.project,
+            "profile": info.profile,
+            "server": urls["controller"],
+            "api_server": urls["api"],
+            "ca_bundle": str(ca_bundle),
+            "admin_token": info.admin_token,
+            "read_token": info.read_token,
+            "apishim_token": info.apishim_token,
+            "urls": urls,
+        }
+
+    def workload_status(
+        self,
+        *,
+        profile: str | None = None,
+        namespace: str | None = None,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        connection = self.connection(profile=profile)
+        ns = project_slug(namespace or self.project)
+        resources = {
+            "pods": f"/api/v1/namespaces/{ns}/pods",
+            "services": f"/api/v1/namespaces/{ns}/services",
+            "deployments": f"/apis/apps/v1/namespaces/{ns}/deployments",
+            "statefulsets": f"/apis/apps/v1/namespaces/{ns}/statefulsets",
+            "jobs": f"/apis/batch/v1/namespaces/{ns}/jobs",
+            "ingresses": f"/apis/networking.k8s.io/v1/namespaces/{ns}/ingresses",
+        }
+        results: dict[str, Any] = {}
+        ok = True
+        for name, path in resources.items():
+            resp = request(
+                f"{connection['api_server'].rstrip('/')}{path}",
+                token=str(connection["apishim_token"]),
+                timeout=timeout,
+                ca_bundle=str(connection["ca_bundle"]),
+            )
+            body = _safe_json(resp)
+            items = body.get("items") if isinstance(body, dict) else []
+            if resp.status >= 400:
+                ok = False
+            results[name] = {
+                "status": resp.status,
+                "count": len(items) if isinstance(items, list) else 0,
+                "items": items if isinstance(items, list) else [],
+            }
+        return {
+            "ok": ok,
+            "project": self.project,
+            "profile": connection["profile"],
+            "namespace": ns,
+            "api_server": connection["api_server"],
+            "resources": results,
+        }
+
+    def workload_logs(
+        self,
+        *,
+        app: str,
+        profile: str | None = None,
+        namespace: str | None = None,
+        tail: int = 80,
+        timeout: float = 10.0,
+    ) -> dict[str, Any]:
+        connection = self.connection(profile=profile)
+        ns = project_slug(namespace or self.project)
+        app_name = project_slug(app)
+        pods_resp = request(
+            f"{connection['api_server'].rstrip('/')}/api/v1/namespaces/{ns}/pods",
+            token=str(connection["apishim_token"]),
+            timeout=timeout,
+            ca_bundle=str(connection["ca_bundle"]),
+        )
+        pods = _safe_json(pods_resp).get("items", [])
+        candidates = [
+            item
+            for item in pods
+            if isinstance(item, dict) and _pod_matches_app(item, app_name)
+        ]
+        logs: list[dict[str, Any]] = []
+        for pod in candidates:
+            metadata = pod.get("metadata") if isinstance(pod.get("metadata"), dict) else {}
+            pod_name = str(metadata.get("name") or "")
+            if not pod_name:
+                continue
+            path = f"/api/v1/namespaces/{ns}/pods/{pod_name}/log?tailLines={int(tail)}"
+            resp = request(
+                f"{connection['api_server'].rstrip('/')}{path}",
+                token=str(connection["apishim_token"]),
+                timeout=timeout,
+                ca_bundle=str(connection["ca_bundle"]),
+            )
+            logs.append({"pod": pod_name, "status": resp.status, "text": resp.text})
+        return {
+            "ok": bool(logs) and all(item["status"] < 400 for item in logs),
+            "project": self.project,
+            "profile": connection["profile"],
+            "namespace": ns,
+            "app": app_name,
+            "pods": [item.get("metadata", {}).get("name") for item in candidates],
+            "logs": logs,
         }
 
     def stop(self, *, purge: bool = False) -> dict[str, Any]:
@@ -400,6 +565,30 @@ class K1sProfileRunner:
                     "sudo-helper` before using profile commands."
                 ),
             )
+
+    def _choose_profile_port(
+        self,
+        preferred: int,
+        *,
+        start: int,
+        end: int,
+        span: int = 1,
+    ) -> int:
+        reserved = _recorded_profile_host_ports(self.state_root, exclude_project=self.project)
+        candidates = [int(preferred), *range(int(start), int(end) + 1)]
+        seen: set[int] = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            ports = list(range(candidate, candidate + int(span)))
+            if ports[-1] > int(end):
+                continue
+            if any(port in reserved for port in ports):
+                continue
+            if all(port_is_free(port) for port in ports):
+                return candidate
+        raise RuntimeError(f"no free profile port range found in {start}-{end}")
 
     def _ensure_layout(self, descriptor: K1sProfileDescriptor) -> None:
         profile_dir = self._profile_dir(descriptor.name)
@@ -995,13 +1184,14 @@ class K1sProfileRunner:
     ) -> dict[str, str]:
         if not self.ingress:
             return {}
-        dash_host = f"k1s-dash.{self.project}.workerbee.localhost"
+        controller_host = f"k1s.{self.project}.workerbee.localhost"
+        legacy_dash_host = f"k1s-dash.{self.project}.workerbee.localhost"
         api_host = f"k1s-api.{self.project}.workerbee.localhost"
         site = self.ingress.sites_dir / "k1s-profile.caddy"
         site.parent.mkdir(parents=True, exist_ok=True)
         site.write_text(
             f"""# Generated by WorkerBee k1s profile runner.
-https://{dash_host} {{
+https://{controller_host}, https://{legacy_dash_host} {{
     header -Strict-Transport-Security
     tls internal
     reverse_proxy {self.ingress.host_alias}:{controller_port}
@@ -1016,9 +1206,20 @@ https://{api_host} {{
             encoding="utf-8",
         )
         return {
-            "dashboard": self.ingress.url(dash_host, "/dashboard"),
-            "controller": self.ingress.url(dash_host, "/"),
+            "controller": self.ingress.url(controller_host, "/"),
+            "dashboard": self.ingress.url(controller_host, "/dashboard"),
+            "docs": self.ingress.url(controller_host, "/docs"),
+            "swagger": self.ingress.url(controller_host, "/swagger"),
+            "redoc": self.ingress.url(controller_host, "/redoc"),
+            "controller_openapi": self.ingress.url(controller_host, "/openapi.json"),
+            "controller_health": self.ingress.url(controller_host, "/health"),
             "apishim": self.ingress.url(api_host, "/"),
+            "api": self.ingress.url(api_host, "/"),
+            "api_healthz": self.ingress.url(api_host, "/healthz"),
+            "api_openapi_v2": self.ingress.url(api_host, "/openapi/v2"),
+            "api_openapi_v3": self.ingress.url(api_host, "/openapi/v3"),
+            "api_swagger_json": self.ingress.url(api_host, "/swagger.json"),
+            "legacy_dashboard": self.ingress.url(legacy_dash_host, "/dashboard"),
             "profile": descriptor.name,
         }
 
@@ -1167,3 +1368,46 @@ if __name__ == "__main__":
 def _missing_container(output: str) -> bool:
     lowered = output.lower()
     return "no such container" in lowered or "not found" in lowered
+
+
+def _recorded_profile_host_ports(state_root: Path, *, exclude_project: str) -> set[int]:
+    root = state_root.expanduser().resolve()
+    excluded = project_slug(exclude_project)
+    ports: set[int] = set()
+    for info_file in root.glob("projects/*/profiles/k1s-profile.json"):
+        project = info_file.parents[1].name if len(info_file.parents) >= 2 else ""
+        if project_slug(project) == excluded:
+            continue
+        try:
+            data = json.loads(info_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        components = data.get("components", [])
+        if not isinstance(components, list):
+            continue
+        for component in components:
+            if not isinstance(component, dict):
+                continue
+            try:
+                port = int(component.get("host_port") or 0)
+            except (TypeError, ValueError):
+                continue
+            if port > 0:
+                ports.add(port)
+    return ports
+
+
+def _safe_json(resp: Any) -> dict[str, Any]:
+    try:
+        body = resp.json()
+    except Exception:
+        return {}
+    return body if isinstance(body, dict) else {}
+
+
+def _pod_matches_app(pod: dict[str, Any], app: str) -> bool:
+    metadata = pod.get("metadata") if isinstance(pod.get("metadata"), dict) else {}
+    name = project_slug(str(metadata.get("name") or ""))
+    labels = metadata.get("labels") if isinstance(metadata.get("labels"), dict) else {}
+    label_values = {project_slug(str(value)) for value in labels.values()}
+    return name == app or name.startswith(f"{app}-") or app in label_values

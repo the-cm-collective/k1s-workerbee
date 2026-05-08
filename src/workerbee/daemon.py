@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 import secrets
+import shutil
+import socket
+import ssl
+import struct
 import threading
 import time
 from collections.abc import Callable
@@ -25,6 +31,7 @@ from workerbee.agent import (
 )
 from workerbee.containerd_helper import containerd_privilege_status
 from workerbee.contract import WorkerBeeError
+from workerbee.http import request
 from workerbee.ingress import (
     GlobalIngress,
     GlobalIngressInfo,
@@ -32,6 +39,7 @@ from workerbee.ingress import (
     global_ingress_status,
 )
 from workerbee.locks import FileLock, project_lock_path, state_root_lock_path
+from workerbee.manifests import deploy_profile_stage, export_bundle, prepare_stage
 from workerbee.paths import daemon_project_state_dir, default_state_root
 from workerbee.ports import choose_port
 from workerbee.probe import build_probe_url, probe_workerbee_url
@@ -454,7 +462,8 @@ class WorkerBeeDaemon:
     ) -> dict[str, Any]:
         name = project_slug(project or self.default_project)
         self._register_project(name, cwd_hint=str(self._project_cwd(name)))
-        return self._profile_runner(name, k1s_root=k1s_root).status()
+        result = self._profile_runner(name, k1s_root=k1s_root).status()
+        return {**result, "project": name, "ingress_sync": self._sync_ingress_projects_result()}
 
     def profile_stop(
         self,
@@ -499,6 +508,216 @@ class WorkerBeeDaemon:
                     "ingress_sync": ingress_sync,
                 }
 
+    def profile_workload_validate(
+        self,
+        *,
+        profile: str,
+        project: str | None = None,
+        k1s_root: str | Path | None = None,
+        timeout: float = 240.0,
+    ) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+        with self._project_lock(name):
+            file_lock = FileLock(project_lock_path(self.state_root, name), label=f"project {name}")
+            with file_lock:
+                self._raise_if_project_stopped(name)
+                self._register_project(name, cwd_hint=str(self._project_cwd(name)))
+                if self._active_ingress() is None:
+                    raise WorkerBeeError(
+                        code="PROFILE_INGRESS_REQUIRED",
+                        message=(
+                            "profile workload validation requires running WorkerBee MCP ingress"
+                        ),
+                        remediation=(
+                            "Start WorkerBee MCP before running profile workload validation."
+                        ),
+                    )
+                supervisor = self._build_supervisor(name, ingress=self._project_ingress(name))
+                runner = self._profile_runner(name, k1s_root=k1s_root)
+                profile_start = runner.start(profile=profile, timeout=timeout)
+                contexts = _copy_realtime_contexts(self.state_root, name)
+                builds = [
+                    supervisor.build_image(
+                        path,
+                        tag=f"workerbee-{name}-realtime-{app}:dev",
+                    )
+                    for app, path in contexts.items()
+                ]
+                prepared = prepare_stage(
+                    supervisor=supervisor,
+                    name="realtime-web-db",
+                    template="realtime-web-db",
+                )
+                deploy = deploy_profile_stage(
+                    supervisor=supervisor,
+                    profile_runner=runner,
+                    stage_dir=Path(str(prepared["stage_dir"])),
+                    profile=profile,
+                    namespace=name,
+                    timeout=int(timeout),
+                    sync_ingress=self._sync_ingress_projects_result,
+                )
+                status = runner.workload_status(profile=profile, namespace=name)
+                connection = runner.connection(profile=profile)
+                url_checks = _profile_control_plane_checks(connection)
+                probes = [
+                    _probe_with_retry(
+                        self,
+                        project=name,
+                        host=f"api.{name}.workerbee.localhost",
+                        path="/healthz",
+                        expected_status=200,
+                        timeout=timeout,
+                    ),
+                    _probe_with_retry(
+                        self,
+                        project=name,
+                        host=f"api.{name}.workerbee.localhost",
+                        path="/api/seed",
+                        expected_status=200,
+                        body_contains="workerbee",
+                        timeout=timeout,
+                    ),
+                    _probe_with_retry(
+                        self,
+                        project=name,
+                        host=f"app.{name}.workerbee.localhost",
+                        path="/healthz",
+                        expected_status=200,
+                        timeout=timeout,
+                    ),
+                ]
+                websocket = _websocket_probe(
+                    f"wss://api.{name}.workerbee.localhost:"
+                    f"{self.global_dashboard().get('https_port', 19443)}/ws",
+                    ca_bundle=str(connection["ca_bundle"]),
+                    expected="echo:workerbee",
+                )
+                exports: dict[str, Any] = {}
+                for fmt in ("k1s", "k8s", "helm"):
+                    try:
+                        exports[fmt] = export_bundle(
+                            supervisor=supervisor,
+                            stage_dir=Path(str(prepared["stage_dir"])),
+                            fmt=fmt,
+                            namespace=name,
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        exports[fmt] = {"ok": False, "error": str(exc)}
+                checks = [
+                    {"name": "profile-start", "ok": bool(profile_start.get("ok"))},
+                    {"name": "images-built", "ok": all(bool(item.get("ok")) for item in builds)},
+                    {"name": "manifest-deploy", "ok": bool(deploy.get("ok"))},
+                    {"name": "workload-status", "ok": bool(status.get("ok"))},
+                    {
+                        "name": "control-plane-urls",
+                        "ok": all(item.get("ok") for item in url_checks),
+                    },
+                    {"name": "https-probes", "ok": all(item.get("ok") for item in probes)},
+                    {"name": "websocket-probe", "ok": bool(websocket.get("ok"))},
+                    {"name": "exports", "ok": all(item.get("ok") for item in exports.values())},
+                ]
+                return {
+                    "ok": all(bool(item.get("ok")) for item in checks),
+                    "project": name,
+                    "profile": profile,
+                    "checks": checks,
+                    "profile_start": profile_start,
+                    "builds": builds,
+                    "prepared": prepared,
+                    "deploy": deploy,
+                    "status": status,
+                    "url_checks": url_checks,
+                    "probes": probes,
+                    "websocket": websocket,
+                    "exports": exports,
+                }
+
+    def manifest_deploy_local(
+        self,
+        *,
+        stage: Path,
+        target: str = "workerbee",
+        profile: str | None = None,
+        project: str | None = None,
+        namespace: str | None = None,
+        timeout: int = 180,
+        k1s_root: str | Path | None = None,
+    ) -> dict[str, Any]:
+        from workerbee.manifests import deploy_local_stage
+
+        name = project_slug(project or self.default_project)
+        target = _normalize_deploy_target(target)
+        if target == "workerbee":
+            return self.with_project(
+                name,
+                lambda supervisor: deploy_local_stage(
+                    supervisor=supervisor,
+                    stage_dir=stage,
+                    namespace=namespace,
+                    timeout=timeout,
+                ),
+                require_active=True,
+                autostart=True,
+                start_reason="manifest_deploy_local",
+            )
+        self._raise_if_project_stopped(name)
+        with self._project_lock(name):
+            file_lock = FileLock(project_lock_path(self.state_root, name), label=f"project {name}")
+            with file_lock:
+                self._register_project(name, cwd_hint=str(self._project_cwd(name)))
+                self._active_ingress()
+                supervisor = self._build_supervisor(name, ingress=self._project_ingress(name))
+                result = deploy_profile_stage(
+                    supervisor=supervisor,
+                    profile_runner=self._profile_runner(name, k1s_root=k1s_root),
+                    stage_dir=stage,
+                    profile=profile,
+                    namespace=namespace,
+                    timeout=timeout,
+                    sync_ingress=self._sync_ingress_projects_result,
+                )
+                return {**result, "project": name}
+
+    def profile_workload_status(
+        self,
+        *,
+        project: str | None = None,
+        profile: str | None = None,
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+        self._raise_if_project_stopped(name)
+        self._register_project(name, cwd_hint=str(self._project_cwd(name)))
+        self._active_ingress()
+        runner = self._profile_runner(name)
+        runner.connection(profile=profile)
+        self._sync_ingress_projects_result()
+        return runner.workload_status(profile=profile, namespace=namespace)
+
+    def profile_logs(
+        self,
+        *,
+        app: str,
+        project: str | None = None,
+        profile: str | None = None,
+        namespace: str | None = None,
+        tail: int = 80,
+    ) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+        self._raise_if_project_stopped(name)
+        self._register_project(name, cwd_hint=str(self._project_cwd(name)))
+        self._active_ingress()
+        runner = self._profile_runner(name)
+        runner.connection(profile=profile)
+        self._sync_ingress_projects_result()
+        return runner.workload_logs(
+            app=app,
+            profile=profile,
+            namespace=namespace,
+            tail=tail,
+        )
+
     def capabilities(self) -> dict[str, Any]:
         from workerbee import __version__
         from workerbee.contract import API_VERSION, MCP_TOOL_NAMES
@@ -518,7 +737,12 @@ class WorkerBeeDaemon:
                 ),
                 "ingress_probe": "WorkerBee-managed localhost HTTPS hosts only",
             },
-            "templates": ["frontend-api", "frontend-api-store", "stateless-web"],
+            "templates": [
+                "frontend-api",
+                "frontend-api-store",
+                "realtime-web-db",
+                "stateless-web",
+            ],
             "manifest_inputs": {
                 "native-k1s": {
                     "deploy_local": True,
@@ -540,6 +764,7 @@ class WorkerBeeDaemon:
                 "runtime_requirement": "containerd",
                 "host_k1s_processes": False,
                 "profiles": [item["name"] for item in builtin_profiles()["profiles"]],
+                "workload_targets": ["profile"],
             },
             "runtime": runtime_diagnostics(self.runtime_requested, state_root=self.state_root),
             "containerd_privilege": containerd_privilege_status(
@@ -788,9 +1013,10 @@ class WorkerBeeDaemon:
         return result
 
     def _project_ingress(self, project: str) -> ProjectIngressConfig | None:
-        if self.ingress is None:
+        ingress = self._active_ingress()
+        if ingress is None:
             return None
-        return self.ingress.project_config(project)
+        return ingress.project_config(project)
 
     def _profile_runner(
         self,
@@ -815,12 +1041,23 @@ class WorkerBeeDaemon:
         return sorted(project_names)
 
     def _sync_ingress_projects(self) -> None:
-        if self.ingress is not None:
-            self.ingress.sync_projects(self._known_projects())
+        ingress = self._active_ingress()
+        if ingress is not None:
+            ingress.sync_projects(self._known_projects())
 
     def _sync_ingress_projects_result(self) -> dict[str, Any]:
         self._sync_ingress_projects()
         return {"scheduled": False, "synced": self.ingress is not None}
+
+    def _active_ingress(self) -> GlobalIngress | None:
+        if self.ingress is not None:
+            return self.ingress
+        status = global_ingress_status(self.state_root, runtime=self.runtime_requested)
+        if not status.get("running"):
+            return None
+        runtime = str(status.get("runtime") or self._resolve_runtime())
+        self.ingress = GlobalIngress(state_root=self.state_root, runtime=runtime)
+        return self.ingress
 
     def _schedule_ingress_sync(self) -> dict[str, Any]:
         if self.ingress is None:
@@ -1575,6 +1812,171 @@ def _dashboard_static_asset(path: str) -> tuple[bytes, str] | None:
     return body, "image/png"
 
 
+def _copy_realtime_contexts(state_root: Path, project: str) -> dict[str, Path]:
+    root = state_root / "projects" / project / "artifacts" / "image-contexts" / "realtime"
+    out: dict[str, Path] = {}
+    for app in ("db", "backend", "frontend"):
+        source = files("workerbee.assets").joinpath("realtime", app)
+        dest = root / app
+        if dest.exists():
+            shutil.rmtree(dest)
+        dest.mkdir(parents=True, exist_ok=True)
+        for item in source.iterdir():
+            if item.is_file():
+                (dest / item.name).write_bytes(item.read_bytes())
+        out[app] = dest
+    return out
+
+
+def _profile_control_plane_checks(connection: dict[str, Any]) -> list[dict[str, Any]]:
+    ca_bundle = str(connection["ca_bundle"])
+    urls = connection.get("urls") if isinstance(connection.get("urls"), dict) else {}
+    checks = [
+        ("dashboard", urls.get("dashboard"), None),
+        ("docs", urls.get("docs"), None),
+        ("controller-health", urls.get("controller_health"), connection.get("read_token")),
+        ("api-healthz", urls.get("api_healthz"), connection.get("apishim_token")),
+        ("api-openapi-v3", urls.get("api_openapi_v3"), connection.get("apishim_token")),
+    ]
+    results: list[dict[str, Any]] = []
+    for name, url, token in checks:
+        if not url:
+            results.append({"name": name, "ok": False, "error": "url missing"})
+            continue
+        try:
+            resp = request(str(url), token=str(token) if token else None, ca_bundle=ca_bundle)
+            results.append(
+                {"name": name, "ok": resp.status == 200, "status": resp.status, "url": url}
+            )
+        except Exception as exc:  # noqa: BLE001
+            results.append({"name": name, "ok": False, "url": url, "error": str(exc)})
+    return results
+
+
+def _probe_with_retry(
+    daemon: WorkerBeeDaemon,
+    *,
+    project: str,
+    host: str,
+    path: str,
+    expected_status: int,
+    timeout: float,
+    body_contains: str | None = None,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + min(float(timeout), 60.0)
+    last: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        try:
+            last = daemon.ingress_probe(
+                project=project,
+                host=host,
+                path=path,
+                expected_status=expected_status,
+                body_contains=body_contains,
+                timeout=5.0,
+            )
+            if last.get("ok"):
+                return last
+        except Exception as exc:  # noqa: BLE001
+            last = {"ok": False, "host": host, "path": path, "error": str(exc)}
+        time.sleep(2.0)
+    return last or {"ok": False, "host": host, "path": path, "error": "probe timed out"}
+
+
+def _websocket_probe(
+    url: str,
+    *,
+    ca_bundle: str,
+    expected: str,
+    timeout: float = 60.0,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + min(float(timeout), 60.0)
+    last: dict[str, Any] | None = None
+    while time.monotonic() < deadline:
+        try:
+            return _websocket_probe_once(url, ca_bundle=ca_bundle, expected=expected)
+        except Exception as exc:  # noqa: BLE001
+            last = {"ok": False, "url": url, "error": str(exc)}
+            time.sleep(2.0)
+    return last or {"ok": False, "url": url, "error": "websocket probe timed out"}
+
+
+def _websocket_probe_once(url: str, *, ca_bundle: str, expected: str) -> dict[str, Any]:
+    parsed = urlsplit(url)
+    if parsed.scheme != "wss":
+        raise ValueError("websocket probe URL must use wss")
+    host = parsed.hostname or ""
+    port = int(parsed.port or 443)
+    path = parsed.path or "/"
+    key = base64.b64encode(os.urandom(16)).decode("ascii")
+    context = ssl.create_default_context(cafile=ca_bundle)
+    with (
+        socket.create_connection((host, port), timeout=8) as raw,
+        context.wrap_socket(raw, server_hostname=host) as sock,
+    ):
+        request_bytes = (
+            f"GET {path} HTTP/1.1\r\n"
+            f"Host: {host}:{port}\r\n"
+            "Upgrade: websocket\r\n"
+            "Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {key}\r\n"
+            "Sec-WebSocket-Version: 13\r\n\r\n"
+        ).encode("ascii")
+        sock.sendall(request_bytes)
+        headers = _read_until(sock, b"\r\n\r\n", limit=8192)
+        if b" 101 " not in headers.split(b"\r\n", 1)[0]:
+            raise RuntimeError(headers.decode("utf-8", errors="replace")[:500])
+        _send_ws_text(sock, "workerbee")
+        text = _read_ws_text(sock)
+    return {"ok": text == expected, "url": url, "message": text, "expected": expected}
+
+
+def _read_until(sock: socket.socket, marker: bytes, *, limit: int) -> bytes:
+    data = b""
+    while marker not in data and len(data) < limit:
+        chunk = sock.recv(1024)
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
+def _send_ws_text(sock: socket.socket, text: str) -> None:
+    data = text.encode("utf-8")
+    mask = os.urandom(4)
+    header = bytearray([0x81])
+    if len(data) < 126:
+        header.append(0x80 | len(data))
+    else:
+        header.extend([0x80 | 126, *struct.pack("!H", len(data))])
+    masked = bytes(byte ^ mask[index % 4] for index, byte in enumerate(data))
+    sock.sendall(bytes(header) + mask + masked)
+
+
+def _read_ws_text(sock: socket.socket) -> str:
+    header = _recv_exact(sock, 2)
+    if len(header) != 2:
+        return ""
+    _flags, second = header
+    length = second & 0x7F
+    if length == 126:
+        length = struct.unpack("!H", _recv_exact(sock, 2))[0]
+    elif length == 127:
+        length = struct.unpack("!Q", _recv_exact(sock, 8))[0]
+    payload = _recv_exact(sock, length)
+    return payload.decode("utf-8", errors="replace")
+
+
+def _recv_exact(sock: socket.socket, size: int) -> bytes:
+    data = b""
+    while len(data) < size:
+        chunk = sock.recv(size - len(data))
+        if not chunk:
+            break
+        data += chunk
+    return data
+
+
 def _link(raw: object) -> str:
     if not raw:
         return ""
@@ -1590,3 +1992,14 @@ def _esc(raw: object) -> str:
         .replace(">", "&gt;")
         .replace('"', "&quot;")
     )
+
+
+def _normalize_deploy_target(target: str | None) -> str:
+    value = (target or "workerbee").strip().lower()
+    if value not in {"workerbee", "profile"}:
+        raise WorkerBeeError(
+            code="INVALID_DEPLOY_TARGET",
+            message="deploy target must be workerbee or profile",
+            details={"target": target},
+        )
+    return value

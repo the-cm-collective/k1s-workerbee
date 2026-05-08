@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 import shutil
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
+from hashlib import blake2s
+from ipaddress import ip_network
 from pathlib import Path
 from typing import Any
 
@@ -16,9 +19,16 @@ except Exception:  # pragma: no cover - exercised when PyYAML is not installed
 
 from workerbee import __version__
 from workerbee.contract import WorkerBeeError
+from workerbee.ports import port_is_free
+from workerbee.runtime_support import CONTAINERD_RUNTIME, containerd_network_subnet
 from workerbee.supervisor import WorkerBeeSupervisor, project_slug
 
-SUPPORTED_TEMPLATES = {"stateless-web", "frontend-api", "frontend-api-store"}
+SUPPORTED_TEMPLATES = {
+    "stateless-web",
+    "frontend-api",
+    "frontend-api-store",
+    "realtime-web-db",
+}
 NATIVE_K1S = "native-k1s"
 KUBERNETES = "kubernetes"
 K8S_WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "Job"}
@@ -51,7 +61,17 @@ def prepare_stage(
     if source is not None:
         copied = _copy_source(source.expanduser().resolve(), stage.manifest_dir)
     else:
-        copied = _write_template(stage.manifest_dir, template=template, project=project)
+        ingress_port = supervisor.ingress.https_port if supervisor.ingress else 19443
+        service_ports = _realtime_service_ports(project) if template == "realtime-web-db" else None
+        peer_hosts = _realtime_peer_hosts(supervisor) if template == "realtime-web-db" else None
+        copied = _write_template(
+            stage.manifest_dir,
+            template=template,
+            project=project,
+            ingress_port=ingress_port,
+            service_ports=service_ports,
+            peer_hosts=peer_hosts,
+        )
     bundle = _bundle_metadata(stage, manifests=copied, template=template, source=source)
     _write_json(stage.stage_dir / "bundle.json", bundle)
     _write_json(stage.stage_dir / "images.json", {"images": []})
@@ -174,6 +194,71 @@ def deploy_local_stage(
                 supervisor.deploy_manifest(manifest, namespace=namespace, timeout=timeout)
             )
     return {"ok": True, "validation": validation, "apply": results}
+
+
+def deploy_profile_stage(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    profile_runner: Any,
+    stage_dir: Path,
+    profile: str | None = None,
+    namespace: str | None = None,
+    timeout: int = 180,
+    sync_ingress: Callable[[], dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    validation = validate_stage(stage_dir)
+    if not validation["ok"]:
+        raise WorkerBeeError(
+            code="VALIDATION_FAILED",
+            message="staged manifests are not valid",
+            details=validation,
+            remediation="Fix staged files and run validation again.",
+        )
+    connection = profile_runner.connection(profile=profile, timeout=float(timeout))
+    env_overrides = {
+        "AE_APISHIM_CA_BUNDLE": str(connection["ca_bundle"]),
+        "SSL_CERT_FILE": str(connection["ca_bundle"]),
+        "REQUESTS_CA_BUNDLE": str(connection["ca_bundle"]),
+    }
+    ingress_sync = sync_ingress() if sync_ingress else None
+    results = []
+    for detail in validation["manifest_details"]:
+        manifest = Path(str(detail["path"]))
+        if detail["input_kind"] == KUBERNETES:
+            results.append(
+                supervisor.deploy_remote_k8s_manifest(
+                    manifest,
+                    server=str(connection["server"]),
+                    token=str(connection["admin_token"]),
+                    namespace=namespace,
+                    timeout=timeout,
+                    env_overrides=env_overrides,
+                )
+            )
+        else:
+            results.append(
+                supervisor.deploy_remote_manifest(
+                    manifest,
+                    server=str(connection["server"]),
+                    token=str(connection["admin_token"]),
+                    namespace=namespace,
+                    timeout=timeout,
+                    env_overrides=env_overrides,
+                )
+            )
+    return {
+        "ok": True,
+        "target": "profile",
+        "project": supervisor.project,
+        "profile": connection["profile"],
+        "server": connection["server"],
+        "api_server": connection["api_server"],
+        "urls": connection["urls"],
+        "ca_bundle": connection["ca_bundle"],
+        "ingress_sync": ingress_sync,
+        "validation": validation,
+        "apply": results,
+    }
 
 
 def deploy_remote_k1s_stage(
@@ -309,10 +394,34 @@ def _copy_source(source: Path, target: Path) -> list[Path]:
     return copied
 
 
-def _write_template(target: Path, *, template: str, project: str) -> list[Path]:
+def _write_template(
+    target: Path,
+    *,
+    template: str,
+    project: str,
+    ingress_port: int = 19443,
+    service_ports: dict[str, int] | None = None,
+    peer_hosts: list[str] | None = None,
+) -> list[Path]:
     if template not in SUPPORTED_TEMPLATES:
         expected = sorted(SUPPORTED_TEMPLATES)
         raise ValueError(f"unknown template {template!r}; expected one of {expected}")
+    if template == "realtime-web-db":
+        paths = []
+        for app in ("db", "backend", "frontend"):
+            path = target / f"{app}.k1s.yaml"
+            path.write_text(
+                _realtime_template_manifest(
+                    app=app,
+                    project=project,
+                    ingress_port=ingress_port,
+                    service_ports=service_ports or _realtime_service_ports(project),
+                    peer_hosts=peer_hosts or ["host.containers.internal", "host.docker.internal"],
+                ),
+                encoding="utf-8",
+            )
+            paths.append(path)
+        return paths
     apps = ["web"]
     if template in {"frontend-api", "frontend-api-store"}:
         apps = ["api", "frontend"]
@@ -356,6 +465,182 @@ spec:
       cpu: 0.05
       memory: 64Mi
 """
+
+
+def _realtime_template_manifest(
+    *,
+    app: str,
+    project: str,
+    ingress_port: int,
+    service_ports: dict[str, int],
+    peer_hosts: list[str],
+) -> str:
+    project_name = project_slug(project)
+    domain = f"{project_name}.workerbee.localhost"
+    db_urls = ",".join(_peer_urls("db", project_name, service_ports, peer_hosts))
+    backend_urls = ",".join(_peer_urls("backend", project_name, service_ports, peer_hosts))
+    if app == "db":
+        return f"""apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: db
+  namespace: {project_name}
+  labels:
+    workerbee.k1s.dev/project: {project_name}
+spec:
+  image: workerbee-{project_name}-realtime-db:dev
+  imagePullPolicy: Never
+  replicas: 1
+  env:
+    - name: SEED_KEY
+      value: boot
+    - name: SEED_VALUE
+      value: workerbee
+  ports:
+    - name: http
+      containerPort: 8080
+  service:
+    port: {service_ports["db"]}
+    targetPort: 8080
+  health:
+    readiness:
+      httpGet: {{ path: /healthz, port: 8080 }}
+      initialDelaySeconds: 1
+      periodSeconds: 2
+  storage:
+    - name: data
+      mountPath: /data
+      retention: Delete
+  resources:
+    requests:
+      cpu: 0.05
+      memory: 64Mi
+"""
+    if app == "backend":
+        return f"""apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: backend
+  namespace: {project_name}
+  labels:
+    workerbee.k1s.dev/project: {project_name}
+spec:
+  image: workerbee-{project_name}-realtime-backend:dev
+  imagePullPolicy: Never
+  replicas: 1
+  env:
+    - name: DB_URLS
+      value: "{db_urls}"
+  ports:
+    - name: http
+      containerPort: 8080
+  service:
+    port: {service_ports["backend"]}
+    targetPort: 8080
+  health:
+    readiness:
+      httpGet: {{ path: /healthz, port: 8080 }}
+      initialDelaySeconds: 1
+      periodSeconds: 2
+  ingress:
+    host: api.{domain}
+    path: /
+  resources:
+    requests:
+      cpu: 0.05
+      memory: 96Mi
+"""
+    if app == "frontend":
+        return f"""apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: frontend
+  namespace: {project_name}
+  labels:
+    workerbee.k1s.dev/project: {project_name}
+spec:
+  image: workerbee-{project_name}-realtime-frontend:dev
+  imagePullPolicy: Never
+  replicas: 1
+  env:
+    - name: BACKEND_URLS
+      value: "{backend_urls}"
+    - name: PUBLIC_API_BASE
+      value: "https://api.{domain}:{ingress_port}"
+    - name: PUBLIC_WS_URL
+      value: "wss://api.{domain}:{ingress_port}/ws"
+  ports:
+    - name: http
+      containerPort: 8080
+  service:
+    port: {service_ports["frontend"]}
+    targetPort: 8080
+  health:
+    readiness:
+      httpGet: {{ path: /healthz, port: 8080 }}
+      initialDelaySeconds: 1
+      periodSeconds: 2
+  ingress:
+    host: app.{domain}
+    path: /
+  resources:
+    requests:
+      cpu: 0.05
+      memory: 64Mi
+"""
+    raise ValueError(f"unknown realtime app {app!r}")
+
+
+def _realtime_service_ports(project: str) -> dict[str, int]:
+    start = 21000
+    end = 22999
+    span = 3
+    digest = blake2s(project_slug(project).encode("utf-8"), digest_size=2).digest()
+    slots = max(1, (end - start + 1) // span)
+    preferred = start + (int.from_bytes(digest, "big") % slots) * span
+    candidates = list(range(preferred, end - span + 2, span))
+    candidates.extend(range(start, preferred, span))
+    for base in candidates:
+        ports = [base, base + 1, base + 2]
+        if all(port_is_free(port, host="0.0.0.0") for port in ports):  # noqa: S104
+            return {"db": ports[0], "backend": ports[1], "frontend": ports[2]}
+    raise RuntimeError(f"no free realtime service port range found in {start}-{end}")
+
+
+def _realtime_peer_hosts(supervisor: WorkerBeeSupervisor) -> list[str]:
+    hosts: list[str] = []
+    if str(supervisor.runtime_requested).lower() == CONTAINERD_RUNTIME:
+        state_root = supervisor.state_dir.parent.parent
+        hosts.append(_subnet_gateway(containerd_network_subnet(state_root, supervisor.project)))
+    hosts.extend(["host.containers.internal", "host.docker.internal", "127.0.0.1"])
+    deduped: list[str] = []
+    for host in hosts:
+        if host and host not in deduped:
+            deduped.append(host)
+    return deduped
+
+
+def _subnet_gateway(subnet: str) -> str:
+    network = ip_network(subnet, strict=False)
+    return str(next(network.hosts()))
+
+
+def _peer_urls(
+    app: str,
+    project_name: str,
+    service_ports: dict[str, int],
+    peer_hosts: list[str],
+) -> list[str]:
+    port = service_ports[app]
+    urls = [f"http://{host}:{port}" for host in peer_hosts]
+    urls.extend(
+        [
+            f"http://ae-{project_name}--{app}:8080",
+            f"http://app-{project_name}--{app}:8080",
+            f"http://{app}:8080",
+        ]
+    )
+    return urls
 
 
 def _bundle_metadata(

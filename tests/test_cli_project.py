@@ -136,6 +136,35 @@ def test_profile_start_parses_direct_containerd_shape(tmp_path: Path) -> None:
     assert args.timeout == 30
 
 
+def test_manifest_profile_target_parses_k1s_profile_shape(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--state-root",
+            str(tmp_path),
+            "--runtime",
+            "containerd",
+            "--project",
+            "k1s-dev",
+            "manifest",
+            "deploy-local",
+            "--stage",
+            str(tmp_path / "stage"),
+            "--target",
+            "profile",
+            "--profile",
+            "k1s-dev-min-sqlite",
+            "--k1s-root",
+            str(tmp_path / "k1s"),
+        ]
+    )
+
+    assert args.cmd == "manifest"
+    assert args.manifest_cmd == "deploy-local"
+    assert args.target == "profile"
+    assert args.profile == "k1s-dev-min-sqlite"
+    assert args.k1s_root == tmp_path / "k1s"
+
+
 def test_print_returns_failure_for_structured_error(capsys) -> None:
     rc = cli._print({"ok": False, "error": {"code": "MCP_PORT_IN_USE"}}, json_out=True)
 
