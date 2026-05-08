@@ -51,7 +51,10 @@
             shellHook = ''
               export WORKERBEE_NIX_DEV=1
               export LD_LIBRARY_PATH="${nixpkgs.lib.makeLibraryPath runtimeLibs}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-              export PATH="$PATH:$PWD/.venv/bin"
+
+              mkdir -p "$PWD/.direnv/bin"
+              ln -sf "${pkgs.ruff}/bin/ruff" "$PWD/.direnv/bin/ruff"
+              export PATH="$PWD/.direnv/bin:$PWD/.venv/bin:$PATH"
 
               if [ -z "''${VIRTUAL_ENV:-}" ] && [ -d "$PWD/.venv" ]; then
                 export VIRTUAL_ENV="$PWD/.venv"
