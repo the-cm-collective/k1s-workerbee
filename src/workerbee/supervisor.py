@@ -540,30 +540,71 @@ class WorkerBeeSupervisor:
                 ok = False
         return {"ok": ok, "apps": apps}
 
-    def logs(self, app: str = "api", *, tail: int = 80) -> dict[str, Any]:
+    def logs(
+        self,
+        app: str = "api",
+        *,
+        namespace: str | None = None,
+        tail: int = 80,
+    ) -> dict[str, Any]:
         info = self.start()
-        result = self.run_ae(
-            [
-                "--server",
-                info.controller_url,
-                "--token",
-                info.read_token,
-                "logs",
-                f"workerbee-poc/{app}",
-                "--tail",
-                str(tail),
-            ],
-            info=info,
-            timeout=30,
+        resolved_namespace, resolved_app = _resolve_app_ref(
+            app,
+            namespace=namespace,
+            default_namespace=project_slug(self.project),
         )
-        if result["stdout"].strip() or result["stderr"].strip():
-            result["source"] = "k1s"
-            return result
-        return self._runtime_logs(info, app=app, tail=tail)
+        k1s_error = None
+        try:
+            result = self.run_ae(
+                [
+                    "--server",
+                    info.controller_url,
+                    "--token",
+                    info.read_token,
+                    "logs",
+                    f"{resolved_namespace}/{resolved_app}",
+                    "--tail",
+                    str(tail),
+                ],
+                info=info,
+                timeout=30,
+            )
+            if result["stdout"].strip() or result["stderr"].strip():
+                result["source"] = "k1s"
+                result["resolved_namespace"] = resolved_namespace
+                result["resolved_app"] = resolved_app
+                return result
+        except Exception as exc:  # noqa: BLE001
+            k1s_error = str(exc)
+        result = self._runtime_logs(
+            info,
+            app=resolved_app,
+            namespace=resolved_namespace,
+            tail=tail,
+        )
+        if k1s_error:
+            result["k1s_error"] = k1s_error
+        return result
 
-    def run_exec(self, app: str, command: list[str]) -> dict[str, Any]:
+    def run_exec(
+        self,
+        app: str,
+        command: list[str],
+        *,
+        namespace: str | None = None,
+    ) -> dict[str, Any]:
         info = self.start()
-        return self._runtime_exec(info, app=app, command=command)
+        resolved_namespace, resolved_app = _resolve_app_ref(
+            app,
+            namespace=namespace,
+            default_namespace=project_slug(self.project),
+        )
+        return self._runtime_exec(
+            info,
+            app=resolved_app,
+            namespace=resolved_namespace,
+            command=command,
+        )
 
     def _ingress_urls_for_paths(self, manifests: list[Path]) -> list[str]:
         if not self.ingress:
@@ -592,6 +633,7 @@ class WorkerBeeSupervisor:
     ) -> dict[str, Any]:
         stack = info or self.start()
         env = self._base_env(stack)
+        _set_cli_http_timeout(env, timeout)
         cmd_args = _normalize_cli_option_args(args)
         proc = subprocess.run(
             [self.python_executable, "-m", "ae.cli", *cmd_args],
@@ -621,6 +663,7 @@ class WorkerBeeSupervisor:
         env = self.k1s_runtime.apply_env(os.environ.copy())
         if env_overrides:
             env.update(env_overrides)
+        _set_cli_http_timeout(env, timeout)
         cmd_args = _normalize_cli_option_args(args)
         proc = subprocess.run(
             [self.python_executable, "-m", "ae.cli", *cmd_args],
@@ -1239,10 +1282,10 @@ class WorkerBeeSupervisor:
         shutil.rmtree(self.state_dir)
         return {"ok": True, "removed": True, "path": str(self.state_dir)}
 
-    def _runtime_container_ids(self, info: StackInfo, app: str) -> list[str]:
+    def _runtime_container_ids(self, info: StackInfo, *, app: str, namespace: str) -> list[str]:
         filters = [
             "--filter",
-            f"label=ae.namespace={POC_NAMESPACE}",
+            f"label=ae.namespace={namespace}",
             "--filter",
             f"label=app={app}",
         ]
@@ -1267,10 +1310,17 @@ class WorkerBeeSupervisor:
             raise RuntimeError(proc.stderr.strip() or f"{info.runtime} ps failed")
         return _split_lines(proc.stdout)
 
-    def _runtime_logs(self, info: StackInfo, *, app: str, tail: int) -> dict[str, Any]:
-        ids = self._runtime_container_ids(info, app)
+    def _runtime_logs(
+        self,
+        info: StackInfo,
+        *,
+        app: str,
+        namespace: str,
+        tail: int,
+    ) -> dict[str, Any]:
+        ids = self._runtime_container_ids(info, app=app, namespace=namespace)
         if not ids:
-            raise RuntimeError(f"no running POC container found for app {app!r}")
+            raise RuntimeError(f"no running container found for app {namespace}/{app}")
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
         for cid in ids:
@@ -1292,6 +1342,8 @@ class WorkerBeeSupervisor:
                 raise RuntimeError(proc.stderr.strip() or f"{info.runtime} logs failed")
         return {
             "source": info.runtime,
+            "resolved_namespace": namespace,
+            "resolved_app": app,
             "cmd": runtime_command_args(
                 info.runtime,
                 state_root=self.state_dir.parent.parent,
@@ -1303,10 +1355,17 @@ class WorkerBeeSupervisor:
             "stderr": "".join(stderr_parts),
         }
 
-    def _runtime_exec(self, info: StackInfo, *, app: str, command: list[str]) -> dict[str, Any]:
-        ids = self._runtime_container_ids(info, app)
+    def _runtime_exec(
+        self,
+        info: StackInfo,
+        *,
+        app: str,
+        namespace: str,
+        command: list[str],
+    ) -> dict[str, Any]:
+        ids = self._runtime_container_ids(info, app=app, namespace=namespace)
         if not ids:
-            raise RuntimeError(f"no running POC container found for app {app!r}")
+            raise RuntimeError(f"no running container found for app {namespace}/{app}")
         cmd = runtime_command_args(
             info.runtime,
             state_root=self.state_dir.parent.parent,
@@ -1321,6 +1380,8 @@ class WorkerBeeSupervisor:
         )
         result = {
             "source": info.runtime,
+            "resolved_namespace": namespace,
+            "resolved_app": app,
             "cmd": cmd,
             "returncode": proc.returncode,
             "stdout": proc.stdout,
@@ -1400,6 +1461,7 @@ class WorkerBeeSupervisor:
         *,
         app: str,
         path: str,
+        namespace: str = POC_NAMESPACE,
     ) -> dict[str, Any]:
         code = (
             "import json, sys, urllib.error, urllib.request\n"
@@ -1426,6 +1488,7 @@ class WorkerBeeSupervisor:
         exec_result = self._runtime_exec(
             info,
             app=app,
+            namespace=namespace,
             command=["python", "-c", code, f"http://127.0.0.1:8080{path}"],
         )
         stdout = exec_result["stdout"].strip()
@@ -1470,6 +1533,39 @@ def _parse_published_host_ports(text: str) -> set[int]:
 
 def project_slug(value: str) -> str:
     return _slug(value)
+
+
+def _resolve_app_ref(
+    app: str,
+    *,
+    namespace: str | None,
+    default_namespace: str,
+) -> tuple[str, str]:
+    raw_app = str(app or "").strip()
+    raw_namespace = str(namespace or "").strip()
+    if not raw_app:
+        raise ValueError("app is required")
+    if "/" in raw_app:
+        parts = raw_app.split("/")
+        if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+            raise ValueError("app must be `name` or `namespace/name`")
+        app_namespace = parts[0].strip()
+        app_name = parts[1].strip()
+        if raw_namespace and raw_namespace != app_namespace:
+            raise ValueError(
+                f"namespace mismatch: app references {app_namespace!r} but namespace is "
+                f"{raw_namespace!r}"
+            )
+        return app_namespace, app_name
+    resolved_namespace = raw_namespace or default_namespace
+    if not resolved_namespace:
+        raise ValueError("namespace is required")
+    return resolved_namespace, raw_app
+
+
+def _set_cli_http_timeout(env: dict[str, str], timeout: int) -> None:
+    bounded = max(10, min(int(timeout), 600))
+    env["AE_CLI_HTTP_TIMEOUT"] = str(bounded)
 
 
 def _env_int(name: str) -> int | None:

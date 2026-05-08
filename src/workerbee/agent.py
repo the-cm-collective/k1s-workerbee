@@ -129,6 +129,10 @@ queues, or integration behavior that benefits from a running local stack.
    the requested behavior is verified.
 8. Export artifacts with `workerbee_v1_bundle_export` when the implementation is ready to hand off.
 
+For staged WorkerBee manifests, app logs and exec default to the WorkerBee project namespace.
+Use `app="namespace/name"` or pass `namespace` only when inspecting a non-default namespace;
+do not guess generated runtime container names.
+
 For k1s controller/runtime development only, use explicit direct-containerd WorkerBee profile tools:
 start a profile with `workerbee_v1_profile_start`, deploy staged manifests with
 `workerbee_v1_manifest_deploy_local(target="profile")`, inspect with
@@ -155,6 +159,7 @@ def runbook_payload() -> dict[str, Any]:
             "Call workerbee_v1_session_start(cwd, goal) and keep the returned project.",
             "Build images with local shell scripts or workerbee_v1_image_build.",
             "Prepare/stage manifests, validate them, deploy locally, then inspect status/logs.",
+            "Use app names and the optional namespace field for logs/exec, not container names.",
             "Probe WorkerBee HTTPS ingress through workerbee_v1_ingress_probe.",
             "Iterate until the running app is correct, then export k1s/k8s/helm artifacts.",
         ],

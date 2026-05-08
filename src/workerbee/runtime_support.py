@@ -9,6 +9,8 @@ import shlex
 import shutil
 import socket
 import subprocess
+import tempfile
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -698,6 +700,7 @@ def _build_image_containerd(
         result = _build_with_fallback_and_load(
             fallback=fallback,
             containerd_base=base,
+            state_root=state_root,
             context=context,
             tag=tag,
             labels=labels,
@@ -735,6 +738,7 @@ def _build_with_fallback_and_load(
     *,
     fallback: str,
     containerd_base: list[str],
+    state_root: Path,
     context: Path,
     tag: str,
     labels: list[str],
@@ -759,37 +763,47 @@ def _build_with_fallback_and_load(
             "cmd": build_cmd,
             "stdout": build_proc.stdout,
         }
-    save_proc = subprocess.Popen(
-        [fallback, "save", tag],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+    transfer_dir = state_root.expanduser().resolve() / "global" / "image-transfer"
+    transfer_dir.mkdir(parents=True, exist_ok=True)
+    tar_fd, tar_name = tempfile.mkstemp(
+        prefix="workerbee-image-",
+        suffix=".tar",
+        dir=transfer_dir,
     )
-    assert save_proc.stdout is not None
+    os.close(tar_fd)
+    tar_path = Path(tar_name)
+    save_cmd = [fallback, "save", "-o", str(tar_path), tag]
+    load_cmd = [*containerd_base, "load", "-i", str(tar_path)]
     try:
-        load_proc = subprocess.run(
-            [*containerd_base, "load"],
-            stdin=save_proc.stdout,
+        save_proc = subprocess.run(
+            save_cmd,
+            text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             timeout=timeout,
         )
-        save_proc.stdout.close()
-        _save_stdout, save_stderr_bytes = save_proc.communicate(timeout=timeout)
-        save_stderr = save_stderr_bytes.decode("utf-8", errors="replace")
-        save_returncode = int(save_proc.returncode or 0)
+        if save_proc.returncode != 0:
+            return {
+                "backend": f"{fallback}-save-load",
+                "returncode": save_proc.returncode,
+                "cmd": [*build_cmd, "&&", *save_cmd],
+                "stdout": build_proc.stdout + "\n" + save_proc.stdout,
+            }
+        load_proc = subprocess.run(
+            load_cmd,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=timeout,
+        )
     finally:
-        if save_proc.poll() is None:
-            save_proc.kill()
-    stdout = (
-        build_proc.stdout
-        + "\n"
-        + load_proc.stdout.decode("utf-8", errors="replace")
-        + ("\n" + save_stderr if save_stderr else "")
-    )
+        with suppress(FileNotFoundError):
+            tar_path.unlink()
+    stdout = build_proc.stdout + "\n" + save_proc.stdout + "\n" + load_proc.stdout
     return {
         "backend": f"{fallback}-save-load",
-        "returncode": load_proc.returncode or save_returncode,
-        "cmd": [*build_cmd, "&&", fallback, "save", tag, "|", *containerd_base, "load"],
+        "returncode": load_proc.returncode,
+        "cmd": [*build_cmd, "&&", *save_cmd, "&&", *load_cmd],
         "stdout": stdout,
     }
 

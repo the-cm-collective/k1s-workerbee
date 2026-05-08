@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import ssl
 import time
 import urllib.error
@@ -50,13 +51,26 @@ def probe_workerbee_url(
     method: str = "GET",
     expected_status: int | None = None,
     body_contains: str | None = None,
+    json_body: dict[str, Any] | None = None,
+    body: str | None = None,
     timeout: float = 10.0,
 ) -> dict[str, Any]:
     method = method.upper()
-    if method not in {"GET", "HEAD"}:
+    if method not in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"}:
         raise WorkerBeeError(
             code="VALIDATION_FAILED",
-            message="ingress probe method must be GET or HEAD",
+            message="ingress probe method must be GET, HEAD, POST, PUT, PATCH, or DELETE",
+            details={"method": method},
+        )
+    if json_body is not None and body is not None:
+        raise WorkerBeeError(
+            code="VALIDATION_FAILED",
+            message="ingress probe accepts either json_body or body, not both",
+        )
+    if method in {"GET", "HEAD"} and (json_body is not None or body is not None):
+        raise WorkerBeeError(
+            code="VALIDATION_FAILED",
+            message="ingress probe request bodies are not supported for GET or HEAD",
             details={"method": method},
         )
     _validate_workerbee_url(project=project, ingress_info=ingress_info, url=url)
@@ -70,17 +84,30 @@ def probe_workerbee_url(
             retryable=True,
         )
 
-    request = urllib.request.Request(url, method=method)  # noqa: S310 - restricted localhost URL
+    data = None
+    headers = {"Accept": "application/json, text/plain, */*"}
+    if json_body is not None:
+        data = json.dumps(json_body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    elif body is not None:
+        data = body.encode("utf-8")
+        headers["Content-Type"] = "text/plain; charset=utf-8"
+    request = urllib.request.Request(  # noqa: S310 - restricted localhost URL
+        url,
+        data=data,
+        headers=headers,
+        method=method,
+    )
     context = ssl.create_default_context(cafile=str(ca_bundle))
     started = time.monotonic()
     try:
         with urllib.request.urlopen(request, timeout=timeout, context=context) as response:  # noqa: S310
             status = int(response.status)
-            body = b"" if method == "HEAD" else response.read()
+            response_body = b"" if method == "HEAD" else response.read()
             headers = {str(k): str(v) for k, v in response.headers.items()}
     except urllib.error.HTTPError as exc:
         status = int(exc.code)
-        body = b"" if method == "HEAD" else exc.read()
+        response_body = b"" if method == "HEAD" else exc.read()
         headers = {str(k): str(v) for k, v in exc.headers.items()}
     except OSError as exc:
         raise WorkerBeeError(
@@ -91,7 +118,7 @@ def probe_workerbee_url(
             remediation="Check WorkerBee project status, ingress routes, and Caddy health.",
         ) from exc
     elapsed_ms = int((time.monotonic() - started) * 1000)
-    text = body.decode("utf-8", errors="replace")
+    text = response_body.decode("utf-8", errors="replace")
     status_matches = expected_status is None or status == expected_status
     body_matches = body_contains is None or body_contains in text
     return {

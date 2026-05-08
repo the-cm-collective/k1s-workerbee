@@ -191,7 +191,7 @@ def test_containerd_poc_validation_execs_inside_containers(
     monkeypatch.setattr(
         sup,
         "_runtime_container_ids",
-        lambda _info, app: [f"{app}-cid"],
+        lambda _info, *, app, namespace: [f"{namespace}-{app}-cid"],
     )
     calls: list[list[str]] = []
 
@@ -213,9 +213,9 @@ def test_containerd_poc_validation_execs_inside_containers(
     assert result["frontend"] == "<h1>WorkerBee POC</h1>"
     exec_targets = [cmd[cmd.index("exec") + 1] for cmd in calls]
     assert exec_targets == [
-        "store-cid",
-        "api-cid",
-        "frontend-cid",
-        "api-cid",
-        "frontend-cid",
+        "workerbee-poc-store-cid",
+        "workerbee-poc-api-cid",
+        "workerbee-poc-frontend-cid",
+        "workerbee-poc-api-cid",
+        "workerbee-poc-frontend-cid",
     ]

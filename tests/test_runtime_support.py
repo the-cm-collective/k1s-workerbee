@@ -104,6 +104,50 @@ def test_docker_build_uses_containerfile_when_no_dockerfile(
     assert calls[0][4:6] == ["-f", str(containerfile)]
 
 
+def test_containerd_fallback_build_loads_image_from_state_local_tar(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    context.mkdir()
+    (context / "Containerfile").write_text("FROM scratch\n", encoding="utf-8")
+    calls: list[list[str]] = []
+
+    monkeypatch.setattr("workerbee.runtime_support.shutil.which", lambda _name: "/bin/tool")
+
+    def fake_run(cmd: list[str], **kwargs):
+        calls.append(cmd)
+        assert kwargs.get("stdin") is None
+        if cmd[0] == "nerdctl" and "build" in cmd:
+            return SimpleNamespace(returncode=1, stdout="nerdctl build failed")
+        if cmd[:2] == ["podman", "build"]:
+            return SimpleNamespace(returncode=0, stdout="podman build ok")
+        if cmd[:3] == ["podman", "save", "-o"]:
+            assert Path(cmd[3]).is_relative_to(tmp_path / "global" / "image-transfer")
+            Path(cmd[3]).write_text("tar", encoding="utf-8")
+            return SimpleNamespace(returncode=0, stdout="podman save ok")
+        if cmd[0] == "nerdctl" and cmd[-2] == "-i":
+            assert cmd[-3] == "load"
+            assert Path(cmd[-1]).is_relative_to(tmp_path / "global" / "image-transfer")
+            return SimpleNamespace(returncode=0, stdout="nerdctl load ok")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    monkeypatch.setattr("workerbee.runtime_support.subprocess.run", fake_run)
+
+    result = build_image_with_runtime(
+        runtime="containerd",
+        state_root=tmp_path,
+        project="demo",
+        context=context,
+        tag="workerbee-demo:test",
+    )
+
+    assert result["ok"] is True
+    assert result["build_backend"] == "podman-save-load"
+    assert calls[-1][-3:] == ["load", "-i", calls[-1][-1]]
+    assert not list((tmp_path / "global" / "image-transfer").glob("*.tar"))
+
+
 def test_containerd_cli_wrapper_routes_caddy_exec_to_system_namespace(tmp_path: Path) -> None:
     wrapper = write_containerd_cli_wrapper(
         tmp_path / "bin" / "nerdctl-workerbee",

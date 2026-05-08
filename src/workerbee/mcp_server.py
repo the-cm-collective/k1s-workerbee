@@ -282,7 +282,7 @@ def serve_mcp(
             project,
             lambda: daemon.with_project(
                 project,
-                lambda supervisor: supervisor.logs(app=app, tail=tail),
+                lambda supervisor: supervisor.logs(app=app, namespace=namespace, tail=tail),
                 require_active=True,
             ),
         )
@@ -309,6 +309,7 @@ def serve_mcp(
         app: str,
         command: list[str],
         project: str = "default",
+        namespace: str | None = None,
     ) -> dict[str, Any]:
         """Run a bounded command inside an app container."""
         return protect(
@@ -316,7 +317,7 @@ def serve_mcp(
             project,
             lambda: daemon.with_project(
                 project,
-                lambda supervisor: supervisor.run_exec(app, command),
+                lambda supervisor: supervisor.run_exec(app, command, namespace=namespace),
                 require_active=True,
             ),
         )
@@ -330,6 +331,8 @@ def serve_mcp(
         method: str = "GET",
         expected_status: int | None = None,
         body_contains: str | None = None,
+        json_body: dict[str, Any] | None = None,
+        body: str | None = None,
         timeout: float = 10.0,
     ) -> dict[str, Any]:
         """Probe a WorkerBee-managed local HTTPS ingress URL with the WorkerBee CA."""
@@ -344,6 +347,8 @@ def serve_mcp(
                 method=method,
                 expected_status=expected_status,
                 body_contains=body_contains,
+                json_body=json_body,
+                body=body,
                 timeout=timeout,
             ),
         )

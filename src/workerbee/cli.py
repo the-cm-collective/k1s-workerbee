@@ -222,11 +222,13 @@ def build_parser() -> argparse.ArgumentParser:
     deploy = sub.add_parser("deploy-poc", help="Build and deploy the representative POC stack")
     deploy.add_argument("--timeout", type=float, default=180.0)
     sub.add_parser("apishim-smoke", help="Inspect POC objects through the k1s API shim")
-    logs = sub.add_parser("logs", help="Show recent POC app logs")
+    logs = sub.add_parser("logs", help="Show recent app logs")
     logs.add_argument("app", nargs="?", default="api")
+    logs.add_argument("-n", "--namespace", default=None)
     logs.add_argument("--tail", type=int, default=80)
-    exec_p = sub.add_parser("exec", help="Run a command in a POC app container")
+    exec_p = sub.add_parser("exec", help="Run a command in an app container")
     exec_p.add_argument("app")
+    exec_p.add_argument("-n", "--namespace", default=None)
     exec_p.add_argument("command", nargs=argparse.REMAINDER)
     sub.add_parser("export-k8s", help="Export POC manifests to Kubernetes YAML")
 
@@ -628,7 +630,11 @@ def main(argv: list[str] | None = None) -> int:
                     args=args,
                     supervisor=sup,
                     containerd_privilege=containerd_privilege,
-                    action=lambda: sup.logs(app=args.app, tail=args.tail),
+                    action=lambda: sup.logs(
+                        app=args.app,
+                        namespace=args.namespace,
+                        tail=args.tail,
+                    ),
                 ),
                 json_out=args.json,
             )
@@ -643,7 +649,11 @@ def main(argv: list[str] | None = None) -> int:
                     args=args,
                     supervisor=sup,
                     containerd_privilege=containerd_privilege,
-                    action=lambda: sup.run_exec(args.app, command),
+                    action=lambda: sup.run_exec(
+                        args.app,
+                        command,
+                        namespace=args.namespace,
+                    ),
                 ),
                 json_out=args.json,
             )

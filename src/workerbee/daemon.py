@@ -1040,6 +1040,8 @@ class WorkerBeeDaemon:
         method: str = "GET",
         expected_status: int | None = None,
         body_contains: str | None = None,
+        json_body: dict[str, Any] | None = None,
+        body: str | None = None,
         timeout: float = 10.0,
     ) -> dict[str, Any]:
         name = project_slug(project or self.default_project)
@@ -1053,6 +1055,8 @@ class WorkerBeeDaemon:
             method=method,
             expected_status=expected_status,
             body_contains=body_contains,
+            json_body=json_body,
+            body=body,
             timeout=timeout,
         )
         result["project"] = name
