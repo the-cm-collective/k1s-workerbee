@@ -400,6 +400,7 @@ def containerd_base_args(
     if ensure_dirs:
         data_root.mkdir(parents=True, exist_ok=True)
         cni_conf.mkdir(parents=True, exist_ok=True)
+        _ensure_containerd_default_bridge_config(cni_conf)
     namespace = containerd_namespace(state_root, project=project, system=system)
     _raise_if_reserved_containerd_namespace(namespace)
     return [
@@ -415,6 +416,41 @@ def containerd_base_args(
         "--cni-netconfpath",
         str(cni_conf),
     ]
+
+
+def _ensure_containerd_default_bridge_config(cni_conf: Path) -> None:
+    """Prevent nerdctl from recreating its default bridge per WorkerBee CNI dir."""
+    config = cni_conf / "nerdctl-bridge.conflist"
+    if config.exists():
+        return
+    nerdctl_id = hashlib.blake2s(
+        str(cni_conf.resolve()).encode("utf-8"),
+        digest_size=32,
+    ).hexdigest()
+    data = {
+        "cniVersion": "1.0.0",
+        "name": "bridge",
+        "nerdctlID": nerdctl_id,
+        "nerdctlLabels": {"nerdctl/default-network": "true"},
+        "plugins": [
+            {
+                "type": "bridge",
+                "bridge": "nerdctl0",
+                "isGateway": True,
+                "ipMasq": True,
+                "hairpinMode": True,
+                "ipam": {
+                    "ranges": [[{"gateway": "10.4.0.1", "subnet": "10.4.0.0/24"}]],
+                    "routes": [{"dst": "0.0.0.0/0"}],
+                    "type": "host-local",
+                },
+            },
+            {"type": "portmap", "capabilities": {"portMappings": True}},
+            {"type": "firewall", "ingressPolicy": "same-bridge"},
+            {"type": "tuning"},
+        ],
+    }
+    config.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
 def runtime_command_args(

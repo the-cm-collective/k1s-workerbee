@@ -94,6 +94,28 @@ def test_ha_min_starts_only_containerized_components(
     assert len(run_commands) == 6
     assert all("--network" in cmd for cmd in run_commands)
     assert not any("ae.controller" in " ".join(cmd[: cmd.index("run")]) for cmd in run_commands)
+    nats_command = next(
+        cmd
+        for cmd in run_commands
+        if cmd[cmd.index("--name") + 1].endswith("-k1s-ha-min-nats")
+    )
+    assert "-c" in nats_command
+    assert nats_command[nats_command.index("-c") + 1] == "/etc/nats/nats.conf"
+    assert any(
+        volume.endswith("/config/nats.conf:/etc/nats/nats.conf:ro")
+        for index, volume in enumerate(nats_command)
+        if index > 0 and nats_command[index - 1] == "-v"
+    )
+    nats_config = (
+        tmp_path
+        / "projects"
+        / "ha-demo"
+        / "profiles"
+        / "k1s-ha-min"
+        / "config"
+        / "nats.conf"
+    )
+    assert 'domain: "K1S"' in nats_config.read_text(encoding="utf-8")
 
 
 def test_profile_port_allocation_skips_recorded_project_ports(

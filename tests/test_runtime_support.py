@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -38,6 +39,17 @@ def test_containerd_runtime_scopes_project_namespace_and_data_root(tmp_path: Pat
     assert containerd_cni_conf_dir(tmp_path, system=True) == (
         tmp_path / "global" / "containerd-cni-net.d"
     )
+    bridge_config = (
+        tmp_path
+        / "projects"
+        / "my-app"
+        / "containerd-cni-net.d"
+        / "nerdctl-bridge.conflist"
+    )
+    bridge = json.loads(bridge_config.read_text(encoding="utf-8"))
+    assert bridge["name"] == "bridge"
+    assert bridge["plugins"][0]["bridge"] == "nerdctl0"
+    assert bridge["plugins"][0]["ipam"]["ranges"][0][0]["subnet"] == "10.4.0.0/24"
     assert containerd_network_name(tmp_path, "My App") == f"workerbee-{state_hash}-my-app"
     assert containerd_network_subnet(tmp_path, "My App").startswith("10.")
     assert containerd_network_subnet(tmp_path, "My App").endswith(".0/24")

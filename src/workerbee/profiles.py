@@ -810,6 +810,7 @@ class K1sProfileRunner:
         name = self._component_name(descriptor, "nats")
         data = self._profile_dir(descriptor.name) / "data" / "nats"
         data.mkdir(parents=True, exist_ok=True)
+        config = self._write_nats_config(descriptor)
         self._rm_container(name)
         image = os.getenv("WORKERBEE_K1S_PROFILE_NATS_IMAGE", DEFAULT_NATS_IMAGE)
         args = [
@@ -821,19 +822,35 @@ class K1sProfileRunner:
             self.network,
             "-v",
             f"{data}:/data",
+            "-v",
+            f"{config}:/etc/nats/nats.conf:ro",
             *self._label_args("k1s-profile-nats"),
             image,
-            "-js",
-            "-sd",
-            "/data",
-            "-m",
-            "8222",
-            "--user",
-            "hub-controller",
-            "--pass",
-            "dev",
+            "-c",
+            "/etc/nats/nats.conf",
         ]
         return self._run_component(name=name, role="nats", image=image, args=args)
+
+    def _write_nats_config(self, descriptor: K1sProfileDescriptor) -> Path:
+        config = self._profile_dir(descriptor.name) / "config" / "nats.conf"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        content = textwrap.dedent(
+            """\
+            port: 4222
+            http_port: 8222
+            jetstream {
+              store_dir: "/data"
+              domain: "K1S"
+            }
+            authorization {
+              users = [
+                {user: "hub-controller", password: "dev"}
+              ]
+            }
+            """
+        )
+        config.write_text(content, encoding="utf-8")
+        return config
 
     def _start_apishim(
         self,
