@@ -81,6 +81,8 @@ def test_global_dashboard_uses_k1s_visual_style() -> None:
     assert 'data-action="delete_projects"' in html
     assert 'data-action="start_all_projects"' in html
     assert 'data-action="mcp_reboot"' in html
+    assert 'class="row-actions"><div class="row-actions-inner">' in html
+    assert ".row-actions { display: flex" not in html
     assert f'class="brand-logo" alt="k1s logo" src="{DASHBOARD_LOGO_PATH}"' in html
     assert "font-size: 18px" in html
     assert "font-size: 13px" in html
@@ -89,6 +91,234 @@ def test_global_dashboard_uses_k1s_visual_style() -> None:
     assert "eager / running" in html
     assert "https://app.alpha.workerbee.localhost:19443/" in html
     assert "&quot;runtime&quot;: &quot;containerd&quot;" in html
+    assert 'id="refresh-interval"' in html
+    assert "refreshProjects" in html
+    assert "window.location.reload()" not in html
+
+
+def test_projects_reports_profile_only_project_running(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="containerd")
+    daemon._register_project("alpha", cwd_hint="/var/lib/workerbee/alpha")  # noqa: SLF001
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="containerd",
+        https_port=19443,
+        dashboard_port=18090,
+    ).project_config("alpha")
+    route = ingress.sites_dir / "k1s-profile.caddy"
+    route.parent.mkdir(parents=True, exist_ok=True)
+    route.write_text("current route", encoding="utf-8")
+
+    class FakeSupervisor:
+        state_dir = tmp_path / "projects" / "alpha"
+
+        def status(self) -> dict[str, object]:
+            return {"running": False, "apishim_running": False}
+
+    class FakeProfileRunner:
+        project_state = tmp_path / "projects" / "alpha"
+
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        def load(self) -> SimpleNamespace:
+            return SimpleNamespace(
+                ingress_urls={
+                    "dashboard": "https://k1s.alpha.workerbee.localhost:19443/dashboard"
+                }
+            )
+
+        def status(self, *, refresh_ingress: bool = True) -> dict[str, object]:
+            assert refresh_ingress is True
+            return {
+                "ok": True,
+                "running": True,
+                "profile": {
+                    "profile": "k1s-dev-min-sqlite",
+                    "dashboard_url": "http://127.0.0.1:19608/dashboard",
+                    "ingress_urls": {
+                        "dashboard": "https://k1s.alpha.workerbee.localhost:19443/dashboard"
+                    },
+                },
+                "components": [{"role": "controller", "running": True}],
+            }
+
+    monkeypatch.setattr(daemon, "_project_ingress", lambda _name: ingress)
+    monkeypatch.setattr(daemon, "_build_supervisor", lambda _name, **_kwargs: FakeSupervisor())
+    monkeypatch.setattr("workerbee.daemon.K1sProfileRunner", FakeProfileRunner)
+
+    result = daemon.projects()
+    item = result["projects"][0]
+
+    assert item["project"] == "alpha"
+    assert item["running"] is True
+    assert item["stack_running"] is False
+    assert item["profile_running"] is True
+    assert item["status_kind"] == "profile"
+    assert item["profile_name"] == "k1s-dev-min-sqlite"
+    assert item["dashboard_url"] == "https://k1s.alpha.workerbee.localhost:19443/dashboard"
+    assert item["profile_status"]["ingress_refresh"]["sync_needed"] is False
+
+
+def test_projects_do_not_derive_profile_dashboard_without_profile(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="containerd")
+    daemon._register_project("alpha", cwd_hint="/var/lib/workerbee/alpha")  # noqa: SLF001
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="containerd",
+        https_port=19443,
+        dashboard_port=18090,
+    ).project_config("alpha")
+
+    class FakeSupervisor:
+        state_dir = tmp_path / "projects" / "alpha"
+
+        def status(self) -> dict[str, object]:
+            return {"running": False, "apishim_running": False}
+
+    class FakeProfileRunner:
+        project_state = tmp_path / "projects" / "alpha"
+
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        def status(self, *, refresh_ingress: bool = True) -> dict[str, object]:
+            assert refresh_ingress is True
+            return {
+                "ok": True,
+                "running": False,
+                "project": "alpha",
+                "state_dir": str(tmp_path / "projects" / "alpha"),
+                "state_root": str(tmp_path),
+            }
+
+    monkeypatch.setattr(daemon, "_project_ingress", lambda _name: ingress)
+    monkeypatch.setattr(daemon, "_build_supervisor", lambda _name, **_kwargs: FakeSupervisor())
+    monkeypatch.setattr("workerbee.daemon.K1sProfileRunner", FakeProfileRunner)
+
+    item = daemon.projects()["projects"][0]
+
+    assert item["running"] is False
+    assert item["status_kind"] == "stopped"
+    assert item["dashboard_url"] is None
+    assert item["profile_dashboard_url"] is None
+
+
+def test_projects_repairs_missing_profile_ingress_and_syncs_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="containerd")
+    daemon._register_project("alpha", cwd_hint="/var/lib/workerbee/alpha")  # noqa: SLF001
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="containerd",
+        https_port=19443,
+        dashboard_port=18090,
+    ).project_config("alpha")
+    sync_calls: list[bool] = []
+
+    class FakeSupervisor:
+        state_dir = tmp_path / "projects" / "alpha"
+
+        def status(self) -> dict[str, object]:
+            return {"running": False, "apishim_running": False}
+
+    class FakeProfileRunner:
+        project_state = tmp_path / "projects" / "alpha"
+
+        def __init__(self, **kwargs: object) -> None:
+            self.ingress = kwargs["ingress"]
+
+        def load(self) -> SimpleNamespace:
+            return SimpleNamespace(ingress_urls={})
+
+        def status(self, *, refresh_ingress: bool = True) -> dict[str, object]:
+            assert refresh_ingress is True
+            route = self.ingress.sites_dir / "k1s-profile.caddy"
+            route.parent.mkdir(parents=True, exist_ok=True)
+            route.write_text("repaired route", encoding="utf-8")
+            return {
+                "ok": True,
+                "running": True,
+                "profile": {
+                    "profile": "k1s-dev-min-sqlite",
+                    "dashboard_url": "http://127.0.0.1:19608/dashboard",
+                    "ingress_urls": {
+                        "dashboard": "https://k1s.alpha.workerbee.localhost:19443/dashboard"
+                    },
+                },
+                "components": [{"role": "controller", "running": True}],
+            }
+
+    def fake_sync() -> dict[str, object]:
+        sync_calls.append(True)
+        return {"scheduled": False, "synced": True}
+
+    monkeypatch.setattr(daemon, "_project_ingress", lambda _name: ingress)
+    monkeypatch.setattr(daemon, "_build_supervisor", lambda _name, **_kwargs: FakeSupervisor())
+    monkeypatch.setattr(daemon, "_sync_ingress_projects_result", fake_sync)
+    monkeypatch.setattr("workerbee.daemon.K1sProfileRunner", FakeProfileRunner)
+
+    result = daemon.projects()
+    item = result["projects"][0]
+
+    assert sync_calls == [True]
+    assert result["ingress_sync"] == {"scheduled": False, "synced": True, "needed": True}
+    assert item["dashboard_url"] == "https://k1s.alpha.workerbee.localhost:19443/dashboard"
+    assert item["profile_status"]["ingress_refresh"]["repaired"] is True
+    assert item["profile_status"]["ingress_refresh"]["sync_needed"] is True
+
+
+def test_projects_hide_profile_dashboard_when_ingress_unavailable(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="containerd")
+    daemon._register_project("alpha", cwd_hint="/var/lib/workerbee/alpha")  # noqa: SLF001
+
+    class FakeSupervisor:
+        state_dir = tmp_path / "projects" / "alpha"
+
+        def status(self) -> dict[str, object]:
+            return {"running": False, "apishim_running": False}
+
+    class FakeProfileRunner:
+        project_state = tmp_path / "projects" / "alpha"
+
+        def __init__(self, **kwargs: object) -> None:
+            self.kwargs = kwargs
+
+        def status(self, *, refresh_ingress: bool = True) -> dict[str, object]:
+            assert refresh_ingress is False
+            return {
+                "ok": True,
+                "running": True,
+                "profile": {
+                    "profile": "k1s-dev-min-sqlite",
+                    "dashboard_url": "http://127.0.0.1:19608/dashboard",
+                    "ingress_urls": {},
+                },
+                "components": [{"role": "controller", "running": True}],
+            }
+
+    monkeypatch.setattr(daemon, "_project_ingress", lambda _name: None)
+    monkeypatch.setattr(daemon, "_build_supervisor", lambda _name, **_kwargs: FakeSupervisor())
+    monkeypatch.setattr("workerbee.daemon.K1sProfileRunner", FakeProfileRunner)
+
+    item = daemon.projects()["projects"][0]
+
+    assert item["running"] is True
+    assert item["dashboard_url"] is None
+    assert item["profile_dashboard_url"] is None
+    assert item["profile_status"]["ingress_refresh"]["attempted"] is False
+    assert item["profile_status"]["ingress_refresh"]["reason"] == "global ingress unavailable"
 
 
 def test_dashboard_action_rejects_missing_or_wrong_token(tmp_path: Path) -> None:
@@ -327,6 +557,23 @@ def test_global_dashboard_healthz_is_lightweight(tmp_path: Path) -> None:
     assert result.json()["state_root"] == str(tmp_path.resolve())
 
 
+def test_global_dashboard_status_alias_returns_project_json(tmp_path: Path) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
+    port = daemon._start_dashboard_server()  # noqa: SLF001
+    try:
+        result = request(f"http://127.0.0.1:{port}/api/status", timeout=2.0)
+    finally:
+        assert daemon._dashboard is not None  # noqa: SLF001
+        daemon._dashboard.shutdown()  # noqa: SLF001
+        daemon._dashboard.server_close()  # noqa: SLF001
+
+    assert result.status == 200
+    payload = result.json()
+    assert payload["state_root"] == str(tmp_path.resolve())
+    assert payload["projects"] == []
+    assert "updated_at" in payload
+
+
 def test_global_dashboard_static_background_asset_is_packaged() -> None:
     asset = _dashboard_static_asset(DASHBOARD_BACKGROUND_PATH)
 
@@ -392,6 +639,44 @@ def test_global_ingress_containerd_writes_host_network_https_port(tmp_path: Path
 
     assert "https_port 19443" in text
     assert "default_bind 127.0.0.1" in text
+
+
+def test_global_ingress_readiness_uses_local_backend_and_tcp(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="containerd",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    http_calls: list[tuple[str, dict[str, object]]] = []
+    tcp_calls: list[tuple[str, int, dict[str, object]]] = []
+
+    def fake_wait_for_http(url: str, **kwargs: object) -> None:
+        http_calls.append((url, kwargs))
+
+    def fake_wait_for_tcp(host: str, port: int, **kwargs: object) -> None:
+        tcp_calls.append((host, port, kwargs))
+
+    monkeypatch.setattr("workerbee.ingress.wait_for_http", fake_wait_for_http)
+    monkeypatch.setattr("workerbee.ingress._wait_for_tcp", fake_wait_for_tcp)
+
+    ingress._wait_ready()  # noqa: SLF001
+
+    assert http_calls == [
+        (
+            "http://127.0.0.1:18090/healthz",
+            {
+                "timeout_seconds": 10,
+                "interval_seconds": 0.2,
+                "verify_tls": False,
+                "ok_statuses": {200},
+            },
+        )
+    ]
+    assert tcp_calls == [("127.0.0.1", 19443, {"timeout_seconds": 20})]
 
 
 def test_global_ingress_uses_exported_ca_bundle_path(tmp_path: Path) -> None:
@@ -471,6 +756,48 @@ def test_global_ingress_status_marks_missing_container_stale(
     assert status["running"] is False
     assert status["stale"] is True
     assert status["dashboard_url"] == "https://dashboard.workerbee.localhost:19443/"
+
+
+def test_global_ingress_status_uses_https_health_when_runtime_probe_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    ca = global_dir / "caddy-local-root.crt"
+    ca.write_text("cert", encoding="utf-8")
+    (global_dir / "ingress.json").write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "runtime": "podman",
+                "caddy_container": "workerbee-caddy-test",
+                "dashboard_url": "https://dashboard.workerbee.localhost:19443/",
+                "https_port": 19443,
+                "dashboard_port": 18090,
+                "ca_bundle": str(ca),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_run(_cmd: list[str], **_kwargs):
+        raise BlockingIOError("helper busy")
+
+    def fake_request(url: str, **_kwargs):
+        assert url == "https://dashboard.workerbee.localhost:19443/healthz"
+        return SimpleNamespace(status=200)
+
+    monkeypatch.setattr("workerbee.ingress.subprocess.run", fail_run)
+    monkeypatch.setattr("workerbee.ingress.request", fake_request)
+
+    status = global_ingress_status(tmp_path)
+
+    assert status["running"] is True
+    assert status["stale"] is False
+    assert status["runtime_running"] is False
+    assert status["https_running"] is True
+    assert status["probe_error"] == "helper busy"
 
 
 def test_global_ingress_status_reports_running_container(

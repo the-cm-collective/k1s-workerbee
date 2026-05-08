@@ -380,13 +380,15 @@ class WorkerBeeDaemon:
         if self.projects_dir.is_dir():
             project_names.update(path.name for path in self.projects_dir.iterdir() if path.is_dir())
         items: list[dict[str, Any]] = []
+        profile_ingress_sync_needed = False
         for name in sorted(project_names):
             record = records.get(name) or {}
             state_dir = record.get("state_dir") or str(
                 daemon_project_state_dir(name, state_root=self.state_root)
             )
+            project_ingress = self._project_ingress(name)
             try:
-                sup = self._build_supervisor(name, ingress=self._project_ingress(name))
+                sup = self._build_supervisor(name, ingress=project_ingress)
                 state_dir = str(sup.state_dir)
                 status = sup.status()
             except Exception as exc:  # noqa: BLE001 - dashboard must stay renderable
@@ -395,7 +397,37 @@ class WorkerBeeDaemon:
                     "apishim_running": False,
                     "error": str(exc),
                 }
+            profile_status = self._project_profile_status(name, ingress=project_ingress)
+            ingress_refresh = (
+                profile_status.get("ingress_refresh")
+                if isinstance(profile_status.get("ingress_refresh"), dict)
+                else {}
+            )
+            if ingress_refresh.get("sync_needed"):
+                profile_ingress_sync_needed = True
             stack = status.get("stack") if isinstance(status, dict) else None
+            profile = (
+                profile_status.get("profile")
+                if isinstance(profile_status.get("profile"), dict)
+                else None
+            )
+            profile_urls = (
+                profile.get("ingress_urls")
+                if isinstance(profile, dict) and isinstance(profile.get("ingress_urls"), dict)
+                else {}
+            )
+            profile_dashboard_url = None
+            if isinstance(profile, dict) and profile_urls.get("dashboard"):
+                profile_dashboard_url = str(profile_urls["dashboard"])
+            stack_dashboard_url = (stack or {}).get("dashboard_url") if stack else None
+            stack_running = bool(status.get("running"))
+            profile_running = bool(profile_status.get("running"))
+            running = stack_running or profile_running
+            status_kind = _project_status_kind(
+                stack_running=stack_running,
+                profile_running=profile_running,
+            )
+            error = status.get("error") or profile_status.get("error")
             items.append(
                 {
                     "project": name,
@@ -407,17 +439,31 @@ class WorkerBeeDaemon:
                     "created_at": record.get("created_at"),
                     "last_seen_at": record.get("last_seen_at"),
                     "mode": _safe_project_mode(record.get("mode")),
-                    "running": bool(status.get("running")),
+                    "running": running,
+                    "stack_running": stack_running,
+                    "profile_running": profile_running,
+                    "status_kind": status_kind,
                     "apishim_running": bool(status.get("apishim_running")),
-                    "dashboard_url": (stack or {}).get("dashboard_url") if stack else None,
+                    "dashboard_url": profile_dashboard_url or stack_dashboard_url,
+                    "stack_dashboard_url": stack_dashboard_url,
+                    "profile_dashboard_url": profile_dashboard_url,
+                    "profile_name": profile.get("profile") if isinstance(profile, dict) else None,
+                    "profile_urls": profile_urls,
+                    "profile": profile,
+                    "profile_status": profile_status,
                     "ingress": (stack or {}).get("ingress") if stack else None,
-                    "error": status.get("error"),
+                    "error": error,
                 }
             )
+        ingress_sync = {"needed": False, "synced": False}
+        if profile_ingress_sync_needed:
+            ingress_sync = {**self._sync_ingress_projects_result(), "needed": True}
         return {
             "state_root": str(self.state_root),
             "global_dashboard": self.global_dashboard(),
             "projects": items,
+            "ingress_sync": ingress_sync,
+            "updated_at": time.time(),
         }
 
     def project_status(self, project: str) -> dict[str, Any]:
@@ -1034,6 +1080,85 @@ class WorkerBeeDaemon:
             ingress=self._project_ingress(project),
         )
 
+    def _project_profile_status(
+        self,
+        project: str,
+        *,
+        ingress: ProjectIngressConfig | None = None,
+    ) -> dict[str, Any]:
+        runner = K1sProfileRunner(
+            project=project,
+            state_root=self.state_root,
+            runtime=self.runtime_requested,
+            cwd=self._project_cwd(project),
+            k1s_root=None,
+            ingress=ingress,
+        )
+        refresh_ingress = ingress is not None
+        site_path = ingress.sites_dir / "k1s-profile.caddy" if ingress is not None else None
+        before_site_text = _read_optional_text(site_path)
+        before_dashboard_url = None
+        load = getattr(runner, "load", None)
+        if callable(load):
+            try:
+                info = load()
+                urls = getattr(info, "ingress_urls", None)
+                if isinstance(urls, dict) and urls.get("dashboard"):
+                    before_dashboard_url = str(urls["dashboard"])
+            except Exception:
+                before_dashboard_url = None
+        try:
+            result = dict(runner.status(refresh_ingress=refresh_ingress))
+            result["ingress_refresh"] = _profile_ingress_refresh_metadata(
+                refresh_ingress=refresh_ingress,
+                running=bool(result.get("running")),
+                before_dashboard_url=before_dashboard_url,
+                before_site_text=before_site_text,
+                after_site_text=_read_optional_text(site_path),
+                site_path=site_path,
+                profile=result.get("profile"),
+            )
+            return result
+        except WorkerBeeError as exc:
+            return {
+                "ok": False,
+                "running": False,
+                "project": project,
+                "state_root": str(self.state_root),
+                "state_dir": str(runner.project_state),
+                "error": exc.message,
+                "code": exc.code,
+                "ingress_refresh": _profile_ingress_refresh_metadata(
+                    refresh_ingress=refresh_ingress,
+                    running=False,
+                    before_dashboard_url=before_dashboard_url,
+                    before_site_text=before_site_text,
+                    after_site_text=_read_optional_text(site_path),
+                    site_path=site_path,
+                    profile=None,
+                    error=exc.message,
+                ),
+            }
+        except Exception as exc:  # noqa: BLE001 - dashboard status must be best-effort
+            return {
+                "ok": False,
+                "running": False,
+                "project": project,
+                "state_root": str(self.state_root),
+                "state_dir": str(runner.project_state),
+                "error": str(exc),
+                "ingress_refresh": _profile_ingress_refresh_metadata(
+                    refresh_ingress=refresh_ingress,
+                    running=False,
+                    before_dashboard_url=before_dashboard_url,
+                    before_site_text=before_site_text,
+                    after_site_text=_read_optional_text(site_path),
+                    site_path=site_path,
+                    profile=None,
+                    error=str(exc),
+                ),
+            }
+
     def _known_projects(self) -> list[str]:
         project_names = set(self._read_registry())
         if self.projects_dir.is_dir():
@@ -1192,7 +1317,7 @@ class WorkerBeeDaemon:
                         },
                     )
                     return
-                if path.startswith("/api/projects"):
+                if path.startswith("/api/projects") or path.startswith("/api/status"):
                     _send_json(self, daemon.projects())
                     return
                 if path.startswith("/static/"):
@@ -1441,6 +1566,16 @@ def _dashboard_url(status: dict[str, Any]) -> str | None:
     return str(raw) if raw else None
 
 
+def _project_status_kind(*, stack_running: bool, profile_running: bool) -> str:
+    if stack_running and profile_running:
+        return "stack+profile"
+    if profile_running:
+        return "profile"
+    if stack_running:
+        return "stack"
+    return "stopped"
+
+
 def _stack_started_event(*, project: str, info: Any, reason: str) -> dict[str, Any]:
     return {
         "type": "project_stack_started",
@@ -1472,6 +1607,68 @@ def _safe_project_mode(raw: object) -> str:
         return DEFAULT_PROJECT_MODE
 
 
+def _read_optional_text(path: Path | None) -> str | None:
+    if path is None or not path.is_file():
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _profile_ingress_refresh_metadata(
+    *,
+    refresh_ingress: bool,
+    running: bool,
+    before_dashboard_url: str | None,
+    before_site_text: str | None,
+    after_site_text: str | None,
+    site_path: Path | None,
+    profile: object,
+    error: str | None = None,
+) -> dict[str, Any]:
+    profile_data = profile if isinstance(profile, dict) else {}
+    profile_urls = (
+        profile_data.get("ingress_urls")
+        if isinstance(profile_data.get("ingress_urls"), dict)
+        else {}
+    )
+    dashboard_url = str(profile_urls.get("dashboard")) if profile_urls.get("dashboard") else None
+    missing_before = running and (not before_dashboard_url or before_site_text is None)
+    changed = running and before_site_text is not None and after_site_text is not None and (
+        before_site_text != after_site_text
+    )
+    repaired = bool(
+        refresh_ingress
+        and dashboard_url
+        and after_site_text
+        and (missing_before or changed)
+    )
+    if error:
+        reason = error
+    elif not refresh_ingress:
+        reason = "global ingress unavailable"
+    elif not running:
+        reason = "profile not running"
+    elif repaired:
+        reason = "profile ingress route repaired"
+    else:
+        reason = "profile ingress current"
+    return {
+        "attempted": refresh_ingress,
+        "active": refresh_ingress,
+        "running": running,
+        "site": str(site_path) if site_path is not None else None,
+        "site_existed_before": before_site_text is not None,
+        "site_exists": after_site_text is not None,
+        "before_dashboard_url": before_dashboard_url,
+        "dashboard_url": dashboard_url,
+        "repaired": repaired,
+        "sync_needed": repaired,
+        "reason": reason,
+    }
+
+
 def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str:
     projects = payload.get("projects") if isinstance(payload.get("projects"), list) else []
     rows = []
@@ -1494,12 +1691,12 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             f"<td>{_link(ingress.get('global_dashboard_url'))}</td>"
             f"<td>{_esc(item.get('error'))}</td>"
             f"<td>{_esc(item.get('state_dir'))}</td>"
-            '<td class="row-actions">'
+            '<td class="row-actions"><div class="row-actions-inner">'
             f'<button data-action="start_projects" data-project="{project}">Start</button>'
             f'<button data-action="stop_projects" data-project="{project}">Stop</button>'
             f'<button class="danger" data-action="delete_projects" '
             f'data-project="{project}">Delete</button>'
-            "</td>"
+            "</div></td>"
             "</tr>"
         )
     if not rows:
@@ -1648,6 +1845,15 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
       }}
       button:hover {{ border-color: var(--k1s-brand-gold); color: #ffe082; }}
       button.danger:hover {{ border-color: rgba(244, 67, 54, .7); color: #ffcdd2; }}
+      select {{
+        border: 1px solid var(--panel-edge);
+        border-radius: 6px;
+        padding: 3px 6px;
+        font: inherit;
+        font-size: 12px;
+        color: var(--text);
+        background: rgba(7, 10, 14, .72);
+      }}
       input[type="checkbox"] {{ accent-color: var(--k1s-brand-gold); }}
       .actions {{
         display: flex;
@@ -1655,7 +1861,15 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         gap: 8px;
         align-items: center;
       }}
-      .row-actions {{ display: flex; gap: 6px; white-space: nowrap; }}
+      .refresh-controls {{
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }}
+      .row-actions {{ white-space: nowrap; }}
+      .row-actions-inner {{ display: inline-flex; gap: 6px; align-items: center; }}
       #action-result {{ margin-top: 10px; white-space: pre-wrap; }}
       .pill {{
         display: inline-flex;
@@ -1669,6 +1883,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
       }}
       .pill.ok {{ border-color: rgba(76, 175, 80, .55); color: #b9f6ca; }}
       .pill.idle {{ border-color: rgba(251, 192, 45, .45); color: #ffe082; }}
+      .pill.warn {{ border-color: rgba(255, 152, 0, .6); color: #ffd180; }}
       .muted {{ color: var(--muted); }}
       @media (max-width: 720px) {{
         header {{ align-items: flex-start; flex-direction: column; }}
@@ -1702,6 +1917,17 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
           <button id="mcp-shutdown" class="danger" data-action="mcp_shutdown">
             Shutdown MCP
           </button>
+          <label class="refresh-controls">
+            Refresh
+            <select id="refresh-interval" aria-label="Refresh interval">
+              <option value="0">Off</option>
+              <option value="2000">2s</option>
+              <option value="5000" selected>5s</option>
+              <option value="10000">10s</option>
+              <option value="30000">30s</option>
+            </select>
+          </label>
+          <span id="refresh-status" class="muted">not refreshed</span>
         </div>
         <pre id="action-result" hidden></pre>
       </section>
@@ -1715,23 +1941,134 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
                 <th>k1s Dashboard</th><th>Global</th><th>Error</th><th>State</th><th>Actions</th>
               </tr>
             </thead>
-            <tbody>{''.join(rows)}</tbody>
+            <tbody id="projects-body">{''.join(rows)}</tbody>
           </table>
         </div>
       </section>
       <section class="card">
         <h2>Ingress</h2>
-        <pre>{_esc(ingress_json)}</pre>
+        <pre id="ingress-json">{_esc(ingress_json)}</pre>
       </section>
     </main>
     <script>
       const token = document.querySelector('meta[name="workerbee-action-token"]').content;
       const resultBox = document.getElementById('action-result');
+      const projectsBody = document.getElementById('projects-body');
+      const ingressBox = document.getElementById('ingress-json');
+      const refreshSelect = document.getElementById('refresh-interval');
+      const refreshStatus = document.getElementById('refresh-status');
+      const refreshKey = 'workerbee.dashboard.refreshIntervalMs';
+      let refreshTimer = null;
+
+      function escapeHtml(value) {{
+        return String(value ?? '')
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;')
+          .replace(/'/g, '&#39;');
+      }}
+
+      function link(url) {{
+        if (!url) return '<span class="muted">-</span>';
+        const safe = escapeHtml(url);
+        return `<a href="${{safe}}" target="_blank" rel="noreferrer">${{safe}}</a>`;
+      }}
+
+      function statusLabel(item) {{
+        const mode = item.mode || 'lazy';
+        const kind = item.status_kind || (item.running ? 'running' : 'stopped');
+        const readable = String(kind).replace('+', ' + ');
+        return `${{mode}} / ${{readable}}`;
+      }}
+
+      function statusClass(item) {{
+        if (item.error) return 'warn';
+        return item.running ? 'ok' : 'idle';
+      }}
+
+      function selectedSet() {{
+        return new Set(selectedProjects());
+      }}
 
       function selectedProjects() {{
         return Array.from(document.querySelectorAll('.project-select:checked'))
           .map((item) => item.value)
           .filter(Boolean);
+      }}
+
+      function renderProjects(projects) {{
+        const selected = selectedSet();
+        if (!Array.isArray(projects) || !projects.length) {{
+          projectsBody.innerHTML =
+            '<tr><td class="muted" colspan="9">No WorkerBee projects registered.</td></tr>';
+          return;
+        }}
+        projectsBody.innerHTML = projects.map((item) => {{
+          const project = String(item.project || '');
+          const safeProject = escapeHtml(project);
+          const checked = selected.has(project) ? ' checked' : '';
+          const ingress = item.ingress || {{}};
+          const error = item.error || '';
+          return '<tr>'
+            + `<td><input type="checkbox" class="project-select" value="${{safeProject}}" `
+            + `aria-label="Select ${{safeProject}}"${{checked}}></td>`
+            + `<td>${{safeProject}}</td>`
+            + `<td><span class="pill ${{statusClass(item)}}">`
+            + `${{escapeHtml(statusLabel(item))}}</span></td>`
+            + `<td>${{escapeHtml(item.git_branch || '')}}</td>`
+            + `<td>${{link(item.dashboard_url)}}</td>`
+            + `<td>${{link(ingress.global_dashboard_url)}}</td>`
+            + `<td>${{escapeHtml(error)}}</td>`
+            + `<td>${{escapeHtml(item.state_dir || '')}}</td>`
+            + '<td class="row-actions"><div class="row-actions-inner">'
+            + `<button data-action="start_projects" data-project="${{safeProject}}">Start</button>`
+            + `<button data-action="stop_projects" data-project="${{safeProject}}">Stop</button>`
+            + `<button class="danger" data-action="delete_projects" `
+            + `data-project="${{safeProject}}">Delete</button>`
+            + '</div></td>'
+            + '</tr>';
+        }}).join('');
+      }}
+
+      function renderDashboard(payload) {{
+        renderProjects(payload.projects || []);
+        ingressBox.textContent = JSON.stringify(payload.global_dashboard || {{}}, null, 2);
+        const stamp = payload.updated_at ? new Date(payload.updated_at * 1000) : new Date();
+        refreshStatus.textContent = `updated ${{stamp.toLocaleTimeString()}}`;
+      }}
+
+      async function refreshProjects(options = {{}}) {{
+        if (!options.silent) refreshStatus.textContent = 'refreshing...';
+        const response = await fetch('/api/projects', {{
+          headers: {{'Accept': 'application/json'}},
+          cache: 'no-store'
+        }});
+        if (!response.ok) throw new Error(`status ${{response.status}}`);
+        const payload = await response.json();
+        renderDashboard(payload);
+        return payload;
+      }}
+
+      function scheduleRefreshAttempt() {{
+        setTimeout(() => refreshProjects({{silent: true}}).catch(() => {{}}), 1000);
+        setTimeout(() => refreshProjects({{silent: true}}).catch(() => {{}}), 3000);
+      }}
+
+      function configureRefreshTimer() {{
+        if (refreshTimer) {{
+          clearInterval(refreshTimer);
+          refreshTimer = null;
+        }}
+        const ms = parseInt(refreshSelect.value, 10) || 0;
+        localStorage.setItem(refreshKey, String(ms));
+        if (ms > 0) {{
+          refreshTimer = setInterval(() => {{
+            refreshProjects({{silent: true}}).catch((err) => {{
+              refreshStatus.textContent = `refresh failed: ${{err.message}}`;
+            }});
+          }}, ms);
+        }}
       }}
 
       function confirmation(action, projects) {{
@@ -1762,19 +2099,20 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
           const payload = await response.json();
           resultBox.textContent = JSON.stringify(payload, null, 2);
           if (payload.ok && !action.startsWith('mcp_')) {{
-            setTimeout(() => window.location.reload(), 750);
+            setTimeout(() => refreshProjects({{silent: true}}).catch(() => {{}}), 750);
           }}
         }} catch (err) {{
           resultBox.textContent = `${{action}} request was interrupted (${{err.message}}).`;
           if (!action.startsWith('mcp_')) {{
             resultBox.textContent += ' Refreshing to verify current state...';
-            setTimeout(() => window.location.reload(), 1000);
+            scheduleRefreshAttempt();
           }}
         }}
       }}
 
-      document.querySelectorAll('button[data-action]').forEach((button) => {{
-        button.addEventListener('click', () => {{
+      document.addEventListener('click', (event) => {{
+        const button = event.target.closest('button[data-action]');
+        if (!button) return;
           const action = button.dataset.action;
           const project = button.dataset.project;
           let projects = project ? [project] : [];
@@ -1790,7 +2128,18 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             }}
           }}
           postAction(action, projects);
+      }});
+
+      refreshSelect.value = localStorage.getItem(refreshKey) || refreshSelect.value || '5000';
+      refreshSelect.addEventListener('change', () => {{
+        configureRefreshTimer();
+        refreshProjects({{silent: false}}).catch((err) => {{
+          refreshStatus.textContent = `refresh failed: ${{err.message}}`;
         }});
+      }});
+      configureRefreshTimer();
+      refreshProjects({{silent: true}}).catch((err) => {{
+        refreshStatus.textContent = `refresh failed: ${{err.message}}`;
       }});
     </script>
   </body>

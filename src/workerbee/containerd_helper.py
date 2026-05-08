@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
 import hashlib
 import json
 import os
@@ -13,6 +14,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -405,7 +407,7 @@ def helper_request(
     data = json.dumps(request_payload).encode("utf-8") + b"\n"
     with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
         sock.settimeout(timeout)
-        sock.connect(str(socket_path))
+        _connect_helper_socket(sock, socket_path, timeout=timeout)
         sock.sendall(data)
         sock.shutdown(socket.SHUT_WR)
         chunks = []
@@ -416,6 +418,26 @@ def helper_request(
             chunks.append(chunk)
     raw = b"".join(chunks).decode("utf-8")
     return json.loads(raw) if raw.strip() else {}
+
+
+def _connect_helper_socket(sock: socket.socket, socket_path: Path, *, timeout: float) -> None:
+    deadline = time.monotonic() + max(0.1, timeout)
+    retry_errnos = {
+        errno.EAGAIN,
+        errno.EWOULDBLOCK,
+        errno.ECONNREFUSED,
+        errno.ENOENT,
+    }
+    while True:
+        remaining = max(0.1, deadline - time.monotonic())
+        sock.settimeout(remaining)
+        try:
+            sock.connect(str(socket_path))
+            return
+        except OSError as exc:
+            if exc.errno not in retry_errnos or time.monotonic() >= deadline:
+                raise
+            time.sleep(min(0.05, max(0.01, deadline - time.monotonic())))
 
 
 def validate_helper_argv(
@@ -505,11 +527,10 @@ def serve_helper(
     socket_path.parent.mkdir(parents=True, exist_ok=True)
     with suppress(FileNotFoundError):
         socket_path.unlink()
-    stop = False
+    stop = threading.Event()
 
     def handle_signal(_signum: int, _frame: object) -> None:
-        nonlocal stop
-        stop = True
+        stop.set()
 
     signal.signal(signal.SIGTERM, handle_signal)
     signal.signal(signal.SIGINT, handle_signal)
@@ -535,26 +556,36 @@ def serve_helper(
     }
     metadata_file.parent.mkdir(parents=True, exist_ok=True)
     metadata_file.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+
+    def handle_connection(conn: socket.socket) -> None:
+        with conn:
+            response = _handle_helper_connection(
+                conn,
+                state_root=root,
+                nerdctl=nerdctl,
+                address=address,
+            )
+            if response.pop("_shutdown", False):
+                stop.set()
+            _send_helper_response(conn, response)
+
     try:
-        while not stop:
+        while not stop.is_set():
             try:
                 conn, _addr = server.accept()
             except TimeoutError:
                 continue
             except OSError:
-                if stop:
+                if stop.is_set():
                     break
                 raise
-            with conn:
-                response = _handle_helper_connection(
-                    conn,
-                    state_root=root,
-                    nerdctl=nerdctl,
-                    address=address,
-                )
-                if response.pop("_shutdown", False):
-                    stop = True
-                _send_helper_response(conn, response)
+            thread = threading.Thread(
+                target=handle_connection,
+                args=(conn,),
+                name="workerbee-containerd-helper-request",
+                daemon=True,
+            )
+            thread.start()
     finally:
         server.close()
         with suppress(FileNotFoundError):

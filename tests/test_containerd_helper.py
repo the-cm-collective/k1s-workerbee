@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import hashlib
 import subprocess
 from pathlib import Path
@@ -118,6 +119,35 @@ def test_helper_response_ignores_broken_pipe() -> None:
             raise BrokenPipeError
 
     containerd_helper._send_helper_response(ClosedConnection(), {"ok": True})  # noqa: SLF001
+
+
+def test_helper_connect_retries_transient_busy_socket(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    attempts = 0
+    sleeps: list[float] = []
+
+    class FakeSocket:
+        def settimeout(self, _timeout: float) -> None:
+            return
+
+        def connect(self, _path: str) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise BlockingIOError(errno.EAGAIN, "temporarily unavailable")
+
+    monkeypatch.setattr(containerd_helper.time, "sleep", sleeps.append)
+
+    containerd_helper._connect_helper_socket(  # noqa: SLF001
+        FakeSocket(),
+        tmp_path / "containerd-helper.sock",
+        timeout=1.0,
+    )
+
+    assert attempts == 2
+    assert sleeps
 
 
 def test_ensure_containerd_helper_starts_single_background_sudo(

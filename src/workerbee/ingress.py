@@ -7,12 +7,14 @@ import json
 import os
 import socket
 import subprocess
+import time
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
-from workerbee.http import wait_for_http
+from workerbee.http import request, wait_for_http
 from workerbee.ports import choose_port
 from workerbee.runtime_support import (
     CONTAINERD_RUNTIME,
@@ -315,13 +317,15 @@ https://dashboard.workerbee.localhost {{
             raise RuntimeError(f"failed to start WorkerBee Caddy:\n{proc.stdout}")
 
     def _wait_ready(self) -> None:
-        wait_for_http(
-            self.dashboard_url,
-            timeout_seconds=20,
-            interval_seconds=0.5,
-            verify_tls=False,
-            ok_statuses={200},
-        )
+        if self.dashboard_port:
+            wait_for_http(
+                f"http://127.0.0.1:{self.dashboard_port}/healthz",
+                timeout_seconds=10,
+                interval_seconds=0.2,
+                verify_tls=False,
+                ok_statuses={200},
+            )
+        _wait_for_tcp("127.0.0.1", self.https_port, timeout_seconds=20)
 
     def _export_ca_bundle(self) -> None:
         proc = subprocess.run(
@@ -346,6 +350,19 @@ https://dashboard.workerbee.localhost {{
 
     def _container_running(self) -> bool:
         return _caddy_container_running(self.state_root, self.runtime, self.container)
+
+
+def _wait_for_tcp(host: str, port: int, *, timeout_seconds: float) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: OSError | None = None
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, int(port)), timeout=0.5):
+                return
+        except OSError as exc:
+            last_error = exc
+            time.sleep(0.2)
+    raise TimeoutError(f"{host}:{port} did not accept TCP connections: {last_error}")
 
 
 def load_global_ingress_info(state_root: Path) -> dict[str, Any] | None:
@@ -373,7 +390,7 @@ def global_ingress_status(state_root: Path, *, runtime: str = "auto") -> dict[st
     if not selected:
         selected = resolve_runtime(runtime)
     container = str(info.get("caddy_container") or "")
-    running = False
+    runtime_probe: dict[str, Any] = {"running": False, "skipped": not bool(container)}
     if container:
         if selected == CONTAINERD_RUNTIME:
             from workerbee.containerd_helper import (
@@ -384,19 +401,33 @@ def global_ingress_status(state_root: Path, *, runtime: str = "auto") -> dict[st
 
             privilege = containerd_privilege_status(state_root=root, runtime=selected)
             with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
-                running = _caddy_container_running(root, selected, container)
+                runtime_probe = _caddy_container_probe(root, selected, container)
         else:
-            running = _caddy_container_running(root, selected, container)
+            runtime_probe = _caddy_container_probe(root, selected, container)
+    health_probe = _global_dashboard_health_probe(info)
+    runtime_running = bool(runtime_probe.get("running"))
+    health_running = bool(health_probe.get("ok"))
+    running = runtime_running or health_running
+    probe_error = runtime_probe.get("error") if not runtime_running else None
     return {
         **info,
         "enabled": bool(running),
         "running": bool(running),
         "stale": not bool(running),
         "ca_ready": _safe_is_file(Path(str(info.get("ca_bundle") or ""))),
+        "runtime_running": runtime_running,
+        "https_running": health_running,
+        "runtime_probe": runtime_probe,
+        "health_probe": health_probe,
+        "probe_error": probe_error,
     }
 
 
 def _caddy_container_running(state_root: Path, runtime: str, container: str) -> bool:
+    return bool(_caddy_container_probe(state_root, runtime, container).get("running"))
+
+
+def _caddy_container_probe(state_root: Path, runtime: str, container: str) -> dict[str, Any]:
     try:
         proc = subprocess.run(
             runtime_command_args(
@@ -410,14 +441,36 @@ def _caddy_container_running(state_root: Path, runtime: str, container: str) -> 
             capture_output=True,
             timeout=10,
         )
-    except Exception:
-        return False
+    except Exception as exc:  # noqa: BLE001 - dashboard status should degrade, not crash
+        return {
+            "running": False,
+            "method": "id-filter",
+            "error": str(exc),
+        }
     if proc.returncode == 0 and bool(proc.stdout.strip()):
-        return True
-    return _caddy_container_name_running(state_root, runtime, container)
+        return {
+            "running": True,
+            "method": "id-filter",
+            "returncode": proc.returncode,
+        }
+    fallback = _caddy_container_name_probe(state_root, runtime, container)
+    if fallback.get("running"):
+        return fallback
+    error = fallback.get("error")
+    if proc.returncode != 0 and not error:
+        error = (proc.stderr or proc.stdout or "").strip() or f"runtime ps exited {proc.returncode}"
+    return {
+        **fallback,
+        "primary_returncode": proc.returncode,
+        "error": error,
+    }
 
 
 def _caddy_container_name_running(state_root: Path, runtime: str, container: str) -> bool:
+    return bool(_caddy_container_name_probe(state_root, runtime, container).get("running"))
+
+
+def _caddy_container_name_probe(state_root: Path, runtime: str, container: str) -> dict[str, Any]:
     try:
         proc = subprocess.run(
             runtime_command_args(
@@ -431,10 +484,55 @@ def _caddy_container_name_running(state_root: Path, runtime: str, container: str
             capture_output=True,
             timeout=10,
         )
-    except Exception:
-        return False
+    except Exception as exc:  # noqa: BLE001 - dashboard status should degrade, not crash
+        return {
+            "running": False,
+            "method": "name-filter",
+            "error": str(exc),
+        }
     names = {line.strip() for line in proc.stdout.splitlines() if line.strip()}
-    return proc.returncode == 0 and container in names
+    running = proc.returncode == 0 and container in names
+    return {
+        "running": running,
+        "method": "name-filter",
+        "returncode": proc.returncode,
+        "matched_names": sorted(names),
+        "error": None
+        if proc.returncode == 0
+        else (proc.stderr or proc.stdout or "").strip() or f"runtime ps exited {proc.returncode}",
+    }
+
+
+def _global_dashboard_health_probe(info: dict[str, Any]) -> dict[str, Any]:
+    raw_url = str(info.get("dashboard_url") or "").strip()
+    if not raw_url or not info.get("https_port"):
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "dashboard URL or HTTPS port is not recorded",
+        }
+    parsed = urlsplit(raw_url)
+    health_url = urlunsplit((parsed.scheme, parsed.netloc, "/healthz", "", ""))
+    ca_bundle = Path(str(info.get("ca_bundle") or ""))
+    ca_ready = _safe_is_file(ca_bundle)
+    try:
+        result = request(
+            health_url,
+            timeout=1.0,
+            ca_bundle=ca_bundle if ca_ready else None,
+            verify_tls=ca_ready,
+        )
+    except Exception as exc:  # noqa: BLE001 - status probe only
+        return {
+            "ok": False,
+            "url": health_url,
+            "error": str(exc),
+        }
+    return {
+        "ok": result.status == 200,
+        "url": health_url,
+        "status": result.status,
+    }
 
 
 def _container_name(state_root: Path) -> str:
