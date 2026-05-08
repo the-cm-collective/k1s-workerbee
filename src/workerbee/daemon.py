@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
 from pathlib import Path
 from typing import Any, TypeVar
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlsplit, urlunsplit
 
 from workerbee.agent import (
     DEFAULT_PROJECT_MODE,
@@ -31,7 +31,7 @@ from workerbee.agent import (
 )
 from workerbee.containerd_helper import containerd_privilege_status, containerd_privilege_summary
 from workerbee.contract import WorkerBeeError
-from workerbee.http import request
+from workerbee.http import request, request_https_via_loopback
 from workerbee.ingress import (
     GlobalIngress,
     GlobalIngressInfo,
@@ -602,6 +602,7 @@ class WorkerBeeDaemon:
                     namespace=name,
                     timeout=int(timeout),
                     sync_ingress=self._sync_ingress_projects_result,
+                    reset_existing=True,
                 )
                 status = runner.workload_status(profile=profile, namespace=name)
                 connection = runner.connection(profile=profile)
@@ -2232,13 +2233,45 @@ def _profile_control_plane_checks(connection: dict[str, Any]) -> list[dict[str, 
             results.append({"name": name, "ok": False, "error": "url missing"})
             continue
         try:
-            resp = request(str(url), token=str(token) if token else None, ca_bundle=ca_bundle)
+            resp = _request_profile_public_url(
+                str(url),
+                token=str(token) if token else None,
+                ca_bundle=ca_bundle,
+            )
             results.append(
                 {"name": name, "ok": resp.status == 200, "status": resp.status, "url": url}
             )
         except Exception as exc:  # noqa: BLE001
             results.append({"name": name, "ok": False, "url": url, "error": str(exc)})
     return results
+
+
+def _request_profile_public_url(
+    url: str,
+    *,
+    token: str | None,
+    ca_bundle: str,
+) -> Any:
+    parsed = urlsplit(url)
+    if parsed.scheme == "https" and parsed.hostname:
+        port = int(parsed.port or 443)
+        loopback_url = urlunsplit(
+            (
+                parsed.scheme,
+                f"127.0.0.1:{port}",
+                parsed.path or "/",
+                parsed.query,
+                "",
+            )
+        )
+        return request_https_via_loopback(
+            loopback_url,
+            server_hostname=parsed.hostname,
+            host_header=parsed.netloc,
+            token=token,
+            ca_bundle=ca_bundle,
+        )
+    return request(url, token=token, ca_bundle=ca_bundle)
 
 
 def _probe_with_retry(
@@ -2295,16 +2328,17 @@ def _websocket_probe_once(url: str, *, ca_bundle: str, expected: str) -> dict[st
         raise ValueError("websocket probe URL must use wss")
     host = parsed.hostname or ""
     port = int(parsed.port or 443)
+    host_header = parsed.netloc or f"{host}:{port}"
     path = parsed.path or "/"
     key = base64.b64encode(os.urandom(16)).decode("ascii")
     context = ssl.create_default_context(cafile=ca_bundle)
     with (
-        socket.create_connection((host, port), timeout=8) as raw,
+        socket.create_connection(("127.0.0.1", port), timeout=8) as raw,
         context.wrap_socket(raw, server_hostname=host) as sock,
     ):
         request_bytes = (
             f"GET {path} HTTP/1.1\r\n"
-            f"Host: {host}:{port}\r\n"
+            f"Host: {host_header}\r\n"
             "Upgrade: websocket\r\n"
             "Connection: Upgrade\r\n"
             f"Sec-WebSocket-Key: {key}\r\n"

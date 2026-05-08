@@ -15,6 +15,13 @@ Environment:
                                           (default: /tmp/workerbee-microk8s-nvidia-guard.env)
   WORKERBEE_MK8S_GUARD_OBSERVE_SECONDS   Idle checksum observation after apply
                                           (default: 10)
+  WORKERBEE_MK8S_GUARD_API_WAIT_SECONDS  Seconds to wait for MicroK8s API
+                                          readiness during rollback
+                                          (default: 90)
+  WORKERBEE_MK8S_GUARD_ROLLBACK_ATTEMPTS Rollback kubectl retry attempts
+                                          (default: 5)
+  WORKERBEE_MK8S_GUARD_ROLLBACK_SLEEP    Seconds between rollback retries
+                                          (default: 3)
 EOF
 }
 
@@ -33,6 +40,9 @@ esac
 
 state_file="${WORKERBEE_MK8S_GUARD_STATE:-/tmp/workerbee-microk8s-nvidia-guard.env}"
 observe_seconds="${WORKERBEE_MK8S_GUARD_OBSERVE_SECONDS:-10}"
+rollback_api_wait_seconds="${WORKERBEE_MK8S_GUARD_API_WAIT_SECONDS:-90}"
+rollback_attempts="${WORKERBEE_MK8S_GUARD_ROLLBACK_ATTEMPTS:-5}"
+rollback_sleep="${WORKERBEE_MK8S_GUARD_ROLLBACK_SLEEP:-3}"
 gpu_namespace="gpu-operator-resources"
 cluster_policy="cluster-policy"
 helm_release="gpu-operator"
@@ -67,6 +77,40 @@ microk8s_available() {
 
 microk8s_api_ready() {
   k --request-timeout=10s get nodes >/dev/null 2>&1
+}
+
+wait_microk8s_api_ready() {
+  local timeout="${1:-$rollback_api_wait_seconds}"
+  local deadline=$((SECONDS + timeout))
+  say "rollback: waiting up to ${timeout}s for MicroK8s API"
+  while true; do
+    if microk8s_api_ready; then
+      return 0
+    fi
+    if (( SECONDS >= deadline )); then
+      say "rollback: MicroK8s API did not become ready within ${timeout}s"
+      return 1
+    fi
+    say "rollback: MicroK8s API is not ready; retrying"
+    sleep "$rollback_sleep"
+  done
+}
+
+rollback_k() {
+  local attempt rc
+  for ((attempt = 1; attempt <= rollback_attempts; attempt++)); do
+    if k "$@" >/dev/null; then
+      return 0
+    fi
+    rc=$?
+    if (( attempt >= rollback_attempts )); then
+      say "rollback: kubectl failed after ${rollback_attempts} attempts: kubectl $*"
+      return "$rc"
+    fi
+    say "rollback: kubectl failed on attempt ${attempt}/${rollback_attempts}; waiting for MicroK8s API"
+    wait_microk8s_api_ready || true
+    sleep "$rollback_sleep"
+  done
 }
 
 namespace_exists() {
@@ -432,25 +476,29 @@ rollback_guard() {
     say "rollback: state file does not indicate an applied guard; nothing to do"
     exit 0
   fi
-  if ! microk8s_available || ! microk8s_api_ready; then
+  if ! microk8s_available; then
+    say "error: MicroK8s is unavailable; cannot rollback guard"
+    exit 1
+  fi
+  if ! wait_microk8s_api_ready; then
     say "error: MicroK8s is unavailable; cannot rollback guard"
     exit 1
   fi
 
   if [[ "${TOOLKIT_WAS_ENABLED:-false}" == "true" ]]; then
     say "rollback: re-enabling NVIDIA toolkit"
-    k patch clusterpolicy "$cluster_policy" \
+    rollback_k patch clusterpolicy "$cluster_policy" \
       --type merge \
-      -p '{"spec":{"toolkit":{"enabled":true}}}' >/dev/null
+      -p '{"spec":{"toolkit":{"enabled":true}}}'
   else
     say "rollback: toolkit was not enabled before guard; leaving disabled"
   fi
 
   if [[ "${HELMRELEASE_PRESENT:-0}" == "1" && "${HELMRELEASE_WAS_SUSPENDED:-false}" != "true" ]]; then
     say "rollback: resuming HelmRelease/$helm_release"
-    k -n "$gpu_namespace" patch helmrelease "$helm_release" \
+    rollback_k -n "$gpu_namespace" patch helmrelease "$helm_release" \
       --type merge \
-      -p '{"spec":{"suspend":false}}' >/dev/null
+      -p '{"spec":{"suspend":false}}'
   else
     say "rollback: HelmRelease was absent or already suspended before guard; leaving as-is"
   fi
@@ -466,18 +514,18 @@ rollback_guard() {
       name="${ns_name#*/}"
       if [[ "$was_suspended" != "true" ]]; then
         say "rollback: resuming Kustomization/$name in $namespace"
-        k -n "$namespace" patch kustomization "$name" \
+        rollback_k -n "$namespace" patch kustomization "$name" \
           --type merge \
-          -p '{"spec":{"suspend":false}}' >/dev/null
+          -p '{"spec":{"suspend":false}}'
       else
         say "rollback: Kustomization/$name in $namespace was already suspended before guard; leaving as-is"
       fi
     done
   elif [[ "${KUSTOMIZATION_PRESENT:-0}" == "1" && "${KUSTOMIZATION_WAS_SUSPENDED:-false}" != "true" ]]; then
     say "rollback: resuming Kustomization/${KUSTOMIZATION_NAME:-} in ${KUSTOMIZATION_NAMESPACE:-flux-system}"
-    k -n "${KUSTOMIZATION_NAMESPACE:-flux-system}" patch kustomization "${KUSTOMIZATION_NAME:-}" \
+    rollback_k -n "${KUSTOMIZATION_NAMESPACE:-flux-system}" patch kustomization "${KUSTOMIZATION_NAME:-}" \
       --type merge \
-      -p '{"spec":{"suspend":false}}' >/dev/null
+      -p '{"spec":{"suspend":false}}'
   fi
 
   validate_microk8s_health 90 || true

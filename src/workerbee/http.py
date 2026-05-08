@@ -80,15 +80,32 @@ def request_https_via_loopback(
     *,
     server_hostname: str,
     host_header: str,
+    method: str = "GET",
+    token: str | None = None,
+    headers: dict[str, str] | None = None,
+    data: bytes | None = None,
     timeout: float = 5.0,
     verify_tls: bool = True,
     ca_bundle: str | Path | None = None,
 ) -> HTTPResult:
+    method = method.upper()
+    if method not in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"}:
+        raise ValueError(
+            "loopback HTTPS probe method must be GET, HEAD, POST, PUT, PATCH, or DELETE"
+        )
     parsed = urlsplit(url)
     if parsed.scheme != "https":
         raise ValueError("loopback HTTPS probe requires an https:// URL")
     if "\r" in host_header or "\n" in host_header:
         raise ValueError("invalid Host header")
+    request_headers: dict[str, str] = dict(headers or {})
+    if token:
+        request_headers["Authorization"] = f"Bearer {token}"
+    for key, value in request_headers.items():
+        if "\r" in key or "\n" in key or "\r" in value or "\n" in value:
+            raise ValueError("invalid HTTP header")
+    if data is not None and not any(key.lower() == "content-length" for key in request_headers):
+        request_headers["Content-Length"] = str(len(data))
     port = int(parsed.port or 443)
     target = urlunsplit(("", "", parsed.path or "/", parsed.query, ""))
     context = (
@@ -103,15 +120,19 @@ def request_https_via_loopback(
         context.wrap_socket(raw_sock, server_hostname=server_hostname) as sock,
     ):
         sock.settimeout(timeout)
+        header_lines = "".join(f"{key}: {value}\r\n" for key, value in request_headers.items())
         payload = (
-            f"GET {target} HTTP/1.1\r\n"
+            f"{method} {target} HTTP/1.1\r\n"
             f"Host: {host_header}\r\n"
+            f"{header_lines}"
             "User-Agent: workerbee-local-probe\r\n"
             "Accept: application/json\r\n"
             "Connection: close\r\n"
             "\r\n"
         ).encode("ascii")
         sock.sendall(payload)
+        if data:
+            sock.sendall(data)
         raw = _read_all(sock)
     head, _, body = raw.partition(b"\r\n\r\n")
     lines = head.split(b"\r\n")

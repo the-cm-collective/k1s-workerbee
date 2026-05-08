@@ -9,9 +9,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse, urlunsplit
 
 from workerbee.contract import WorkerBeeError
+from workerbee.http import request_https_via_loopback
 from workerbee.supervisor import project_slug
 
 BODY_EXCERPT_LIMIT = 4096
@@ -74,7 +75,7 @@ def probe_workerbee_url(
             message="ingress probe request bodies are not supported for GET or HEAD",
             details={"method": method},
         )
-    _validate_workerbee_url(project=project, ingress_info=ingress_info, url=url)
+    parsed = _validate_workerbee_url(project=project, ingress_info=ingress_info, url=url)
     ca_bundle = Path(str(ingress_info.get("ca_bundle") or "")).expanduser()
     if not ca_bundle.is_file():
         raise WorkerBeeError(
@@ -94,31 +95,49 @@ def probe_workerbee_url(
     elif body is not None:
         data = body.encode("utf-8")
         _set_default_header(request_headers, "Content-Type", "text/plain; charset=utf-8")
-    request = urllib.request.Request(  # noqa: S310 - restricted localhost URL
-        url,
-        data=data,
-        headers=request_headers,
-        method=method,
-    )
-    context = ssl.create_default_context(cafile=str(ca_bundle))
     started = time.monotonic()
+    probe_method = "direct"
+    connect_url = url
+    primary_error: str | None = None
     try:
-        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:  # noqa: S310
-            status = int(response.status)
-            response_body = b"" if method == "HEAD" else response.read()
-            headers = {str(k): str(v) for k, v in response.headers.items()}
-    except urllib.error.HTTPError as exc:
-        status = int(exc.code)
-        response_body = b"" if method == "HEAD" else exc.read()
-        headers = {str(k): str(v) for k, v in exc.headers.items()}
+        status, response_body, response_headers = _request_direct(
+            url=url,
+            method=method,
+            data=data,
+            headers=request_headers,
+            ca_bundle=ca_bundle,
+            timeout=timeout,
+        )
     except OSError as exc:
-        raise WorkerBeeError(
-            code="PROBE_FAILED",
-            message=str(exc),
-            details={"url": url},
-            retryable=True,
-            remediation="Check WorkerBee project status, ingress routes, and Caddy health.",
-        ) from exc
+        primary_error = str(exc)
+        probe_method = "loopback-host-header"
+        connect_url = _loopback_url(parsed)
+        try:
+            result = request_https_via_loopback(
+                connect_url,
+                server_hostname=parsed.hostname or "",
+                host_header=parsed.netloc,
+                method=method,
+                data=data,
+                headers=request_headers,
+                timeout=timeout,
+                ca_bundle=ca_bundle,
+            )
+        except OSError as loopback_exc:
+            raise WorkerBeeError(
+                code="PROBE_FAILED",
+                message=str(loopback_exc),
+                details={
+                    "url": url,
+                    "connect_url": connect_url,
+                    "primary_error": primary_error,
+                },
+                retryable=True,
+                remediation="Check WorkerBee project status, ingress routes, and Caddy health.",
+            ) from loopback_exc
+        status = result.status
+        response_body = b"" if method == "HEAD" else result.body
+        response_headers = result.headers
     elapsed_ms = int((time.monotonic() - started) * 1000)
     text = response_body.decode("utf-8", errors="replace")
     status_matches = expected_status is None or status == expected_status
@@ -127,6 +146,8 @@ def probe_workerbee_url(
         "ok": status_matches and body_matches,
         "url": url,
         "method": method,
+        "probe_method": probe_method,
+        "connect_url": connect_url,
         "status": status,
         "expected_status": expected_status,
         "status_matches": status_matches,
@@ -134,13 +155,47 @@ def probe_workerbee_url(
         "body_matches": body_matches,
         "elapsed_ms": elapsed_ms,
         "tls_verified": True,
-        "headers": _selected_headers(headers),
+        "headers": _selected_headers(response_headers),
         "body_excerpt": text[:BODY_EXCERPT_LIMIT],
         "body_truncated": len(text) > BODY_EXCERPT_LIMIT,
+        **({"primary_error": primary_error} if primary_error else {}),
     }
 
 
-def _validate_workerbee_url(*, project: str, ingress_info: dict[str, Any], url: str) -> None:
+def _request_direct(
+    *,
+    url: str,
+    method: str,
+    data: bytes | None,
+    headers: dict[str, str],
+    ca_bundle: Path,
+    timeout: float,
+) -> tuple[int, bytes, dict[str, str]]:
+    request = urllib.request.Request(  # noqa: S310 - restricted localhost URL
+        url,
+        data=data,
+        headers=headers,
+        method=method,
+    )
+    context = ssl.create_default_context(cafile=str(ca_bundle))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:  # noqa: S310
+            status = int(response.status)
+            body = b"" if method == "HEAD" else response.read()
+            headers = {str(k): str(v) for k, v in response.headers.items()}
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        body = b"" if method == "HEAD" else exc.read()
+        headers = {str(k): str(v) for k, v in exc.headers.items()}
+    return status, body, headers
+
+
+def _validate_workerbee_url(
+    *,
+    project: str,
+    ingress_info: dict[str, Any],
+    url: str,
+) -> ParseResult:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower()
     if parsed.scheme != "https":
@@ -168,6 +223,19 @@ def _validate_workerbee_url(*, project: str, ingress_info: dict[str, Any], url: 
             message="WorkerBee ingress probe is restricted to WorkerBee-managed localhost hosts",
             details={"url": url, "project": project},
         )
+    return parsed
+
+
+def _loopback_url(parsed: ParseResult) -> str:
+    return urlunsplit(
+        (
+            parsed.scheme,
+            f"127.0.0.1:{parsed.port or 443}",
+            parsed.path or "/",
+            parsed.query,
+            "",
+        )
+    )
 
 
 def _https_port(ingress_info: dict[str, Any]) -> int:

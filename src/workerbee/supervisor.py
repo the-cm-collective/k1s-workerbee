@@ -533,6 +533,16 @@ class WorkerBeeSupervisor:
 
     def poc_status(self) -> dict[str, Any]:
         info = self.start()
+        if not self._poc_manifest_paths():
+            return self._poc_status_once(info)
+        deadline = time.monotonic() + _env_float("WORKERBEE_POC_STATUS_TIMEOUT", 30.0)
+        last = self._poc_status_once(info)
+        while not last.get("ok") and time.monotonic() < deadline:
+            time.sleep(2.0)
+            last = self._poc_status_once(info)
+        return last
+
+    def _poc_status_once(self, info: StackInfo) -> dict[str, Any]:
         apps: dict[str, Any] = {}
         ok = True
         for app in POC_APPS:
@@ -1794,6 +1804,13 @@ def _terminate_pid(pid: int) -> None:
 
 def _split_lines(raw: str) -> list[str]:
     return [line.strip() for line in raw.splitlines() if line.strip()]
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, str(default)) or default)
+    except ValueError:
+        return default
 
 
 def _safe_cli_token(nbytes: int) -> str:

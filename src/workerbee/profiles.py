@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib import request as urllib_request
 
+from workerbee.containerd_helper import remove_containerd_helper_tree
 from workerbee.contract import WorkerBeeError
 from workerbee.http import request, wait_for_http
 from workerbee.ingress import ProjectIngressConfig
@@ -341,8 +342,10 @@ class K1sProfileRunner:
             "ok": True,
             "project": self.project,
             "profile": info.profile,
-            "server": urls["controller"],
-            "api_server": urls["api"],
+            "server": info.controller_url or urls["controller"],
+            "api_server": info.apishim_url or urls["api"],
+            "public_server": urls["controller"],
+            "public_api_server": urls["api"],
             "ca_bundle": str(ca_bundle),
             "admin_token": info.admin_token,
             "read_token": info.read_token,
@@ -453,18 +456,41 @@ class K1sProfileRunner:
         purge_result = None
         if purge:
             profile_root = self.project_state / "profiles"
-            if profile_root.exists():
-                shutil.rmtree(profile_root)
-            purge_result = {"ok": True, "removed": True, "path": str(profile_root)}
+            purge_result = self._purge_profile_root(profile_root)
             self._rm_network()
         elif self.info_file.exists():
             self.info_file.unlink()
         return {
-            "ok": all(item.get("ok") is not False for item in removed),
+            "ok": all(item.get("ok") is not False for item in removed)
+            and not (isinstance(purge_result, dict) and purge_result.get("ok") is False),
             "project": self.project,
             "removed": removed,
             "purged": purge,
             "purge_result": purge_result,
+        }
+
+    def _purge_profile_root(self, profile_root: Path) -> dict[str, Any]:
+        if not profile_root.exists():
+            return {"ok": True, "removed": False, "path": str(profile_root)}
+        result = remove_containerd_helper_tree(self.state_root, profile_root)
+        if result.get("ok"):
+            return result
+        try:
+            shutil.rmtree(profile_root)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "ok": False,
+                "removed": False,
+                "path": str(profile_root),
+                "helper": result,
+                "error": str(exc),
+            }
+        return {
+            "ok": True,
+            "removed": True,
+            "path": str(profile_root),
+            "fallback": "shutil",
+            "helper": result,
         }
 
     def validate(self, *, profile: str, timeout: float = 180.0) -> dict[str, Any]:

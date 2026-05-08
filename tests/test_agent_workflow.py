@@ -406,6 +406,53 @@ def test_run_ae_cli_sets_http_timeout_env(
     assert env["AE_CLI_HTTP_TIMEOUT"] == "10"
 
 
+def test_probe_falls_back_to_loopback_when_workerbee_dns_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ca = tmp_path / "root.crt"
+    ca.write_text("fake", encoding="utf-8")
+    ingress = {"https_port": 19443, "ca_bundle": str(ca)}
+    calls: list[dict[str, Any]] = []
+
+    class FakeResult:
+        status = 200
+        body = b"loopback workerbee"
+        headers = {"X-WorkerBee": "yes", "Set-Cookie": "hidden=true"}
+
+    def fake_urlopen(*_args: object, **_kwargs: object) -> object:
+        raise OSError("[Errno -2] Name or service not known")
+
+    def fake_loopback(url: str, **kwargs: Any) -> FakeResult:
+        calls.append({"url": url, **kwargs})
+        return FakeResult()
+
+    monkeypatch.setattr(ssl, "create_default_context", lambda **_kwargs: object())
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("workerbee.probe.request_https_via_loopback", fake_loopback)
+
+    result = probe_workerbee_url(
+        project="demo",
+        ingress_info=ingress,
+        url="https://api.demo.workerbee.localhost:19443/healthz?ready=1",
+        expected_status=200,
+        body_contains="workerbee",
+    )
+
+    assert result["ok"] is True
+    assert result["probe_method"] == "loopback-host-header"
+    assert result["connect_url"] == "https://127.0.0.1:19443/healthz?ready=1"
+    assert "Name or service not known" in result["primary_error"]
+    assert result["headers"] == {"X-WorkerBee": "yes"}
+    assert calls
+    assert calls[0]["url"] == "https://127.0.0.1:19443/healthz?ready=1"
+    assert calls[0]["server_hostname"] == "api.demo.workerbee.localhost"
+    assert calls[0]["host_header"] == "api.demo.workerbee.localhost:19443"
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["timeout"] == 10.0
+    assert calls[0]["ca_bundle"] == ca
+
+
 def _stack(supervisor: WorkerBeeSupervisor) -> StackInfo:
     return StackInfo(
         project=supervisor.project,

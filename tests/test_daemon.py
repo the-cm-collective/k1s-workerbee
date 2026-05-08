@@ -10,7 +10,9 @@ from workerbee.daemon import (
     WorkerBeeDaemon,
     _dashboard_static_asset,
     _handle_dashboard_action,
+    _profile_control_plane_checks,
     _render_dashboard,
+    _websocket_probe_once,
 )
 from workerbee.http import request
 from workerbee.ingress import GlobalIngress, GlobalIngressInfo, global_ingress_status
@@ -123,6 +125,116 @@ def test_global_dashboard_uses_k1s_visual_style() -> None:
     assert 'id="refresh-interval"' in html
     assert "refreshProjects" in html
     assert "window.location.reload()" not in html
+
+
+def test_profile_control_plane_checks_use_loopback_with_public_host(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+    read_value = "-".join(["read", "value"])
+    api_value = "-".join(["api", "value"])
+
+    def fake_loopback(url: str, **kwargs):
+        calls.append((url, kwargs))
+        return SimpleNamespace(status=200)
+
+    monkeypatch.setattr("workerbee.daemon.request_https_via_loopback", fake_loopback)
+    ca_bundle = str(tmp_path / "workerbee-ca.pem")
+
+    results = _profile_control_plane_checks(
+        {
+            "ca_bundle": ca_bundle,
+            "read_token": read_value,
+            "apishim_token": api_value,
+            "urls": {
+                "dashboard": "https://k1s.alpha.workerbee.localhost:19443/dashboard",
+                "docs": "https://k1s.alpha.workerbee.localhost:19443/docs",
+                "controller_health": "https://k1s.alpha.workerbee.localhost:19443/health",
+                "api_healthz": "https://k1s-api.alpha.workerbee.localhost:19443/healthz",
+                "api_openapi_v3": (
+                    "https://k1s-api.alpha.workerbee.localhost:19443/openapi/v3"
+                ),
+            },
+        }
+    )
+
+    assert all(item["ok"] for item in results)
+    assert calls[0] == (
+        "https://127.0.0.1:19443/dashboard",
+        {
+            "server_hostname": "k1s.alpha.workerbee.localhost",
+            "host_header": "k1s.alpha.workerbee.localhost:19443",
+            "token": None,
+            "ca_bundle": ca_bundle,
+        },
+    )
+    assert calls[2][1]["token"] == read_value
+    assert calls[3][1]["server_hostname"] == "k1s-api.alpha.workerbee.localhost"
+    assert calls[3][1]["token"] == api_value
+
+
+def test_websocket_probe_connects_loopback_with_original_host(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeRaw:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+    class FakeSocket:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def sendall(self, data: bytes) -> None:
+            calls["request"] = data
+
+    class FakeContext:
+        def wrap_socket(self, raw, *, server_hostname: str):  # noqa: ANN001
+            calls["server_hostname"] = server_hostname
+            calls["raw"] = raw
+            return FakeSocket()
+
+    def fake_connect(address: tuple[str, int], *, timeout: float):
+        calls["address"] = address
+        calls["timeout"] = timeout
+        return FakeRaw()
+
+    def fake_context(*, cafile: str) -> FakeContext:
+        calls["cafile"] = cafile
+        return FakeContext()
+
+    monkeypatch.setattr("workerbee.daemon.socket.create_connection", fake_connect)
+    monkeypatch.setattr("workerbee.daemon.ssl.create_default_context", fake_context)
+    monkeypatch.setattr(
+        "workerbee.daemon._read_until",
+        lambda *_args, **_kwargs: b"HTTP/1.1 101 Switching Protocols\r\n\r\n",
+    )
+    monkeypatch.setattr("workerbee.daemon._send_ws_text", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "workerbee.daemon._read_ws_text",
+        lambda *_args, **_kwargs: "echo:workerbee",
+    )
+
+    result = _websocket_probe_once(
+        "wss://api.alpha.workerbee.localhost:19443/ws",
+        ca_bundle=str(tmp_path / "test-ca.pem"),
+        expected="echo:workerbee",
+    )
+
+    assert result["ok"] is True
+    assert calls["cafile"] == str(tmp_path / "test-ca.pem")
+    assert calls["address"] == ("127.0.0.1", 19443)
+    assert calls["server_hostname"] == "api.alpha.workerbee.localhost"
+    assert b"Host: api.alpha.workerbee.localhost:19443\r\n" in calls["request"]
 
 
 def test_projects_reports_profile_only_project_running(

@@ -241,6 +241,7 @@ def deploy_profile_stage(
     namespace: str | None = None,
     timeout: int = 180,
     sync_ingress: Callable[[], dict[str, Any]] | None = None,
+    reset_existing: bool = False,
 ) -> dict[str, Any]:
     validation = validate_stage(stage_dir)
     if not validation["ok"]:
@@ -257,6 +258,18 @@ def deploy_profile_stage(
         "REQUESTS_CA_BUNDLE": str(connection["ca_bundle"]),
     }
     ingress_sync = sync_ingress() if sync_ingress else None
+    reset = (
+        _delete_profile_stage_apps(
+            supervisor=supervisor,
+            connection=connection,
+            validation=validation,
+            namespace=namespace,
+            timeout=timeout,
+            env_overrides=env_overrides,
+        )
+        if reset_existing
+        else []
+    )
     results = []
     for detail in validation["manifest_details"]:
         manifest = Path(str(detail["path"]))
@@ -289,12 +302,77 @@ def deploy_profile_stage(
         "profile": connection["profile"],
         "server": connection["server"],
         "api_server": connection["api_server"],
+        "public_server": connection.get("public_server"),
+        "public_api_server": connection.get("public_api_server"),
         "urls": connection["urls"],
         "ca_bundle": connection["ca_bundle"],
         "ingress_sync": ingress_sync,
+        "reset": reset,
         "validation": validation,
         "apply": results,
     }
+
+
+def _delete_profile_stage_apps(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    connection: dict[str, Any],
+    validation: dict[str, Any],
+    namespace: str | None,
+    timeout: int,
+    env_overrides: dict[str, str],
+) -> list[dict[str, Any]]:
+    deleted: list[dict[str, Any]] = []
+    seen: set[tuple[str | None, str]] = set()
+    for detail in validation.get("manifest_details") or []:
+        if not isinstance(detail, dict):
+            continue
+        for workload in detail.get("workloads") or []:
+            if not isinstance(workload, dict):
+                continue
+            name = str(workload.get("name") or "").strip()
+            if not name:
+                continue
+            target_namespace = namespace or str(workload.get("namespace") or "").strip() or None
+            key = (target_namespace, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            args = [
+                "--server",
+                str(connection["server"]),
+                "--token",
+                str(connection["admin_token"]),
+                "delete",
+                name,
+                "--purge",
+            ]
+            if target_namespace:
+                args.extend(["-n", target_namespace])
+            try:
+                result = supervisor.run_ae_cli(
+                    args,
+                    timeout=timeout,
+                    env_overrides=env_overrides,
+                )
+                deleted.append(
+                    {
+                        "ok": True,
+                        "name": name,
+                        "namespace": target_namespace,
+                        "delete": result,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - reset is best-effort
+                deleted.append(
+                    {
+                        "ok": False,
+                        "name": name,
+                        "namespace": target_namespace,
+                        "error": str(exc),
+                    }
+                )
+    return deleted
 
 
 def deploy_remote_k1s_stage(

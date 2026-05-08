@@ -214,8 +214,10 @@ def test_profile_deploy_uses_internal_profile_connection(tmp_path: Path, monkeyp
             ca_bundle = str(tmp_path / "workerbee-ca.pem")
             return {
                 "profile": profile,
-                "server": "https://k1s.demo-app.workerbee.localhost:19443/",
-                "api_server": "https://k1s-api.demo-app.workerbee.localhost:19443/",
+                "server": "http://127.0.0.1:19608",
+                "api_server": "http://127.0.0.1:18645",
+                "public_server": "https://k1s.demo-app.workerbee.localhost:19443/",
+                "public_api_server": "https://k1s-api.demo-app.workerbee.localhost:19443/",
                 "ca_bundle": ca_bundle,
                 "admin_token": "-".join(["admin", "token"]),
                 "urls": {"dashboard": "https://k1s.demo-app.workerbee.localhost:19443/dashboard"},
@@ -233,11 +235,12 @@ def test_profile_deploy_uses_internal_profile_connection(tmp_path: Path, monkeyp
 
     assert result["ok"] is True
     assert result["target"] == "profile"
-    assert result["server"] == "https://k1s.demo-app.workerbee.localhost:19443/"
+    assert result["server"] == "http://127.0.0.1:19608"
+    assert result["public_server"] == "https://k1s.demo-app.workerbee.localhost:19443/"
     assert len(calls) == 3
     assert calls[0][0][:5] == [
         "--server",
-        "https://k1s.demo-app.workerbee.localhost:19443/",
+        "http://127.0.0.1:19608",
         "--token",
         "-".join(["admin", "token"]),
         "apply",
@@ -248,6 +251,65 @@ def test_profile_deploy_uses_internal_profile_connection(tmp_path: Path, monkeyp
         "SSL_CERT_FILE": ca_bundle,
         "REQUESTS_CA_BUNDLE": ca_bundle,
     }
+
+
+def test_profile_deploy_can_reset_existing_profile_apps(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sup = _supervisor(tmp_path, monkeypatch)
+    prepared = prepare_stage(supervisor=sup, name="Realtime", template="realtime-web-db")
+    calls: list[list[str]] = []
+
+    def fake_run(
+        _self,
+        args: list[str],
+        *,
+        timeout: int = 60,
+        env_overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        assert timeout == 77
+        assert env_overrides is not None
+        calls.append(args)
+        return {"cmd": ["python", "-m", "ae.cli", "--token=***"], "returncode": 0}
+
+    class FakeProfileRunner:
+        def connection(
+            self,
+            *,
+            profile: str | None = None,
+            timeout: float = 180.0,
+        ) -> dict[str, Any]:
+            assert profile == "k1s-dev-min-sqlite"
+            assert timeout == 77.0
+            ca_bundle = str(tmp_path / "workerbee-ca.pem")
+            return {
+                "profile": profile,
+                "server": "http://127.0.0.1:19608",
+                "api_server": "http://127.0.0.1:18645",
+                "ca_bundle": ca_bundle,
+                "admin_token": "-".join(["admin", "token"]),
+                "urls": {"dashboard": "https://k1s.demo-app.workerbee.localhost:19443/dashboard"},
+            }
+
+    sup.run_ae_cli = MethodType(fake_run, sup)  # type: ignore[method-assign]
+
+    result = deploy_profile_stage(
+        supervisor=sup,
+        profile_runner=FakeProfileRunner(),
+        stage_dir=Path(prepared["stage_dir"]),
+        profile="k1s-dev-min-sqlite",
+        namespace="demo",
+        timeout=77,
+        reset_existing=True,
+    )
+
+    assert result["ok"] is True
+    assert [call[4] for call in calls[:3]] == ["delete", "delete", "delete"]
+    assert [call[5] for call in calls[:3]] == ["backend", "db", "frontend"]
+    assert all(call[-3:] == ["--purge", "-n", "demo"] for call in calls[:3])
+    assert [call[4] for call in calls[3:]] == ["apply", "apply", "apply"]
+    assert [item["name"] for item in result["reset"]] == ["backend", "db", "frontend"]
 
 
 def test_realtime_template_contains_websocket_ingress(tmp_path: Path, monkeypatch) -> None:

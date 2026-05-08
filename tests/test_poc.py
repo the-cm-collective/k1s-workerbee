@@ -219,3 +219,37 @@ def test_containerd_poc_validation_execs_inside_containers(
         "workerbee-poc-api-cid",
         "workerbee-poc-frontend-cid",
     ]
+
+
+def test_poc_status_waits_for_existing_poc_manifests(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "workerbee.supervisor.resolve_k1s_runtime",
+        lambda **_: K1sRuntime(
+            source="installed",
+            python_executable="/usr/bin/python",
+            k1s_root=None,
+            pythonpath=None,
+            ae_origin="/site-packages/ae/__init__.py",
+        ),
+    )
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "projects" / "demo")
+    info = SimpleNamespace(controller_url="http://127.0.0.1:19108")
+    snapshots = [
+        {"ok": False, "apps": {"api": {"ready": False}}},
+        {"ok": True, "apps": {"api": {"ready": True}}},
+    ]
+    sleeps: list[float] = []
+
+    monkeypatch.setenv("WORKERBEE_POC_STATUS_TIMEOUT", "10")
+    monkeypatch.setattr(sup, "start", lambda: info)
+    monkeypatch.setattr(sup, "_poc_manifest_paths", lambda: [tmp_path / "api.yaml"])
+    monkeypatch.setattr(sup, "_poc_status_once", lambda _info: snapshots.pop(0))
+    monkeypatch.setattr("workerbee.supervisor.time.sleep", lambda seconds: sleeps.append(seconds))
+
+    result = sup.poc_status()
+
+    assert result["ok"] is True
+    assert sleeps == [2.0]

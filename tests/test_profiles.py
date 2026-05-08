@@ -331,3 +331,102 @@ def test_profile_controller_dashboard_uses_public_apishim_ingress(
     assert env["AE_APISHIM_SERVER"] == f"http://{apishim['name']}:8445"
     assert env["AE_APISHIM_PUBLIC_BASE"] == "https://k1s-api.demo.workerbee.localhost:19443"
     assert env["AE_DASHBOARD_BOOTSTRAP_TOKEN"] == env["AE_API_ADMIN_TOKEN"]
+
+
+def test_profile_connection_uses_internal_loopback_and_keeps_public_urls(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("workerbee.profiles.resolve_runtime", lambda _runtime: "containerd")
+    monkeypatch.setattr("workerbee.profiles.port_is_free", lambda _port: True)
+    monkeypatch.setattr("workerbee.profiles.wait_for_http", lambda *_args, **_kwargs: None)
+
+    def fake_run(cmd, **_kwargs):  # noqa: ANN001
+        if "network" in cmd and "inspect" in cmd:
+            return subprocess.CompletedProcess(cmd, 0, "", "")
+        if "run" in cmd:
+            name = cmd[cmd.index("--name") + 1]
+            return subprocess.CompletedProcess(cmd, 0, f"{name}-id\n", "")
+        if "ps" in cmd:
+            name_filters = [
+                str(cmd[index + 1]).removeprefix("name=")
+                for index, value in enumerate(cmd[:-1])
+                if value == "--filter" and str(cmd[index + 1]).startswith("name=")
+            ]
+            return subprocess.CompletedProcess(
+                cmd,
+                0,
+                "\n".join(name_filters) + ("\n" if name_filters else ""),
+                "",
+            )
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    ca_bundle = tmp_path / "global" / "caddy-local-root.crt"
+    ca_bundle.parent.mkdir(parents=True)
+    ca_bundle.write_text("test-ca", encoding="utf-8")
+    monkeypatch.setattr("workerbee.profiles.subprocess.run", fake_run)
+    runner = K1sProfileRunner(
+        project="demo",
+        state_root=tmp_path,
+        runtime="containerd",
+        k1s_root=tmp_path / "k1s",
+        ingress=ProjectIngressConfig(
+            project="demo",
+            domain="demo.workerbee.localhost",
+            https_port=19443,
+            sites_dir=tmp_path / "global" / "caddy-sites" / "demo",
+            caddy_container="workerbee-caddy-test",
+            caddy_file="/etc/caddy/Caddyfile",
+            host_alias="127.0.0.1",
+            ca_bundle=ca_bundle,
+            global_dashboard_url="https://dashboard.workerbee.localhost:19443/",
+        ),
+    )
+
+    started = runner.start(profile="k1s-dev-min-sqlite", timeout=0.01)
+    connection = runner.connection(profile="k1s-dev-min-sqlite")
+
+    assert connection["server"] == started["profile"]["controller_url"]
+    assert connection["api_server"] == started["profile"]["apishim_url"]
+    assert connection["server"].startswith("http://127.0.0.1:")
+    assert connection["api_server"].startswith("http://127.0.0.1:")
+    assert connection["public_server"] == "https://k1s.demo.workerbee.localhost:19443/"
+    assert connection["public_api_server"] == "https://k1s-api.demo.workerbee.localhost:19443/"
+    assert connection["urls"]["dashboard"] == (
+        "https://k1s.demo.workerbee.localhost:19443/dashboard"
+    )
+
+
+def test_profile_stop_purge_uses_containerd_helper_for_profile_state(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("workerbee.profiles.resolve_runtime", lambda _runtime: "containerd")
+    profile_root = tmp_path / "projects" / "demo" / "profiles"
+    profile_root.mkdir(parents=True)
+    (profile_root / "root-owned-placeholder").write_text("data", encoding="utf-8")
+    calls: list[tuple[Path, Path]] = []
+
+    def fake_remove_tree(state_root: Path, target: Path) -> dict[str, object]:
+        calls.append((state_root, target))
+        return {"ok": True, "removed": True, "path": str(target)}
+
+    runner = K1sProfileRunner(
+        project="demo",
+        state_root=tmp_path,
+        runtime="containerd",
+        k1s_root=tmp_path / "k1s",
+    )
+    monkeypatch.setattr("workerbee.profiles.remove_containerd_helper_tree", fake_remove_tree)
+    monkeypatch.setattr(runner, "_rm_network", lambda: {"ok": True})
+
+    result = runner.stop(purge=True)
+
+    assert result["ok"] is True
+    assert result["purged"] is True
+    assert result["purge_result"] == {
+        "ok": True,
+        "removed": True,
+        "path": str(profile_root),
+    }
+    assert calls == [(tmp_path.resolve(), profile_root)]
