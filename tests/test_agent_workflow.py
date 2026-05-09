@@ -10,7 +10,12 @@ from typing import Any
 
 import pytest
 
-from workerbee.agent import derive_session_project, derive_session_project_info
+from workerbee.agent import (
+    agent_instructions_markdown,
+    derive_session_project,
+    derive_session_project_info,
+    install_agent_instructions,
+)
 from workerbee.contract import WorkerBeeError
 from workerbee.daemon import WorkerBeeDaemon
 from workerbee.k1s_runtime import K1sRuntime
@@ -78,6 +83,36 @@ def test_session_start_persists_cwd_and_lazy_mode(
     assert result["runbook"]["title"] == "WorkerBee Cloud-Native Loop"
     records = daemon._read_registry()  # noqa: SLF001 - verifies persisted session metadata
     assert records[result["project"]]["cwd_hint"] == str(cwd.resolve())
+    assert result["runbook"]["first_run"]
+    assert result["runbook"]["security_review"]
+
+
+def test_agent_instructions_include_first_run_security_review_guidance() -> None:
+    instructions = agent_instructions_markdown()
+
+    assert "workerbee_v1_session_start" in instructions
+    assert "security review" in instructions
+    assert "first time WorkerBee is coming up" in instructions
+    assert "temporary native k1s" in instructions
+
+
+def test_agent_instruction_install_check_and_append(tmp_path: Path) -> None:
+    target = tmp_path / "AGENTS.md"
+
+    check = install_agent_instructions(target=target, check=True)
+    assert check["installed"] is False
+    assert check["would_create"] is True
+
+    result = install_agent_instructions(
+        target=target,
+        append=True,
+        allow_create=True,
+    )
+
+    assert result["changed"] is True
+    text = target.read_text(encoding="utf-8")
+    assert "workerbee-agent-instructions:v1 start" in text
+    assert install_agent_instructions(target=target, check=True)["installed"] is True
 
 
 def test_stop_mode_blocks_active_project_operations(
@@ -218,6 +253,42 @@ def test_probe_posts_json_body(
     assert captured["method"] == "POST"
     assert json.loads(captured["data"].decode("utf-8")) == {"name": "demo"}
     assert captured["content_type"] == "application/json"
+
+
+def test_probe_allows_options_method(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ca = tmp_path / "root.crt"
+    ca.write_text("fake", encoding="utf-8")
+    ingress = {"https_port": 19443, "ca_bundle": str(ca)}
+
+    class FakeResponse:
+        status = 204
+        headers = {"Allow": "GET, POST, DELETE"}
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b""
+
+    monkeypatch.setattr(ssl, "create_default_context", lambda **_kwargs: object())
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: FakeResponse())
+
+    result = probe_workerbee_url(
+        project="demo",
+        ingress_info=ingress,
+        url="https://app.demo.workerbee.localhost:19443/",
+        method="OPTIONS",
+        expected_status=204,
+    )
+
+    assert result["ok"] is True
+    assert result["headers"] == {"Allow": "GET, POST, DELETE"}
 
 
 def test_probe_allows_custom_signed_headers(

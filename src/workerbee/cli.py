@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import Any
 
 from workerbee import __version__
-from workerbee.agent import derive_session_project
+from workerbee.agent import (
+    agent_instructions_markdown,
+    derive_session_project,
+    install_agent_instructions,
+)
 from workerbee.config import (
     clear_cli_config,
     cli_defaults,
@@ -50,6 +54,7 @@ from workerbee.mcp_daemon import (
 from workerbee.mcp_server import serve_mcp
 from workerbee.paths import daemon_project_state_dir, default_state_root
 from workerbee.runtime_support import CONTAINERD_RUNTIME, runtime_diagnostics
+from workerbee.security import DEFAULT_SECURITY_CHECKS, assess_stage_security
 from workerbee.supervisor import WorkerBeeSupervisor
 from workerbee.trust import trust_install, trust_status, trust_uninstall
 
@@ -103,6 +108,19 @@ def build_parser() -> argparse.ArgumentParser:
     config_set.add_argument("--mcp-port", type=int)
     config_set.add_argument("--mcp-timeout", type=float)
     config_sub.add_parser("clear", help="Remove local WorkerBee CLI defaults")
+
+    agent = sub.add_parser("agent", help="Print or install agent instructions")
+    agent_sub = agent.add_subparsers(dest="agent_cmd", required=True)
+    agent_sub.add_parser("instructions", help="Print the WorkerBee AGENTS.md block")
+    agent_install = agent_sub.add_parser("install", help="Install WorkerBee AGENTS.md wording")
+    agent_install.add_argument("--target", type=Path, default=Path("AGENTS.md"))
+    agent_install.add_argument("--check", action="store_true", help="Check without writing")
+    agent_install.add_argument("--append", action="store_true", help="Append the block if missing")
+    agent_install.add_argument(
+        "--allow-create",
+        action="store_true",
+        help="Allow creating the target AGENTS.md file",
+    )
 
     sub.add_parser("doctor", help="Check local prerequisites")
     sub.add_parser("start", help="Start the local WorkerBee k1s stack")
@@ -228,6 +246,36 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_export.add_argument("--stage", type=Path, required=True)
     bundle_export.add_argument("--format", choices=["k1s", "k8s", "helm"], default="k1s")
     bundle_export.add_argument("-n", "--namespace", default=None)
+    security = sub.add_parser("security", help="Run advisory security assessments")
+    security_sub = security.add_subparsers(dest="security_cmd", required=True)
+    security_assess = security_sub.add_parser(
+        "assess",
+        help="Assess staged manifests, existing exports, and optional runtime ingress",
+    )
+    security_assess.add_argument("--stage", type=Path, required=True)
+    security_assess.add_argument("--target", choices=["workerbee", "profile"], default="workerbee")
+    security_assess.add_argument("-n", "--namespace", default=None)
+    security_assess.add_argument(
+        "--check",
+        action="append",
+        choices=list(DEFAULT_SECURITY_CHECKS),
+        help="Assessment check to run; repeat to select multiple checks",
+    )
+    security_assess.add_argument("--timeout", type=float, default=5.0)
+    security_review = security_sub.add_parser(
+        "review-project",
+        help="Review the latest deployed project and write a report",
+    )
+    security_review.add_argument("--stage", type=Path, default=None)
+    security_review.add_argument("--target", choices=["workerbee", "profile"], default="workerbee")
+    security_review.add_argument("-n", "--namespace", default=None)
+    security_review.add_argument(
+        "--check",
+        action="append",
+        choices=list(DEFAULT_SECURITY_CHECKS),
+        help="Assessment check to run; repeat to select multiple checks",
+    )
+    security_review.add_argument("--timeout", type=float, default=5.0)
     deploy = sub.add_parser("deploy-poc", help="Build and deploy the representative POC stack")
     deploy.add_argument("--timeout", type=float, default=180.0)
     sub.add_parser("apishim-smoke", help="Inspect POC objects through the k1s API shim")
@@ -270,6 +318,20 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.cmd == "config":
             return _handle_config(args)
+        if args.cmd == "agent":
+            if args.agent_cmd == "instructions":
+                print(agent_instructions_markdown().rstrip())
+                return 0
+            if args.agent_cmd == "install":
+                return _print(
+                    install_agent_instructions(
+                        target=args.target,
+                        check=args.check,
+                        append=args.append,
+                        allow_create=args.allow_create,
+                    ),
+                    json_out=args.json,
+                )
         _apply_cli_defaults(args, raw_argv)
         containerd_privilege = _containerd_privilege_arg(args)
         if args.cmd == "doctor":
@@ -540,6 +602,38 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 json_out=args.json,
             )
+        if args.cmd == "security" and args.security_cmd == "assess":
+            return _print(
+                assess_stage_security(
+                    supervisor=sup,
+                    stage_dir=resolve_stage_dir(sup, args.stage),
+                    namespace=args.namespace,
+                    target=args.target,
+                    checks=args.check,
+                    runtime_probe=None,
+                    timeout=args.timeout,
+                ),
+                json_out=args.json,
+            )
+        if args.cmd == "security" and args.security_cmd == "review-project":
+            review_stage = resolve_stage_dir(sup, args.stage) if args.stage is not None else None
+            daemon = WorkerBeeDaemon(
+                state_root=args.state_root,
+                runtime=args.runtime,
+                default_project=args.project or "default",
+                cwd=args.cwd,
+            )
+            return _print(
+                daemon.security_review_project(
+                    project=args.project,
+                    stage=review_stage,
+                    target=args.target,
+                    namespace=args.namespace,
+                    checks=args.check,
+                    timeout=args.timeout,
+                ),
+                json_out=args.json,
+            )
         if args.cmd == "start":
             return _print(
                 _run_supervisor_action(
@@ -731,6 +825,10 @@ def _print(payload: dict[str, Any], *, json_out: bool) -> int:
         print(f"mcp: {payload['mcp_url']}")
         if payload.get("dashboard_url"):
             print(f"dashboard: {payload['dashboard_url']}")
+        if payload.get("codex_mcp_add"):
+            print(f"codex: {payload['codex_mcp_add']}")
+        if payload.get("agent_instructions"):
+            print(f"agents: {payload['agent_instructions']}")
         print(f"running: {payload.get('running')}")
         print(f"state: {payload.get('state_root')}")
         return 1 if payload.get("ok") is False else 0

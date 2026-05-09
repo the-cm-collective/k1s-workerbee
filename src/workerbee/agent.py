@@ -14,6 +14,8 @@ from workerbee.supervisor import project_slug
 
 PROJECT_MODES = {"start", "lazy", "stop"}
 DEFAULT_PROJECT_MODE = "lazy"
+AGENT_INSTRUCTIONS_START = "<!-- workerbee-agent-instructions:v1 start -->"
+AGENT_INSTRUCTIONS_END = "<!-- workerbee-agent-instructions:v1 end -->"
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,12 +125,19 @@ queues, or integration behavior that benefits from a running local stack.
 4. Use WorkerBee MCP to build local images, prepare or stage manifests, validate manifests, deploy
    locally, inspect status/logs, probe HTTPS ingress, and export k1s/Kubernetes/Helm artifacts.
    For repo-root image builds with nested Dockerfiles, pass `dockerfile="path/to/Dockerfile"`.
-5. In lazy mode, do not start the stack until deployment or an explicit project start is needed.
-6. If WorkerBee reports `PROJECT_STOPPED`, tell the user WorkerBee is disabled for this project
+5. If this is the first WorkerBee run for a repo, there may be no deployed workload to inspect yet.
+   Prefer existing repo manifests and Containerfiles/Dockerfiles. When they are absent, create a
+   temporary native k1s staged deployment in WorkerBee state, then build, validate, and deploy it
+   before runtime validation or security review.
+6. When the user asks for a security review, call `workerbee_v1_security_review_project` after
+   session bootstrap and project status. If it reports no deployment, stage and deploy the app
+   first, then rerun the review.
+7. In lazy mode, do not start the stack until deployment or an explicit project start is needed.
+8. If WorkerBee reports `PROJECT_STOPPED`, tell the user WorkerBee is disabled for this project
    and show `workerbee project mode start --project <project>`.
-7. Iterate against the live app through status, logs, exec, and `workerbee_v1_ingress_probe` until
+9. Iterate against the live app through status, logs, exec, and `workerbee_v1_ingress_probe` until
    the requested behavior is verified. Use probe `headers` for signed requests such as S3 PUTs.
-8. Export artifacts with `workerbee_v1_bundle_export` when the implementation is ready to hand off.
+10. Export artifacts with `workerbee_v1_bundle_export` when the implementation is ready to hand off.
 
 For staged WorkerBee manifests, app logs and exec default to the WorkerBee project namespace.
 Use `app="namespace/name"` or pass `namespace` only when inspecting a non-default namespace;
@@ -141,6 +150,99 @@ start a profile with `workerbee_v1_profile_start`, deploy staged manifests with
 `workerbee_v1_profile_workload_status` and `workerbee_v1_logs(target="profile")`, and use
 `workerbee_v1_profile_workload_validate` for the bundled realtime frontend/backend/db smoke test.
 """
+
+
+def agent_instructions_markdown() -> str:
+    """Return the canonical AGENTS.md WorkerBee instruction block."""
+    return f"""{AGENT_INSTRUCTIONS_START}
+## WorkerBee
+
+When a task involves containers, services, manifests, ingress, databases,
+queues, security review, or integration behavior, call WorkerBee MCP
+`workerbee_v1_session_start` with the absolute repo cwd and task goal. Use the
+returned `project` for every WorkerBee tool call.
+
+Use the local shell for repo edits and ordinary tests. Use WorkerBee MCP for
+local image builds, native k1s/Kubernetes manifest staging, validation,
+deployment, status, logs, HTTPS ingress probes, security review, dashboard URLs,
+cleanup, and artifact export.
+
+If this is the first time WorkerBee is coming up for a project, there may be no
+deployed workload to inspect yet. Prefer existing repo manifests and
+Containerfiles/Dockerfiles. When they are absent, build a temporary native k1s
+deployment in WorkerBee state, deploy it locally, then rerun the requested
+runtime validation or security review. Keep first-run generated artifacts in
+WorkerBee state unless the user asks to commit them.
+{AGENT_INSTRUCTIONS_END}
+"""
+
+
+def install_agent_instructions(
+    *,
+    target: Path,
+    check: bool = False,
+    append: bool = False,
+    allow_create: bool = False,
+) -> dict[str, Any]:
+    """Inspect or explicitly append the WorkerBee AGENTS.md instruction block."""
+    path = target.expanduser().resolve()
+    exists = path.exists()
+    if exists and not path.is_file():
+        raise WorkerBeeError(
+            code="AGENTS_TARGET_NOT_FILE",
+            message=f"AGENTS target is not a file: {path}",
+            details={"path": str(path)},
+            remediation="Pass a file path such as AGENTS.md.",
+        )
+    text = path.read_text(encoding="utf-8") if exists else ""
+    installed = AGENT_INSTRUCTIONS_START in text and AGENT_INSTRUCTIONS_END in text
+    if check:
+        return {
+            "ok": True,
+            "path": str(path),
+            "exists": exists,
+            "installed": installed,
+            "changed": False,
+            "would_create": not exists,
+            "would_append": exists and not installed,
+        }
+    if installed:
+        return {
+            "ok": True,
+            "path": str(path),
+            "exists": exists,
+            "installed": True,
+            "changed": False,
+        }
+    if not append:
+        raise WorkerBeeError(
+            code="AGENTS_APPEND_REQUIRED",
+            message="AGENTS.md installation requires explicit --append",
+            details={"path": str(path), "exists": exists},
+            remediation="Run `workerbee agent install --append --target AGENTS.md`.",
+        )
+    if not exists and not allow_create:
+        raise WorkerBeeError(
+            code="AGENTS_NOT_FOUND",
+            message=f"AGENTS target does not exist: {path}",
+            details={"path": str(path)},
+            remediation=(
+                "Create AGENTS.md first or pass "
+                "`workerbee agent install --append --allow-create`."
+            ),
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    instructions = agent_instructions_markdown().rstrip()
+    prefix = text.rstrip()
+    content = f"{prefix}\n\n{instructions}\n" if prefix else f"{instructions}\n"
+    path.write_text(content, encoding="utf-8")
+    return {
+        "ok": True,
+        "path": str(path),
+        "exists": True,
+        "installed": True,
+        "changed": True,
+    }
 
 
 def runbook_payload() -> dict[str, Any]:
@@ -166,7 +268,30 @@ def runbook_payload() -> dict[str, Any]:
             "Use app names and the optional namespace field for logs/exec, not container names.",
             "Probe WorkerBee HTTPS ingress through workerbee_v1_ingress_probe.",
             "Pass probe headers for signed request checks such as presigned S3 PUTs.",
+            (
+                "For first-time projects, stage and deploy a native k1s workload before "
+                "runtime review."
+            ),
+            "Use workerbee_v1_security_review_project when the user asks for security review.",
             "Iterate until the running app is correct, then export k1s/k8s/helm artifacts.",
+        ],
+        "first_run": [
+            "A new project may have no deployed WorkerBee workload yet.",
+            "Prefer existing manifests and Containerfiles/Dockerfiles from the repo.",
+            (
+                "When no deployable manifests exist, generate temporary native k1s staged "
+                "artifacts in WorkerBee state and deploy them locally."
+            ),
+            (
+                "Keep generated first-run artifacts out of the repo unless the user asks to "
+                "commit them."
+            ),
+        ],
+        "security_review": [
+            "Call workerbee_v1_project_status before review.",
+            "Call workerbee_v1_security_review_project for deployed project review.",
+            "If review reports no deployment metadata, stage/deploy the app and rerun review.",
+            "Summarize critical/high findings first, then include the report path.",
         ],
         "k1s_profile_loop": [
             "Use only with explicit direct-containerd WorkerBee MCP sessions.",

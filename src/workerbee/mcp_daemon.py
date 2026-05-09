@@ -537,6 +537,8 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "port": config.port,
         "containerd_privilege_mode": config.containerd_privilege,
         "mcp_url": config.mcp_url,
+        "codex_mcp_add": f"codex mcp add workerbee --url {config.mcp_url}",
+        "agent_instructions": "workerbee agent instructions",
         "metadata_file": str(config.metadata_file),
         "log_file": str(config.log_file),
     }

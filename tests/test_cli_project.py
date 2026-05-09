@@ -87,6 +87,44 @@ def test_config_set_parses_user_level_defaults(tmp_path: Path) -> None:
     assert args.mcp_timeout == 90
 
 
+def test_agent_install_parser_accepts_explicit_append(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "agent",
+            "install",
+            "--target",
+            str(tmp_path / "AGENTS.md"),
+            "--append",
+            "--allow-create",
+        ]
+    )
+
+    assert args.cmd == "agent"
+    assert args.agent_cmd == "install"
+    assert args.target == tmp_path / "AGENTS.md"
+    assert args.append is True
+    assert args.allow_create is True
+
+
+def test_agent_instructions_cli_prints_canonical_block(capsys) -> None:
+    assert cli.main(["agent", "instructions"]) == 0
+
+    output = capsys.readouterr().out
+    assert "workerbee-agent-instructions:v1 start" in output
+    assert "first time WorkerBee is coming up" in output
+
+
+def test_agent_install_cli_appends_to_existing_file(tmp_path: Path) -> None:
+    target = tmp_path / "AGENTS.md"
+    target.write_text("# Existing\n", encoding="utf-8")
+
+    assert cli.main(["agent", "install", "--target", str(target), "--append"]) == 0
+
+    text = target.read_text(encoding="utf-8")
+    assert "# Existing" in text
+    assert "workerbee-agent-instructions:v1 start" in text
+
+
 def test_cli_defaults_apply_to_mcp_commands(tmp_path: Path, monkeypatch) -> None:
     config_file = tmp_path / "config.json"
     config_file.write_text(

@@ -17,10 +17,18 @@ from workerbee.supervisor import project_slug
 
 BODY_EXCERPT_LIMIT = 4096
 SELECTED_HEADERS = {
+    "access-control-allow-methods",
+    "allow",
+    "content-security-policy",
     "content-type",
+    "referrer-policy",
     "location",
+    "permissions-policy",
     "server",
+    "strict-transport-security",
     "x-workerbee",
+    "x-content-type-options",
+    "x-frame-options",
     "x-request-id",
 }
 
@@ -58,10 +66,13 @@ def probe_workerbee_url(
     timeout: float = 10.0,
 ) -> dict[str, Any]:
     method = method.upper()
-    if method not in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"}:
+    if method not in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}:
         raise WorkerBeeError(
             code="VALIDATION_FAILED",
-            message="ingress probe method must be GET, HEAD, POST, PUT, PATCH, or DELETE",
+            message=(
+                "ingress probe method must be GET, HEAD, POST, PUT, PATCH, DELETE, "
+                "or OPTIONS"
+            ),
             details={"method": method},
         )
     if json_body is not None and body is not None:
@@ -69,10 +80,10 @@ def probe_workerbee_url(
             code="VALIDATION_FAILED",
             message="ingress probe accepts either json_body or body, not both",
         )
-    if method in {"GET", "HEAD"} and (json_body is not None or body is not None):
+    if method in {"GET", "HEAD", "OPTIONS"} and (json_body is not None or body is not None):
         raise WorkerBeeError(
             code="VALIDATION_FAILED",
-            message="ingress probe request bodies are not supported for GET or HEAD",
+            message="ingress probe request bodies are not supported for GET, HEAD, or OPTIONS",
             details={"method": method},
         )
     parsed = _validate_workerbee_url(project=project, ingress_info=ingress_info, url=url)

@@ -24,6 +24,9 @@ containerized and scoped under WorkerBee-owned namespaces.
   explicit and optional through `workerbee trust`.
 - Agent workflow for image builds, native k1s manifest staging/deploy,
   status/log inspection, bounded exec, HTTPS probes, cleanup, and iteration.
+- Advisory security assessment for staged manifests, existing exports, and
+  WorkerBee-managed local ingress, with OWASP-oriented findings and policy
+  suggestions that do not block deploy/export.
 - Artifact handoff as native k1s bundles, Kubernetes YAML, Helm skeletons, and
   image metadata.
 - Advanced direct containerd profiles for k1s development, including sqlite,
@@ -62,18 +65,32 @@ Connect Codex to the shared local MCP server:
 ```bash
 codex mcp add workerbee --url http://127.0.0.1:8765/mcp
 codex mcp list
+workerbee agent instructions
 ```
 
 For cloud-native repos, add this project instruction to `AGENTS.md`:
 
 ```markdown
 When a task involves containers, services, manifests, ingress, databases, queues,
-or integration behavior, call WorkerBee MCP `workerbee_v1_session_start` with
-the absolute repo cwd and task goal. Use the returned `project` for every
-WorkerBee tool call. Use the local shell for repo edits and ordinary tests, and
-use WorkerBee MCP for local image builds, manifest staging/deploy, status, logs,
-HTTPS ingress probes, dashboard URLs, cleanup, and artifact export.
+security review, or integration behavior, call WorkerBee MCP
+`workerbee_v1_session_start` with the absolute repo cwd and task goal. Use the
+returned `project` for every WorkerBee tool call. Use the local shell for repo
+edits and ordinary tests, and use WorkerBee MCP for local image builds,
+manifest staging/deploy, status, logs, HTTPS ingress probes, security review,
+dashboard URLs, cleanup, and artifact export.
+
+If this is the first time WorkerBee is coming up for a project, there may be no
+deployed workload to inspect yet. Prefer existing repo manifests and
+Containerfiles/Dockerfiles. When they are absent, build a temporary native k1s
+deployment in WorkerBee state, deploy it locally, then rerun the requested
+runtime validation or security review. Keep first-run generated artifacts in
+WorkerBee state unless the user asks to commit them.
 ```
+
+Use `workerbee agent install --check` to inspect whether the block is present.
+Use `workerbee agent install --append --target AGENTS.md` to append it to an
+existing repo file, or add `--allow-create` when you explicitly want WorkerBee
+to create the file.
 
 Build and install from a local wheelhouse:
 
@@ -231,14 +248,34 @@ Staged deployment workflow:
 ```bash
 workerbee manifest prepare --name demo --template frontend-api-store
 workerbee manifest validate --stage demo
+workerbee security assess --stage demo
 workerbee manifest deploy-local --stage demo
+workerbee security review-project --stage demo
 workerbee bundle export --stage demo --format k1s
+```
+
+`workerbee security assess` reviews a staged bundle directly. `workerbee
+security review-project` reviews a deployed project and writes a JSON report
+under the WorkerBee project state at `reports/security/`. When the deployment
+was performed through MCP `workerbee_v1_manifest_deploy_local`, WorkerBee
+records the latest stage and agents can usually call
+`workerbee_v1_security_review_project` without passing `stage`. If no deployment
+metadata exists, WorkerBee returns an actionable error listing available stages
+so the agent can stage/deploy first or retry with an explicit stage.
+
+The live security assessment report scenario is opt-in because it builds and
+deploys a real local app through WorkerBee:
+
+```bash
+WORKERBEE_LIVE_SECURITY_REPORT=1 \
+WORKERBEE_SECURITY_REPORT_OUT=/tmp/workerbee-security-report.json \
+.venv/bin/python -m pytest tests/test_security_live.py -q
 ```
 
 `--stage` accepts either the absolute `stage_dir` returned by prepare or the named stage under the project `artifacts/staged` directory. `manifest prepare --source <file-or-dir>` can stage native k1s YAML or practical Kubernetes YAML. Kubernetes input is applied through the k1s shim `ae apply --k8s` path and should keep exactly one workload plus matching Service/Ingress documents per file. Native k1s manifests are the required input when exporting a native k1s bundle; Kubernetes input can be exported as Kubernetes YAML or a Helm skeleton.
 
 `workerbee_v1_ingress_probe` supports `GET`, `HEAD`, `POST`, `PUT`,
-`PATCH`, and `DELETE` plus `json_body`, raw `body`, and custom `headers`.
+`PATCH`, `DELETE`, and `OPTIONS` plus `json_body`, raw `body`, and custom `headers`.
 Use headers for signed smoke tests such as S3 presigned `PUT`; WorkerBee
 intentionally blocks overriding `Host` and `Content-Length`.
 

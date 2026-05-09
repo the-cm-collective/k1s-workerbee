@@ -554,6 +554,52 @@ def serve_mcp(
         )
 
     @mcp.tool()
+    def workerbee_v1_security_assess(
+        stage: str,
+        project: str = "default",
+        target: str = "workerbee",
+        namespace: str | None = None,
+        checks: list[str] | None = None,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Run advisory manifest/export/runtime security assessment for a staged app."""
+        return protect(
+            "SecurityAssess",
+            project,
+            lambda: daemon.security_assess(
+                stage=Path(stage),
+                target=target,
+                project=project,
+                namespace=namespace,
+                checks=checks,
+                timeout=timeout,
+            ),
+        )
+
+    @mcp.tool()
+    def workerbee_v1_security_review_project(
+        project: str = "default",
+        stage: str | None = None,
+        target: str = "workerbee",
+        namespace: str | None = None,
+        checks: list[str] | None = None,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        """Review the latest deployed WorkerBee project and write a report artifact."""
+        return protect(
+            "SecurityReviewProject",
+            project,
+            lambda: daemon.security_review_project(
+                project=project,
+                stage=Path(stage) if stage else None,
+                target=target,
+                namespace=namespace,
+                checks=checks,
+                timeout=timeout,
+            ),
+        )
+
+    @mcp.tool()
     def workerbee_v1_cleanup(
         execute: bool = False,
         purge_images: bool = False,

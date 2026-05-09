@@ -49,6 +49,7 @@ from workerbee.runtime_support import (
     resolve_runtime,
     runtime_diagnostics,
 )
+from workerbee.security import DEFAULT_SECURITY_CHECKS, assess_stage_security
 from workerbee.supervisor import WorkerBeeSupervisor, project_slug
 
 T = TypeVar("T")
@@ -533,6 +534,7 @@ class WorkerBeeDaemon:
         name = project_slug(project)
         status = self.with_project(name, lambda sup: sup.status())
         status["mode"] = self.project_mode(name)
+        status["latest_deployment"] = self._latest_deployment(name)
         return status
 
     def profile_list(self) -> dict[str, Any]:
@@ -759,14 +761,28 @@ class WorkerBeeDaemon:
         name = project_slug(project or self.default_project)
         target = _normalize_deploy_target(target)
         if target == "workerbee":
-            return self.with_project(
-                name,
-                lambda supervisor: deploy_local_stage(
+            def deploy_and_record(supervisor: WorkerBeeSupervisor) -> dict[str, Any]:
+                stage_dir = resolve_stage_dir(supervisor, stage)
+                result = deploy_local_stage(
                     supervisor=supervisor,
-                    stage_dir=resolve_stage_dir(supervisor, stage),
+                    stage_dir=stage_dir,
                     namespace=namespace,
                     timeout=timeout,
-                ),
+                )
+                deployment = self._record_deployment(
+                    project=name,
+                    stage=stage,
+                    stage_dir=stage_dir,
+                    target=target,
+                    profile=profile,
+                    namespace=namespace,
+                    result=result,
+                )
+                return {**result, "deployment": deployment}
+
+            return self.with_project(
+                name,
+                deploy_and_record,
                 require_active=True,
                 autostart=True,
                 start_reason="manifest_deploy_local",
@@ -778,16 +794,240 @@ class WorkerBeeDaemon:
                 self._register_project(name, cwd_hint=str(self._project_cwd(name)))
                 self._active_ingress()
                 supervisor = self._build_supervisor(name, ingress=self._project_ingress(name))
+                stage_dir = resolve_stage_dir(supervisor, stage)
                 result = deploy_profile_stage(
                     supervisor=supervisor,
                     profile_runner=self._profile_runner(name, k1s_root=k1s_root),
-                    stage_dir=resolve_stage_dir(supervisor, stage),
+                    stage_dir=stage_dir,
                     profile=profile,
                     namespace=namespace,
                     timeout=timeout,
                     sync_ingress=self._sync_ingress_projects_result,
                 )
-                return {**result, "project": name}
+                deployment = self._record_deployment(
+                    project=name,
+                    stage=stage,
+                    stage_dir=stage_dir,
+                    target=target,
+                    profile=str(result.get("profile") or profile or ""),
+                    namespace=namespace,
+                    result=result,
+                )
+                return {**result, "project": name, "deployment": deployment}
+
+    def security_assess(
+        self,
+        *,
+        stage: Path,
+        target: str = "workerbee",
+        project: str | None = None,
+        namespace: str | None = None,
+        checks: list[str] | None = None,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        from workerbee.manifests import resolve_stage_dir
+
+        name = project_slug(project or self.default_project)
+        target = _normalize_deploy_target(target)
+
+        def runtime_probe(**kwargs: Any) -> dict[str, Any]:
+            return self.ingress_probe(
+                project=name,
+                url=str(kwargs["url"]),
+                method=str(kwargs.get("method") or "GET"),
+                timeout=float(kwargs.get("timeout") or timeout),
+            )
+
+        probe = runtime_probe if self._active_ingress() is not None else None
+        return self.with_project(
+            name,
+            lambda supervisor: assess_stage_security(
+                supervisor=supervisor,
+                stage_dir=resolve_stage_dir(supervisor, stage),
+                namespace=namespace,
+                target=target,
+                checks=checks,
+                runtime_probe=probe,
+                timeout=timeout,
+            ),
+        )
+
+    def security_review_project(
+        self,
+        *,
+        project: str | None = None,
+        stage: Path | None = None,
+        target: str = "workerbee",
+        namespace: str | None = None,
+        checks: list[str] | None = None,
+        timeout: float = 5.0,
+    ) -> dict[str, Any]:
+        from workerbee.manifests import resolve_stage_dir
+
+        name = project_slug(project or self.default_project)
+        deployment = self._latest_deployment(name)
+        stage_ref = stage
+        resolved_target = _normalize_deploy_target(target)
+        if stage_ref is None:
+            if not deployment:
+                raise self._security_review_deployment_required(name)
+            raw_stage = deployment.get("stage_dir") or deployment.get("stage")
+            if not raw_stage:
+                raise WorkerBeeError(
+                    code="SECURITY_REVIEW_STAGE_REQUIRED",
+                    message="latest deployment metadata does not include a stage path",
+                    details={"project": name, "deployment": deployment},
+                    remediation=(
+                        "Pass an explicit stage path or redeploy the project so WorkerBee can "
+                        "record fresh deployment metadata."
+                    ),
+                    retryable=True,
+                )
+            stage_ref = Path(str(raw_stage))
+            resolved_target = _normalize_deploy_target(str(deployment.get("target") or target))
+            if namespace is None and deployment.get("namespace"):
+                namespace = str(deployment["namespace"])
+
+        def runtime_probe(**kwargs: Any) -> dict[str, Any]:
+            return self.ingress_probe(
+                project=name,
+                url=str(kwargs["url"]),
+                method=str(kwargs.get("method") or "GET"),
+                timeout=float(kwargs.get("timeout") or timeout),
+            )
+
+        probe = runtime_probe if self._active_ingress() is not None else None
+        assessment = self.with_project(
+            name,
+            lambda supervisor: assess_stage_security(
+                supervisor=supervisor,
+                stage_dir=resolve_stage_dir(supervisor, stage_ref),
+                namespace=namespace,
+                target=resolved_target,
+                checks=checks,
+                runtime_probe=probe,
+                timeout=timeout,
+            ),
+        )
+        review = {
+            "ok": True,
+            "mode": "advisory",
+            "project": name,
+            "target": resolved_target,
+            "stage": str(stage_ref),
+            "stage_dir": assessment.get("stage_dir"),
+            "deployment": deployment,
+            "assessment": assessment,
+        }
+        report = self._write_security_review_report(project=name, review=review)
+        return {**review, "report": report}
+
+    def _record_deployment(
+        self,
+        *,
+        project: str,
+        stage: Path | str,
+        stage_dir: Path,
+        target: str,
+        profile: str | None,
+        namespace: str | None,
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        timestamp = _utc_timestamp_iso()
+        deployment_id = f"deploy-{_utc_timestamp_slug()}-{secrets.token_hex(4)}"
+        deployment = {
+            "api_version": "workerbee.deployment/v1",
+            "id": deployment_id,
+            "project": project,
+            "target": target,
+            "profile": profile or None,
+            "namespace": namespace,
+            "stage": str(stage),
+            "stage_dir": str(stage_dir.expanduser().resolve()),
+            "created_at": timestamp,
+            "updated_at": timestamp,
+            "ok": bool(result.get("ok", True)),
+            "validation": _deployment_validation_summary(result.get("validation")),
+            "apply": _deployment_apply_summary(result.get("apply")),
+            "ingress_urls": _deployment_ingress_urls(result),
+            "exports": _deployment_exports(stage_dir),
+        }
+        alias_refresh = result.get("alias_refresh")
+        if isinstance(alias_refresh, dict):
+            deployment["alias_refresh"] = {
+                "ok": alias_refresh.get("ok"),
+                "enabled": alias_refresh.get("enabled"),
+                "reason": alias_refresh.get("reason"),
+                "runtime": alias_refresh.get("runtime"),
+            }
+        paths = _deployment_paths(self.state_root, project)
+        paths["dir"].mkdir(parents=True, exist_ok=True)
+        _write_json(paths["latest"], deployment)
+        _write_json(paths["dir"] / f"{deployment_id}.json", deployment)
+        return deployment
+
+    def _latest_deployment(self, project: str) -> dict[str, Any] | None:
+        path = _deployment_paths(self.state_root, project)["latest"]
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        return data if isinstance(data, dict) else None
+
+    def _security_review_deployment_required(self, project: str) -> WorkerBeeError:
+        state_dir = daemon_project_state_dir(project, state_root=self.state_root)
+        global_dashboard = self.global_dashboard()
+        https_port = int(global_dashboard.get("https_port") or 19443)
+        routes = _project_exposed_routes(state_dir, https_port=https_port)
+        return WorkerBeeError(
+            code="SECURITY_REVIEW_DEPLOYMENT_REQUIRED",
+            message=f"WorkerBee project `{project}` has no recorded deployment to review",
+            details={
+                "project": project,
+                "state_dir": str(state_dir),
+                "available_stages": _available_stage_names(state_dir),
+                "exposed_routes": routes,
+                "latest_deployment": str(_deployment_paths(self.state_root, project)["latest"]),
+            },
+            remediation=(
+                "Stage and deploy the app first with WorkerBee, or pass an explicit stage path "
+                "to the security review."
+            ),
+            retryable=True,
+        )
+
+    def _write_security_review_report(
+        self,
+        *,
+        project: str,
+        review: dict[str, Any],
+    ) -> dict[str, Any]:
+        generated_at = _utc_timestamp_iso()
+        report_id = f"security-{_utc_timestamp_slug()}-{secrets.token_hex(4)}"
+        report = {
+            "api_version": "workerbee.security_report/v1",
+            "kind": "SecurityReviewProject",
+            "id": report_id,
+            "generated_at": generated_at,
+            "project": project,
+            "review": review,
+        }
+        reports_dir = (
+            daemon_project_state_dir(project, state_root=self.state_root)
+            / "reports"
+            / "security"
+        )
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        path = reports_dir / f"{report_id}.json"
+        _write_json(path, report)
+        return {
+            "api_version": "workerbee.security_report/v1",
+            "id": report_id,
+            "path": str(path),
+            "generated_at": generated_at,
+        }
 
     def profile_workload_status(
         self,
@@ -862,7 +1102,7 @@ class WorkerBeeDaemon:
             },
             "tool_hints": {
                 "workerbee_v1_ingress_probe": {
-                    "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+                    "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
                     "body_fields": ["json_body", "body"],
                     "headers": True,
                     "notes": (
@@ -900,6 +1140,25 @@ class WorkerBeeDaemon:
                 },
             },
             "bundle_formats": ["k1s", "k8s", "helm"],
+            "security_assessment": {
+                "advisory": True,
+                "stage_assess_tool": "workerbee_v1_security_assess",
+                "project_review_tool": "workerbee_v1_security_review_project",
+                "checks": list(DEFAULT_SECURITY_CHECKS),
+                "standards": [
+                    "OWASP Web Top 10 2021",
+                    "OWASP API Security Top 10 2023",
+                    "OWASP Kubernetes Top 10",
+                    "OWASP CI/CD Security Risks",
+                ],
+                "latest_deployment_metadata": True,
+                "report_output": "WorkerBee-managed project reports/security directory",
+                "first_run_behavior": (
+                    "If no deployment metadata exists, stage/deploy the app first or pass "
+                    "an explicit stage path."
+                ),
+                "blocks_deploy": False,
+            },
             "k1s_runtime": k1s,
             "k1s_profiles": {
                 "runtime_requirement": "containerd",
@@ -1880,6 +2139,106 @@ def _safe_project_mode(raw: object) -> str:
         return normalize_project_mode(str(raw or DEFAULT_PROJECT_MODE))
     except WorkerBeeError:
         return DEFAULT_PROJECT_MODE
+
+
+def _utc_timestamp_iso() -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _utc_timestamp_slug() -> str:
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+
+
+def _deployment_paths(state_root: Path, project: str) -> dict[str, Path]:
+    directory = daemon_project_state_dir(project, state_root=state_root) / "deployments"
+    return {"dir": directory, "latest": directory / "latest.json"}
+
+
+def _available_stage_names(state_dir: Path) -> list[str]:
+    staged_root = state_dir / "artifacts" / "staged"
+    if not staged_root.is_dir():
+        return []
+    return sorted(path.name for path in staged_root.iterdir() if path.is_dir())
+
+
+def _deployment_validation_summary(raw: object) -> dict[str, Any]:
+    validation = raw if isinstance(raw, dict) else {}
+    return {
+        "ok": validation.get("ok"),
+        "stage_dir": validation.get("stage_dir"),
+        "input_kinds": validation.get("input_kinds", []),
+        "images": validation.get("images", []),
+        "manifests": validation.get("manifests", []),
+        "findings": validation.get("findings", []),
+    }
+
+
+def _deployment_apply_summary(raw: object) -> list[dict[str, Any]]:
+    items = raw if isinstance(raw, list) else []
+    summary: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        summary.append(
+            {
+                "ok": item.get("ok"),
+                "manifest": item.get("manifest"),
+                "input_kind": item.get("input_kind"),
+                "namespace": item.get("namespace"),
+                "ingress_urls": item.get("ingress_urls", []),
+            }
+        )
+    return summary
+
+
+def _deployment_ingress_urls(raw: object) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+
+    def add(value: object) -> None:
+        if (
+            isinstance(value, str)
+            and value.startswith(("http://", "https://"))
+            and value not in seen
+        ):
+            seen.add(value)
+            urls.append(value)
+
+    def visit(value: object) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if key in {"admin_token", "token", "read_token", "apishim_token"}:
+                    continue
+                if key in {"ingress_urls", "urls"}:
+                    visit(item)
+                elif key.startswith("public_") or key.endswith("_url") or key == "server":
+                    add(item)
+                elif isinstance(item, (dict, list)):
+                    visit(item)
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+        else:
+            add(value)
+
+    visit(raw)
+    return urls
+
+
+def _deployment_exports(stage_dir: Path) -> dict[str, str]:
+    exports: dict[str, str] = {}
+    root = stage_dir.expanduser().resolve() / "exports"
+    if not root.is_dir():
+        return exports
+    for fmt in ("k1s", "k8s", "helm"):
+        candidate = root / fmt
+        if candidate.is_dir():
+            exports[fmt] = str(candidate)
+    return exports
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _read_optional_text(path: Path | None) -> str | None:

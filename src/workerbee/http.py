@@ -89,9 +89,9 @@ def request_https_via_loopback(
     ca_bundle: str | Path | None = None,
 ) -> HTTPResult:
     method = method.upper()
-    if method not in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"}:
+    if method not in {"GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"}:
         raise ValueError(
-            "loopback HTTPS probe method must be GET, HEAD, POST, PUT, PATCH, or DELETE"
+            "loopback HTTPS probe method must be GET, HEAD, POST, PUT, PATCH, DELETE, or OPTIONS"
         )
     parsed = urlsplit(url)
     if parsed.scheme != "https":
