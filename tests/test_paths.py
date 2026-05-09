@@ -184,6 +184,7 @@ def test_supervisor_stack_ingress_publishes_dashboard_and_apishim(
         host_alias="127.0.0.1",
         ca_bundle=tmp_path / "ca.crt",
         global_dashboard_url="https://dashboard.workerbee.localhost:19443/",
+        dashboard_port=18090,
     )
     sup = WorkerBeeSupervisor(
         project="demo",
@@ -218,6 +219,8 @@ def test_supervisor_stack_ingress_publishes_dashboard_and_apishim(
     route = (state_dir / "caddy" / "k1s-stack.caddy").read_text(encoding="utf-8")
     assert "https://k1s.demo.workerbee.localhost" in route
     assert "https://k1s-api.demo.workerbee.localhost" in route
+    assert "handle /static/dash-assets/*" in route
+    assert "reverse_proxy 127.0.0.1:18090" in route
     assert "reverse_proxy 127.0.0.1:19108" in route
     assert "reverse_proxy https://127.0.0.1:18445" in route
     assert "tls_insecure_skip_verify" in route

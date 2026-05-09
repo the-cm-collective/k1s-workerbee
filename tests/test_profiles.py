@@ -253,6 +253,7 @@ def test_existing_profile_start_refreshes_ingress_routes(
         host_alias="host.docker.internal",
         ca_bundle=tmp_path / "global" / "caddy-local-root.crt",
         global_dashboard_url="https://dashboard.workerbee.localhost:19443/",
+        dashboard_port=18090,
     )
     second = runner.start(profile="k1s-dev-min-sqlite", timeout=0.01)
 
@@ -269,7 +270,11 @@ def test_existing_profile_start_refreshes_ingress_routes(
     assert second["profile"]["ingress_urls"]["legacy_dashboard"] == (
         "https://k1s-dash.demo.workerbee.localhost:19443/dashboard"
     )
-    assert (tmp_path / "global" / "caddy-sites" / "demo" / "k1s-profile.caddy").is_file()
+    route = tmp_path / "global" / "caddy-sites" / "demo" / "k1s-profile.caddy"
+    assert route.is_file()
+    route_text = route.read_text(encoding="utf-8")
+    assert "handle /static/dash-assets/*" in route_text
+    assert "reverse_proxy host.docker.internal:18090" in route_text
 
 
 def test_profile_controller_dashboard_uses_public_apishim_ingress(
@@ -308,6 +313,7 @@ def test_profile_controller_dashboard_uses_public_apishim_ingress(
             host_alias="host.docker.internal",
             ca_bundle=tmp_path / "global" / "caddy-local-root.crt",
             global_dashboard_url="https://dashboard.workerbee.localhost:19443/",
+            dashboard_port=18090,
         ),
     )
 
