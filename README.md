@@ -392,10 +392,72 @@ If installed into an active venv, uninstall with `python -m pip uninstall k1s-wo
 
 ## macOS Notes
 
-macOS support is best effort for v0.1 until validated on physical hosts. Install
-Python 3.11 or newer, use Docker Desktop or Podman, run the one-line installer,
-then verify with `workerbee doctor`. To trust the local WorkerBee Caddy CA after
-`workerbee mcp start`, run:
+macOS support is best effort for v0.1, with Docker Desktop as the recommended
+runtime for the default WorkerBee app workflow. Install Python 3.11 or newer,
+install Docker Desktop, start Docker Desktop, and confirm the Docker CLI works:
+
+```bash
+python3.11 --version
+docker version
+```
+
+One-line install:
+
+```bash
+curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/latest/download/install-workerbee.sh | PYTHON=python3.11 sh
+export PATH="$HOME/.local/bin:$PATH"
+workerbee doctor
+```
+
+The installer uses an active virtual environment when one is enabled. Without an
+active venv, it creates a standalone WorkerBee venv under
+`${XDG_DATA_HOME:-$HOME/.local/share}/workerbee/venv` and writes a wrapper to
+`~/.local/bin/workerbee`.
+
+Clone/dev install:
+
+```bash
+git clone git@github.com:the-cm-collective/k1s-workerbee.git
+cd k1s-workerbee
+python3.11 -m venv .venv
+. .venv/bin/activate
+python -m pip install -U pip
+mkdir -p dist
+curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/latest/download/workerbee-wheelhouse.tar.gz -o dist/workerbee-wheelhouse.tar.gz
+tar -xzf dist/workerbee-wheelhouse.tar.gz -C dist
+python -m pip install -e '.[dev]' --find-links dist/workerbee-wheelhouse
+workerbee doctor
+```
+
+If you are developing against a sibling k1s checkout instead of the published
+runtime wheel, rebuild the wheelhouse from that checkout:
+
+```bash
+scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse --python .venv/bin/python
+python -m pip install -e '.[dev]' --find-links dist/workerbee-wheelhouse
+```
+
+With Docker Desktop, WorkerBee is intended to support the same default app
+workflow used on Linux Docker/Podman hosts, with comparable default-app
+capability to the direct-containerd backend: MCP daemon, global dashboard, Docker
+image builds, local deploy/status/logs/exec, HTTPS ingress probes, POC
+validation, cleanup, and artifact export.
+
+```bash
+workerbee --runtime docker mcp start
+workerbee --runtime docker deploy-poc
+workerbee --runtime docker poc-status
+workerbee --runtime docker logs api
+workerbee --runtime docker export-k8s
+workerbee --runtime docker stop --purge
+workerbee --runtime docker mcp stop
+```
+
+Direct-containerd profiles, the MicroK8s/NVIDIA guard, and
+`scripts/dev/wb-containerd` are Linux/containerd development paths. They are not
+the expected Docker Desktop path on macOS.
+
+To trust the local WorkerBee Caddy CA after `workerbee mcp start`, run:
 
 ```bash
 workerbee trust install --target system

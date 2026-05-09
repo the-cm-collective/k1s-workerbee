@@ -68,8 +68,24 @@ else
   "$python_bin" -m venv "$INSTALL_DIR/venv" || fail "failed to create venv; install the Python venv package or activate an existing venv"
 fi
 
+package_spec="k1s-workerbee"
+for candidate in "$wheelhouse"/k1s_workerbee-*.whl; do
+  [ -f "$candidate" ] || continue
+  wheel_base="$(basename "$candidate")"
+  package_version="${wheel_base#k1s_workerbee-}"
+  package_version="${package_version%%-*}"
+  if [ "$package_version" != "" ]; then
+    package_spec="k1s-workerbee==$package_version"
+  fi
+  break
+done
+
 "$target_python" -m pip install --upgrade pip >/dev/null
-"$target_python" -m pip install --no-index --find-links "$wheelhouse" k1s-workerbee
+if ! "$target_python" -m pip install --no-index --find-links "$wheelhouse" "$package_spec"; then
+  log ""
+  log "Bundled wheelhouse install failed; retrying with package index access for platform-specific wheels."
+  "$target_python" -m pip install --find-links "$wheelhouse" "$package_spec"
+fi
 
 if [ "$install_mode" = "standalone" ]; then
   mkdir -p "$BIN_DIR"
