@@ -219,6 +219,7 @@ def deploy_local_stage(
             remediation="Fix staged files and run validation again.",
         )
     results = []
+    native_manifests: list[Path] = []
     for detail in validation["manifest_details"]:
         manifest = Path(str(detail["path"]))
         if detail["input_kind"] == KUBERNETES:
@@ -226,10 +227,152 @@ def deploy_local_stage(
                 supervisor.deploy_k8s_manifest(manifest, namespace=namespace, timeout=timeout)
             )
         else:
+            native_manifests.append(manifest)
             results.append(
                 supervisor.deploy_manifest(manifest, namespace=namespace, timeout=timeout)
             )
-    return {"ok": True, "validation": validation, "apply": results}
+    alias_refresh = _refresh_containerd_service_aliases(
+        supervisor=supervisor,
+        validation=validation,
+        native_manifests=native_manifests,
+        namespace=namespace,
+        timeout=timeout,
+    )
+    return {"ok": True, "validation": validation, "apply": results, "alias_refresh": alias_refresh}
+
+
+def _refresh_containerd_service_aliases(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    validation: dict[str, Any],
+    native_manifests: list[Path],
+    namespace: str | None,
+    timeout: int,
+) -> dict[str, Any]:
+    info = supervisor.load_stack()
+    runtime = getattr(info, "runtime", None) if info is not None else None
+    if runtime != CONTAINERD_RUNTIME:
+        return {"enabled": False, "reason": "runtime is not direct containerd", "runtime": runtime}
+    if not native_manifests:
+        return {"enabled": False, "reason": "no native k1s manifests", "runtime": runtime}
+    service_workloads = _native_service_workloads(validation, namespace=namespace)
+    if not service_workloads:
+        return {
+            "enabled": False,
+            "reason": "no native k1s service workloads",
+            "runtime": runtime,
+        }
+    if info is None:
+        info = supervisor.start()
+    wait = _wait_for_service_workloads(
+        supervisor=supervisor,
+        info=info,
+        workloads=service_workloads,
+        timeout_seconds=max(3.0, min(20.0, float(timeout) * 0.25)),
+    )
+    reapplies = [
+        supervisor.deploy_manifest(manifest, namespace=namespace, timeout=timeout)
+        for manifest in native_manifests
+    ]
+    return {
+        "enabled": True,
+        "runtime": runtime,
+        "service_workloads": service_workloads,
+        "ready": wait["ready"],
+        "waited_seconds": wait["waited_seconds"],
+        "reapplied": len(reapplies),
+        "apply": reapplies,
+    }
+
+
+def _native_service_workloads(
+    validation: dict[str, Any],
+    *,
+    namespace: str | None,
+) -> list[dict[str, str]]:
+    workloads: list[dict[str, str]] = []
+    for detail in validation.get("manifest_details", []):
+        if not isinstance(detail, dict) or detail.get("input_kind") != NATIVE_K1S:
+            continue
+        path = Path(str(detail.get("path") or ""))
+        if not path.is_file():
+            continue
+        docs = _load_yaml_documents(path.read_text(encoding="utf-8"))
+        for doc in docs:
+            if not isinstance(doc, dict) or _api_version(doc) != "ae.dev/v1alpha1":
+                continue
+            spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
+            if not spec.get("service"):
+                continue
+            metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+            name = str(metadata.get("name") or path.stem)
+            ns = str(namespace or metadata.get("namespace") or "default")
+            workloads.append({"namespace": ns, "name": name})
+    return workloads
+
+
+def _wait_for_service_workloads(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    info: Any,
+    workloads: list[dict[str, str]],
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    last: list[dict[str, Any]] = []
+    while True:
+        last = [
+            _service_workload_status(supervisor=supervisor, info=info, workload=workload)
+            for workload in workloads
+        ]
+        if last and all(item.get("ready") for item in last):
+            waited = max(0.0, timeout_seconds - (deadline - time.monotonic()))
+            return {
+                "ready": True,
+                "waited_seconds": round(waited, 3),
+                "statuses": last,
+            }
+        if time.monotonic() >= deadline:
+            return {"ready": False, "waited_seconds": round(timeout_seconds, 3), "statuses": last}
+        time.sleep(0.5)
+
+
+def _service_workload_status(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    info: Any,
+    workload: dict[str, str],
+) -> dict[str, Any]:
+    name = workload["name"]
+    namespace = workload["namespace"]
+    try:
+        result = supervisor.run_ae(
+            [
+                "--server",
+                info.controller_url,
+                "--token",
+                info.read_token,
+                "status",
+                name,
+                "-n",
+                namespace,
+                "--json",
+            ],
+            info=info,
+            timeout=10,
+        )
+        payload = json.loads(str(result.get("stdout") or "{}"))
+        desired = max(1, int(payload.get("desired_replicas") or 1))
+        ready = int(payload.get("ready_replicas") or 0)
+        return {
+            "namespace": namespace,
+            "name": name,
+            "ready": ready >= desired,
+            "desired": desired,
+            "ready_replicas": ready,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"namespace": namespace, "name": name, "ready": False, "error": str(exc)}
 
 
 def deploy_profile_stage(

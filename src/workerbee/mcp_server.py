@@ -28,6 +28,55 @@ from workerbee.manifests import (
 from workerbee.paths import default_state_root
 from workerbee.trust import trust_install, trust_status, trust_uninstall
 
+INGRESS_PROBE_INPUT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "title": "workerbee_v1_ingress_probeArguments",
+    "properties": {
+        "project": {"type": "string", "default": "default", "title": "Project"},
+        "url": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+            "title": "Url",
+        },
+        "host": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+            "title": "Host",
+        },
+        "path": {"type": "string", "default": "/", "title": "Path"},
+        "method": {"type": "string", "default": "GET", "title": "Method"},
+        "expected_status": {
+            "anyOf": [{"type": "integer"}, {"type": "null"}],
+            "default": None,
+            "title": "Expected Status",
+        },
+        "body_contains": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+            "title": "Body Contains",
+        },
+        "json_body": {
+            "anyOf": [{"type": "object", "additionalProperties": True}, {"type": "null"}],
+            "default": None,
+            "title": "Json Body",
+        },
+        "body": {
+            "anyOf": [{"type": "string"}, {"type": "null"}],
+            "default": None,
+            "title": "Body",
+        },
+        "headers": {
+            "anyOf": [
+                {"type": "object", "additionalProperties": {"type": "string"}},
+                {"type": "null"},
+            ],
+            "default": None,
+            "title": "Headers",
+        },
+        "timeout": {"type": "number", "default": 10.0, "title": "Timeout"},
+    },
+}
+
 
 def serve_mcp(
     *,
@@ -560,6 +609,12 @@ def serve_mcp(
             f"goal: {goal or '(not provided)'}\n\n{runbook_markdown()}"
         )
 
+    _publish_explicit_tool_schema(
+        mcp,
+        "workerbee_v1_ingress_probe",
+        INGRESS_PROBE_INPUT_SCHEMA,
+    )
+
     try:
         mcp.run(transport="streamable-http")
     finally:
@@ -590,6 +645,18 @@ def _release_foreground_privilege(
         if not isinstance(helper, dict) or not helper.get("started"):
             return
         stop_containerd_helper(daemon.state_root)
+
+
+def _publish_explicit_tool_schema(mcp: Any, name: str, schema: dict[str, Any]) -> bool:
+    manager = getattr(mcp, "_tool_manager", None)
+    tools = getattr(manager, "_tools", None)
+    if not isinstance(tools, dict):
+        return False
+    tool = tools.get(name)
+    if tool is None:
+        return False
+    tool.parameters = dict(schema)
+    return True
 
 
 def _serve_exec_argv(

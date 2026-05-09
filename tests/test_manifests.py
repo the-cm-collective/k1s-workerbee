@@ -1,5 +1,5 @@
 from pathlib import Path
-from types import MethodType
+from types import MethodType, SimpleNamespace
 from typing import Any
 
 from workerbee.k1s_runtime import K1sRuntime
@@ -184,6 +184,91 @@ spec:
 
     assert result["ok"] is True
     assert calls == [(manifest.resolve(), "demo", 55)]
+    assert result["alias_refresh"]["enabled"] is False
+
+
+def test_local_containerd_native_deploy_reapplies_after_service_ready(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("workerbee.supervisor.resolve_k1s_runtime", lambda **_: _runtime())
+    sup = WorkerBeeSupervisor(project="RawForm", state_dir=tmp_path / "state", runtime="containerd")
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    api = manifests / "api.k1s.yaml"
+    api.write_text(
+        """apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: api
+  namespace: rawform
+spec:
+  image: workerbee-api:dev
+""",
+        encoding="utf-8",
+    )
+    minio = manifests / "minio.k1s.yaml"
+    minio.write_text(
+        """apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: rawform
+spec:
+  image: minio/minio:latest
+  service:
+    port: 9000
+""",
+        encoding="utf-8",
+    )
+    stack = SimpleNamespace(
+        runtime="containerd",
+        controller_url="http://127.0.0.1:19108",
+        read_token="-".join(["token", "for", "test"]),
+    )
+    calls: list[str] = []
+
+    def fake_load_stack(_self) -> object:
+        return stack
+
+    def fake_deploy(
+        _self,
+        path: Path,
+        *,
+        namespace: str | None = None,
+        timeout: int = 180,
+    ) -> dict[str, Any]:
+        _ = (namespace, timeout)
+        calls.append(path.name)
+        return {"ok": True, "manifest": str(path)}
+
+    def fake_run_ae(
+        _self,
+        args: list[str],
+        *,
+        info: object,
+        timeout: int = 60,
+    ) -> dict[str, Any]:
+        _ = (args, info, timeout)
+        return {
+            "stdout": (
+                '{"app_name":"rawform--minio","desired_replicas":1,'
+                '"ready_replicas":1,"live_replicas":1}'
+            )
+        }
+
+    sup.load_stack = MethodType(fake_load_stack, sup)  # type: ignore[method-assign]
+    sup.deploy_manifest = MethodType(fake_deploy, sup)  # type: ignore[method-assign]
+    sup.run_ae = MethodType(fake_run_ae, sup)  # type: ignore[method-assign]
+
+    result = deploy_local_stage(supervisor=sup, stage_dir=stage, namespace=None, timeout=60)
+
+    assert result["ok"] is True
+    assert calls == ["api.k1s.yaml", "minio.k1s.yaml", "api.k1s.yaml", "minio.k1s.yaml"]
+    assert result["alias_refresh"]["enabled"] is True
+    assert result["alias_refresh"]["ready"] is True
+    assert result["alias_refresh"]["reapplied"] == 2
 
 
 def test_profile_deploy_uses_internal_profile_connection(tmp_path: Path, monkeypatch) -> None:

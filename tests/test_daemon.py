@@ -128,6 +128,8 @@ def test_global_dashboard_uses_k1s_visual_style() -> None:
     assert 'id="summary-grid"' in html
     assert 'id="jobs-grid"' in html
     assert "/api/action-jobs/" in html
+    assert "expandedRouteProjects" in html
+    assert "refresh paused: route details open" in html
     assert "window.location.reload()" not in html
 
 

@@ -2465,6 +2465,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
       const refreshKey = 'workerbee.dashboard.refreshIntervalMs';
       let refreshTimer = null;
       const activeJobIds = new Set();
+      const expandedRouteProjects = new Set();
 
       function escapeHtml(value) {{
         return String(value ?? '')
@@ -2501,16 +2502,17 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         return pill(status, state);
       }}
 
-      function routeButton(item, safeProject) {{
+      function routeButton(item, safeProject, expanded = false) {{
         const count = item.exposed_route_count || 0;
         return `<button class="route-toggle" data-project="${{safeProject}}" `
-          + `aria-expanded="false">Routes ${{count}}</button>`;
+          + `aria-expanded="${{expanded ? 'true' : 'false'}}">Routes ${{count}}</button>`;
       }}
 
-      function renderRouteDetails(item, safeProject) {{
+      function renderRouteDetails(item, safeProject, expanded = false) {{
+        const hidden = expanded ? '' : ' hidden';
         const routes = Array.isArray(item.exposed_routes) ? item.exposed_routes : [];
         if (!routes.length) {{
-          return `<tr class="route-details" data-route-project="${{safeProject}}" hidden>`
+          return `<tr class="route-details" data-route-project="${{safeProject}}"${{hidden}}>`
             + '<td colspan="12"><span class="muted">'
             + 'No Caddy routes are currently exposed for this project.'
             + '</span></td></tr>';
@@ -2531,7 +2533,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             + `<td>${{escapeHtml(route.source_file || '')}}</td>`
             + '</tr>';
         }}).join('');
-        return `<tr class="route-details" data-route-project="${{safeProject}}" hidden>`
+        return `<tr class="route-details" data-route-project="${{safeProject}}"${{hidden}}>`
           + '<td colspan="12"><div class="route-panel"><table class="route-table">'
           + '<thead><tr><th>Type</th><th>Public URL</th><th>Upstream</th>'
           + '<th>Source</th></tr></thead>'
@@ -2553,13 +2555,20 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         if (!Array.isArray(projects) || !projects.length) {{
           projectsBody.innerHTML =
             '<tr><td class="muted" colspan="12">No WorkerBee projects registered.</td></tr>';
+          expandedRouteProjects.clear();
+          configureRefreshTimer({{persist: false}});
           return;
+        }}
+        const presentProjects = new Set(projects.map((item) => String(item.project || '')));
+        for (const project of Array.from(expandedRouteProjects)) {{
+          if (!presentProjects.has(project)) expandedRouteProjects.delete(project);
         }}
         projectsBody.innerHTML = projects.map((item) => {{
           const project = String(item.project || '');
           const safeProject = escapeHtml(project);
           const checked = selected.has(project) ? ' checked' : '';
           const error = item.error || '';
+          const expanded = expandedRouteProjects.has(project);
           return '<tr>'
             + `<td><input type="checkbox" class="project-select" value="${{safeProject}}" `
             + `aria-label="Select ${{safeProject}}"${{checked}}></td>`
@@ -2568,7 +2577,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             + `<td>${{stackPill(item)}}</td>`
             + `<td>${{profilePill(item)}}</td>`
             + `<td>${{ingressPill(item)}}</td>`
-            + `<td>${{routeButton(item, safeProject)}}</td>`
+            + `<td>${{routeButton(item, safeProject, expanded)}}</td>`
             + `<td>${{link(item.dashboard_url)}}</td>`
             + `<td>${{escapeHtml(item.git_branch || '')}}</td>`
             + `<td>${{escapeHtml(error)}}</td>`
@@ -2580,8 +2589,9 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             + `data-project="${{safeProject}}">Delete</button>`
             + '</div></td>'
             + '</tr>'
-            + renderRouteDetails(item, safeProject);
+            + renderRouteDetails(item, safeProject, expanded);
         }}).join('');
+        configureRefreshTimer({{persist: false}});
       }}
 
       function renderSummary(summary = {{}}, globalDashboard = {{}}) {{
@@ -2628,7 +2638,10 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         renderJobs(payload.action_jobs || []);
         ingressBox.textContent = JSON.stringify(payload.global_dashboard || {{}}, null, 2);
         const stamp = payload.updated_at ? new Date(payload.updated_at * 1000) : new Date();
-        refreshStatus.textContent = `updated ${{stamp.toLocaleTimeString()}}`;
+        const updated = `updated ${{stamp.toLocaleTimeString()}}`;
+        refreshStatus.textContent = expandedRouteProjects.size
+          ? `${{updated}}; refresh paused: route details open`
+          : updated;
       }}
 
       async function refreshProjects(options = {{}}) {{
@@ -2648,13 +2661,19 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         setTimeout(() => refreshProjects({{silent: true}}).catch(() => {{}}), 3000);
       }}
 
-      function configureRefreshTimer() {{
+      function configureRefreshTimer(options = {{}}) {{
         if (refreshTimer) {{
           clearInterval(refreshTimer);
           refreshTimer = null;
         }}
         const ms = parseInt(refreshSelect.value, 10) || 0;
-        localStorage.setItem(refreshKey, String(ms));
+        if (options.persist !== false) {{
+          localStorage.setItem(refreshKey, String(ms));
+        }}
+        if (expandedRouteProjects.size > 0) {{
+          refreshStatus.textContent = 'refresh paused: route details open';
+          return;
+        }}
         if (ms > 0) {{
           refreshTimer = setInterval(() => {{
             refreshProjects({{silent: true}}).catch((err) => {{
@@ -2738,6 +2757,12 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         const expanded = button.getAttribute('aria-expanded') === 'true';
         row.hidden = expanded;
         button.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+        if (expanded) {{
+          expandedRouteProjects.delete(project);
+        }} else {{
+          expandedRouteProjects.add(project);
+        }}
+        configureRefreshTimer({{persist: false}});
       }}
 
       async function postAction(action, projects = []) {{
