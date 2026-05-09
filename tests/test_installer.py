@@ -11,4 +11,5 @@ def test_install_script_is_valid_shell() -> None:
 def test_wheelhouse_build_script_creates_release_archive() -> None:
     text = Path("scripts/build_wheelhouse.sh").read_text(encoding="utf-8")
     assert "workerbee-wheelhouse.tar.gz" in text
+    assert "rm -rf" in text
     assert "tar -C" in text
