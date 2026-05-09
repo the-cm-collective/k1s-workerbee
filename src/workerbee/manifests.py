@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 from collections.abc import Callable
@@ -219,6 +220,7 @@ def deploy_local_stage(
             remediation="Fix staged files and run validation again.",
         )
     results = []
+    native_manifests: list[Path] = []
     for detail in validation["manifest_details"]:
         manifest = Path(str(detail["path"]))
         if detail["input_kind"] == KUBERNETES:
@@ -226,10 +228,365 @@ def deploy_local_stage(
                 supervisor.deploy_k8s_manifest(manifest, namespace=namespace, timeout=timeout)
             )
         else:
+            native_manifests.append(manifest)
             results.append(
                 supervisor.deploy_manifest(manifest, namespace=namespace, timeout=timeout)
             )
-    return {"ok": True, "validation": validation, "apply": results}
+    alias_refresh = _refresh_containerd_service_aliases(
+        supervisor=supervisor,
+        validation=validation,
+        native_manifests=native_manifests,
+        namespace=namespace,
+        timeout=timeout,
+    )
+    if alias_refresh.get("enabled") and alias_refresh.get("ok") is False:
+        raise WorkerBeeError(
+            code="CONTAINERD_SERVICE_ALIAS_NOT_READY",
+            message=(
+                "direct-containerd service aliases were not ready; "
+                "staged manifests were not reapplied"
+            ),
+            details={
+                "validation": validation,
+                "apply": results,
+                "alias_refresh": alias_refresh,
+            },
+            remediation=(
+                "Inspect service workload status/logs, fix readiness failures, then rerun deploy. "
+                "WorkerBee did not perform the alias-refresh reapply because one or more service "
+                "workloads did not become ready."
+            ),
+            retryable=True,
+        )
+    return {"ok": True, "validation": validation, "apply": results, "alias_refresh": alias_refresh}
+
+
+def _refresh_containerd_service_aliases(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    validation: dict[str, Any],
+    native_manifests: list[Path],
+    namespace: str | None,
+    timeout: int,
+) -> dict[str, Any]:
+    info = supervisor.load_stack()
+    runtime = getattr(info, "runtime", None) if info is not None else None
+    if runtime != CONTAINERD_RUNTIME:
+        return {
+            "ok": True,
+            "enabled": False,
+            "reason": "runtime is not direct containerd",
+            "runtime": runtime,
+        }
+    if not native_manifests:
+        return {
+            "ok": True,
+            "enabled": False,
+            "reason": "no native k1s manifests",
+            "runtime": runtime,
+        }
+    service_workloads = _native_referenced_service_workloads(validation, namespace=namespace)
+    if not service_workloads:
+        return {
+            "ok": True,
+            "enabled": False,
+            "reason": "no referenced native k1s service workloads",
+            "runtime": runtime,
+        }
+    if info is None:
+        info = supervisor.start()
+    wait = _wait_for_service_workloads(
+        supervisor=supervisor,
+        info=info,
+        workloads=service_workloads,
+        timeout_seconds=max(3.0, min(20.0, float(timeout) * 0.25)),
+    )
+    if not wait["ready"]:
+        return {
+            "ok": False,
+            "enabled": True,
+            "runtime": runtime,
+            "service_workloads": service_workloads,
+            "ready": False,
+            "waited_seconds": wait["waited_seconds"],
+            "statuses": wait.get("statuses", []),
+            "reapplied": 0,
+            "apply": [],
+        }
+    reapplies = [
+        supervisor.deploy_manifest(manifest, namespace=namespace, timeout=timeout)
+        for manifest in native_manifests
+    ]
+    return {
+        "ok": True,
+        "enabled": True,
+        "runtime": runtime,
+        "service_workloads": service_workloads,
+        "ready": wait["ready"],
+        "waited_seconds": wait["waited_seconds"],
+        "reapplied": len(reapplies),
+        "apply": reapplies,
+    }
+
+
+def _native_referenced_service_workloads(
+    validation: dict[str, Any],
+    *,
+    namespace: str | None,
+) -> list[dict[str, str]]:
+    providers: list[dict[str, str]] = []
+    provider_refs: dict[tuple[str, str], set[str]] = {}
+    referenced_hosts_by_ns: dict[str, set[str]] = {}
+    seen: set[tuple[str, str]] = set()
+    for detail in validation.get("manifest_details", []):
+        if not isinstance(detail, dict) or detail.get("input_kind") != NATIVE_K1S:
+            continue
+        path = Path(str(detail.get("path") or ""))
+        if not path.is_file():
+            continue
+        docs = _load_yaml_documents(path.read_text(encoding="utf-8"))
+        for doc in docs:
+            if not isinstance(doc, dict) or _api_version(doc) != "ae.dev/v1alpha1":
+                continue
+            metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+            spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
+            ns = str(namespace or metadata.get("namespace") or "default")
+            name = str(metadata.get("name") or path.stem)
+            manifest_refs = _native_manifest_reference_hosts(doc)
+            referenced_hosts_by_ns.setdefault(ns, set()).update(manifest_refs)
+            if not spec.get("service"):
+                continue
+            key = (ns, name)
+            provider_refs[key] = manifest_refs
+            if key in seen:
+                continue
+            seen.add(key)
+            providers.append({"namespace": ns, "name": name})
+    referenced_providers = [
+        provider
+        for provider in providers
+        if _service_reference_matches(
+            referenced_hosts_by_ns.get(provider["namespace"], set()),
+            provider["namespace"],
+            provider["name"],
+        )
+    ]
+    provider_keys = {(provider["namespace"], provider["name"]) for provider in providers}
+    root_providers = [
+        provider
+        for provider in referenced_providers
+        if not _provider_depends_on_provider(
+            provider_refs.get((provider["namespace"], provider["name"]), set()),
+            provider_keys=provider_keys,
+            current=(provider["namespace"], provider["name"]),
+        )
+    ]
+    return root_providers or referenced_providers
+
+
+def _provider_depends_on_provider(
+    referenced_hosts: set[str],
+    *,
+    provider_keys: set[tuple[str, str]],
+    current: tuple[str, str],
+) -> bool:
+    for service_ns, service_name in provider_keys:
+        if (service_ns, service_name) == current:
+            continue
+        if _service_reference_matches(referenced_hosts, service_ns, service_name):
+            return True
+    return False
+
+
+def _native_service_workloads(
+    validation: dict[str, Any],
+    *,
+    namespace: str | None,
+) -> list[dict[str, str]]:
+    workloads: list[dict[str, str]] = []
+    for detail in validation.get("manifest_details", []):
+        if not isinstance(detail, dict) or detail.get("input_kind") != NATIVE_K1S:
+            continue
+        path = Path(str(detail.get("path") or ""))
+        if not path.is_file():
+            continue
+        docs = _load_yaml_documents(path.read_text(encoding="utf-8"))
+        for doc in docs:
+            if not isinstance(doc, dict) or _api_version(doc) != "ae.dev/v1alpha1":
+                continue
+            spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
+            if not spec.get("service"):
+                continue
+            metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+            name = str(metadata.get("name") or path.stem)
+            ns = str(namespace or metadata.get("namespace") or "default")
+            workloads.append({"namespace": ns, "name": name})
+    return workloads
+
+
+def _native_manifest_reference_hosts(doc: dict[str, Any]) -> set[str]:
+    spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
+    hosts: set[str] = set()
+    for text in _native_manifest_reference_texts(spec):
+        hosts.update(_reference_hosts_from_text(text))
+    return hosts
+
+
+def _native_manifest_reference_texts(spec: dict[str, Any]) -> list[str]:
+    texts: list[str] = []
+    texts.extend(_as_texts(spec.get("command")))
+    texts.extend(_as_texts(spec.get("args")))
+    texts.extend(_env_reference_texts(spec.get("env")))
+    containers = []
+    for key in ("containers", "initContainers", "init_containers"):
+        value = spec.get(key)
+        if isinstance(value, list):
+            containers.extend(value)
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        texts.extend(_as_texts(container.get("command")))
+        texts.extend(_as_texts(container.get("args")))
+        texts.extend(_env_reference_texts(container.get("env")))
+    return [text for text in texts if text]
+
+
+def _env_reference_texts(env: Any) -> list[str]:
+    if not isinstance(env, list):
+        return []
+    texts: list[str] = []
+    for item in env:
+        if not isinstance(item, dict):
+            continue
+        value = item.get("value")
+        if value is not None:
+            texts.append(str(value))
+    return texts
+
+
+def _as_texts(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    return [str(value)]
+
+
+def _service_reference_matches(
+    referenced_hosts: set[str],
+    service_ns: str,
+    service_name: str,
+) -> bool:
+    service_ns = str(service_ns or "").strip().lower()
+    service_name = str(service_name or "").strip().lower()
+    if not service_ns or not service_name:
+        return False
+    candidates = {
+        service_name,
+        f"{service_name}.{service_ns}",
+        f"{service_name}.{service_ns}.svc",
+        f"{service_name}.{service_ns}.svc.cluster.local",
+    }
+    return bool(referenced_hosts & candidates)
+
+
+def _reference_hosts_from_text(text: str) -> set[str]:
+    raw = str(text or "").strip()
+    if not raw:
+        return set()
+    hosts: set[str] = set()
+    scrubbed_parts: list[str] = []
+    cursor = 0
+    for match in re.finditer(r"[A-Za-z][A-Za-z0-9+.-]*://[^\s'\"<>]+", raw):
+        scrubbed_parts.append(raw[cursor : match.start()])
+        scrubbed_parts.append(" ")
+        cursor = match.end()
+        try:
+            from urllib.parse import urlparse
+
+            host = str(urlparse(match.group(0)).hostname or "").strip().lower().rstrip(".")
+        except Exception:
+            host = ""
+        if host:
+            hosts.add(host)
+    scrubbed_parts.append(raw[cursor:])
+    scrubbed = "".join(scrubbed_parts)
+    host_port = re.compile(
+        r"(?<![A-Za-z0-9_.-])"
+        r"([A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?"
+        r"(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*)"
+        r":\d{1,5}"
+        r"(?![A-Za-z0-9_.-])"
+    )
+    for match in host_port.finditer(scrubbed):
+        host = str(match.group(1) or "").strip().lower().rstrip(".")
+        if host:
+            hosts.add(host)
+    return hosts
+
+
+def _wait_for_service_workloads(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    info: Any,
+    workloads: list[dict[str, str]],
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    last: list[dict[str, Any]] = []
+    while True:
+        last = [
+            _service_workload_status(supervisor=supervisor, info=info, workload=workload)
+            for workload in workloads
+        ]
+        if last and all(item.get("ready") for item in last):
+            waited = max(0.0, timeout_seconds - (deadline - time.monotonic()))
+            return {
+                "ready": True,
+                "waited_seconds": round(waited, 3),
+                "statuses": last,
+            }
+        if time.monotonic() >= deadline:
+            return {"ready": False, "waited_seconds": round(timeout_seconds, 3), "statuses": last}
+        time.sleep(0.5)
+
+
+def _service_workload_status(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    info: Any,
+    workload: dict[str, str],
+) -> dict[str, Any]:
+    name = workload["name"]
+    namespace = workload["namespace"]
+    try:
+        result = supervisor.run_ae(
+            [
+                "--server",
+                info.controller_url,
+                "--token",
+                info.read_token,
+                "status",
+                name,
+                "-n",
+                namespace,
+                "--json",
+            ],
+            info=info,
+            timeout=10,
+        )
+        payload = json.loads(str(result.get("stdout") or "{}"))
+        desired = max(1, int(payload.get("desired_replicas") or 1))
+        ready = int(payload.get("ready_replicas") or 0)
+        return {
+            "namespace": namespace,
+            "name": name,
+            "ready": ready >= desired,
+            "desired": desired,
+            "ready_replicas": ready,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"namespace": namespace, "name": name, "ready": False, "error": str(exc)}
 
 
 def deploy_profile_stage(

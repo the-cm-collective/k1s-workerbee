@@ -35,6 +35,7 @@ class ProjectIngressConfig:
     host_alias: str
     ca_bundle: Path
     global_dashboard_url: str
+    dashboard_port: int = 0
 
     def url(self, host: str, path: str = "/") -> str:
         normalized = path if path.startswith("/") else f"/{path}"
@@ -49,6 +50,7 @@ class ProjectIngressConfig:
             "caddy_sites": str(self.sites_dir),
             "ca_bundle": str(self.ca_bundle),
             "global_dashboard_url": self.global_dashboard_url,
+            "dashboard_port": self.dashboard_port,
         }
 
 
@@ -185,6 +187,7 @@ class GlobalIngress:
             host_alias=self.host_alias,
             ca_bundle=self.ca_bundle,
             global_dashboard_url=self.dashboard_url,
+            dashboard_port=self.dashboard_port,
         )
 
     @property

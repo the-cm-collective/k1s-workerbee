@@ -55,6 +55,16 @@ T = TypeVar("T")
 
 DASHBOARD_BACKGROUND_PATH = "/static/dash-assets/page-background-1920x1080.png"
 DASHBOARD_LOGO_PATH = "/static/dash-assets/k1s-logo-32.png"
+_DASHBOARD_ACTIONS = {
+    "start_projects",
+    "stop_projects",
+    "delete_projects",
+    "start_all_projects",
+    "stop_all_projects",
+    "delete_all_projects",
+    "mcp_shutdown",
+    "mcp_reboot",
+}
 
 
 @dataclass(slots=True)
@@ -68,6 +78,34 @@ class ProjectRecord:
     git_root: str | None = None
     git_branch: str | None = None
     explicit_project: bool = False
+
+
+@dataclass(slots=True)
+class DashboardActionJob:
+    job_id: str
+    action: str
+    projects: list[str]
+    status: str
+    created_at: float
+    started_at: float | None = None
+    finished_at: float | None = None
+    ok: bool | None = None
+    result: dict[str, Any] | None = None
+    error: str | None = None
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "job_id": self.job_id,
+            "action": self.action,
+            "projects": list(self.projects),
+            "status": self.status,
+            "created_at": self.created_at,
+            "started_at": self.started_at,
+            "finished_at": self.finished_at,
+            "ok": self.ok,
+            "result": self.result,
+            "error": self.error,
+        }
 
 
 class WorkerBeeDaemon:
@@ -93,6 +131,9 @@ class WorkerBeeDaemon:
         self._dashboard_shutdown_callback: Callable[[], None] | None = None
         self._dashboard_reboot_callback: Callable[[], None] | None = None
         self._dashboard_scheduler: Callable[[Callable[[], None]], None] | None = None
+        self._dashboard_jobs: dict[str, DashboardActionJob] = {}
+        self._dashboard_jobs_order: list[str] = []
+        self._dashboard_jobs_lock = threading.Lock()
         self.ingress: GlobalIngress | None = None
         self._state_lock: FileLock | None = None
 
@@ -381,6 +422,8 @@ class WorkerBeeDaemon:
             project_names.update(path.name for path in self.projects_dir.iterdir() if path.is_dir())
         items: list[dict[str, Any]] = []
         profile_ingress_sync_needed = False
+        global_dashboard = self.global_dashboard()
+        https_port = int(global_dashboard.get("https_port") or 19443)
         for name in sorted(project_names):
             record = records.get(name) or {}
             state_dir = record.get("state_dir") or str(
@@ -423,6 +466,18 @@ class WorkerBeeDaemon:
             stack_running = bool(status.get("running"))
             profile_running = bool(profile_status.get("running"))
             running = stack_running or profile_running
+            dashboard_url = profile_dashboard_url or stack_dashboard_url
+            exposed_routes = _project_exposed_routes(Path(state_dir), https_port=https_port)
+            exposed_hosts = sorted(
+                {
+                    host
+                    for route in exposed_routes
+                    for host in route.get("hosts", [])
+                    if isinstance(host, str)
+                }
+            )
+            ingress_ready = bool(dashboard_url or exposed_routes)
+            ingress_status = "ready" if ingress_ready else ("missing" if running else "idle")
             status_kind = _project_status_kind(
                 stack_running=stack_running,
                 profile_running=profile_running,
@@ -444,9 +499,15 @@ class WorkerBeeDaemon:
                     "profile_running": profile_running,
                     "status_kind": status_kind,
                     "apishim_running": bool(status.get("apishim_running")),
-                    "dashboard_url": profile_dashboard_url or stack_dashboard_url,
+                    "dashboard_url": dashboard_url,
                     "stack_dashboard_url": stack_dashboard_url,
                     "profile_dashboard_url": profile_dashboard_url,
+                    "ingress_ready": ingress_ready,
+                    "ingress_status": ingress_status,
+                    "exposed_routes": exposed_routes,
+                    "exposed_route_count": len(exposed_routes),
+                    "exposed_hosts": exposed_hosts,
+                    "exposed_route_summary": _exposed_route_summary(exposed_routes),
                     "profile_name": profile.get("profile") if isinstance(profile, dict) else None,
                     "profile_urls": profile_urls,
                     "profile": profile,
@@ -460,8 +521,10 @@ class WorkerBeeDaemon:
             ingress_sync = {**self._sync_ingress_projects_result(), "needed": True}
         return {
             "state_root": str(self.state_root),
-            "global_dashboard": self.global_dashboard(),
+            "global_dashboard": global_dashboard,
             "projects": items,
+            "summary": _dashboard_summary(items, global_dashboard=global_dashboard),
+            "action_jobs": self.dashboard_action_jobs(),
             "ingress_sync": ingress_sync,
             "updated_at": time.time(),
         }
@@ -861,6 +924,104 @@ class WorkerBeeDaemon:
             purge_images=purge_images,
         )
 
+    def enqueue_dashboard_action(self, action: str, projects: list[str]) -> dict[str, Any]:
+        job = DashboardActionJob(
+            job_id=secrets.token_urlsafe(12),
+            action=action,
+            projects=list(projects),
+            status="queued",
+            created_at=time.time(),
+        )
+        with self._dashboard_jobs_lock:
+            self._dashboard_jobs[job.job_id] = job
+            self._dashboard_jobs_order.append(job.job_id)
+            self._prune_dashboard_jobs_locked()
+        scheduler = self._dashboard_scheduler or _default_dashboard_job_scheduler
+        scheduler(lambda: self._run_dashboard_action_job(job.job_id))
+        return job.public_dict()
+
+    def dashboard_action_job(self, job_id: str) -> dict[str, Any] | None:
+        with self._dashboard_jobs_lock:
+            job = self._dashboard_jobs.get(job_id)
+            return job.public_dict() if job is not None else None
+
+    def dashboard_action_jobs(self) -> list[dict[str, Any]]:
+        with self._dashboard_jobs_lock:
+            jobs = [
+                self._dashboard_jobs[job_id].public_dict()
+                for job_id in self._dashboard_jobs_order
+                if job_id in self._dashboard_jobs
+            ]
+        return list(reversed(jobs))
+
+    def _run_dashboard_action_job(self, job_id: str) -> None:
+        with self._dashboard_jobs_lock:
+            job = self._dashboard_jobs.get(job_id)
+            if job is None:
+                return
+            job.status = "running"
+            job.started_at = time.time()
+        try:
+            result = self._execute_dashboard_action(job.action, job.projects)
+            ok = result.get("ok") is not False
+            error = _dashboard_action_result_error(result)
+        except Exception as exc:  # noqa: BLE001 - dashboard jobs must report failures
+            result = {"ok": False, "error": str(exc)}
+            ok = False
+            error = str(exc)
+        with self._dashboard_jobs_lock:
+            job = self._dashboard_jobs.get(job_id)
+            if job is None:
+                return
+            job.status = "succeeded" if ok else "failed"
+            job.ok = ok
+            job.result = result
+            job.error = error
+            job.finished_at = time.time()
+            self._prune_dashboard_jobs_locked()
+
+    def _execute_dashboard_action(self, action: str, projects: list[str]) -> dict[str, Any]:
+        if action == "start_projects":
+            return self.start_projects(projects, sync_ingress=False)
+        if action == "stop_projects":
+            return self.stop_projects(projects, purge=False)
+        if action == "delete_projects":
+            return self.delete_projects(projects, sync_ingress=False)
+        if action == "start_all_projects":
+            return self.start_all_projects(sync_ingress=False)
+        if action == "stop_all_projects":
+            return self.stop_all_projects(purge=False)
+        if action == "delete_all_projects":
+            return self.delete_all_projects(sync_ingress=False)
+        if action == "mcp_shutdown":
+            return self.schedule_mcp_shutdown()
+        if action == "mcp_reboot":
+            return self.schedule_mcp_reboot()
+        return {"ok": False, "error": f"unknown dashboard action: {action}"}
+
+    def _prune_dashboard_jobs_locked(self) -> None:
+        cutoff = time.time() - 30 * 60
+        keep: list[str] = []
+        for job_id in self._dashboard_jobs_order:
+            job = self._dashboard_jobs.get(job_id)
+            if job is None:
+                continue
+            if job.status in {"queued", "running"} or job.created_at >= cutoff:
+                keep.append(job_id)
+            else:
+                self._dashboard_jobs.pop(job_id, None)
+        finished = [
+            job_id
+            for job_id in keep
+            if self._dashboard_jobs[job_id].status not in {"queued", "running"}
+        ]
+        while len(keep) > 50 and finished:
+            candidate = finished.pop(0)
+            if candidate in keep:
+                keep.remove(candidate)
+            self._dashboard_jobs.pop(candidate, None)
+        self._dashboard_jobs_order = keep
+
     def stop_all_projects(self, *, purge: bool = False) -> dict[str, Any]:
         projects = self._known_projects()
         if not projects:
@@ -952,7 +1113,9 @@ class WorkerBeeDaemon:
     def delete_all_projects(self, *, sync_ingress: bool = True) -> dict[str, Any]:
         projects = self._known_projects()
         if not projects:
-            return _empty_project_action_result(state_root=self.state_root, purge=True)
+            result = _empty_project_action_result(state_root=self.state_root, purge=True)
+            result["default_restored"] = self._restore_default_project()
+            return result
         return self.delete_projects(projects, sync_ingress=sync_ingress)
 
     def delete_projects(
@@ -1011,13 +1174,20 @@ class WorkerBeeDaemon:
         ingress_sync: dict[str, Any] | None = None
         if unregister and removed:
             self._unregister_projects(removed)
+            default_restored = (
+                self._restore_default_project() if self.default_project in names else None
+            )
             ingress_sync = (
                 self._sync_ingress_projects_result()
                 if sync_ingress
                 else self._schedule_ingress_sync()
             )
+        else:
+            default_restored = self._restore_default_project() if (
+                unregister and self.default_project in names
+            ) else None
         failed = [result for result in results if result.get("ok") is False]
-        return {
+        payload = {
             "ok": not errors and not failed,
             "state_root": str(self.state_root),
             "purge": purge,
@@ -1025,6 +1195,23 @@ class WorkerBeeDaemon:
             "projects": results,
             "errors": errors,
             "ingress_sync": ingress_sync,
+        }
+        if default_restored is not None:
+            payload["default_restored"] = default_restored
+        return payload
+
+    def _restore_default_project(self) -> dict[str, Any]:
+        self._register_project(
+            self.default_project,
+            cwd_hint=str(self.cwd),
+            mode=DEFAULT_PROJECT_MODE,
+        )
+        return {
+            "project": self.default_project,
+            "mode": DEFAULT_PROJECT_MODE,
+            "state_dir": str(
+                daemon_project_state_dir(self.default_project, state_root=self.state_root)
+            ),
         }
 
     def schedule_mcp_shutdown(self) -> dict[str, Any]:
@@ -1357,6 +1544,22 @@ class WorkerBeeDaemon:
                         },
                     )
                     return
+                if path.startswith("/api/action-jobs/"):
+                    job_id = path.rsplit("/", 1)[-1]
+                    job = daemon.dashboard_action_job(job_id)
+                    if job is None:
+                        _send_json(
+                            self,
+                            {
+                                "ok": False,
+                                "error": "unknown dashboard action job",
+                                "job_id": job_id,
+                            },
+                            status=404,
+                        )
+                    else:
+                        _send_json(self, {"ok": True, "job": job})
+                    return
                 if path.startswith("/api/projects") or path.startswith("/api/status"):
                     _send_json(self, daemon.projects())
                     return
@@ -1471,6 +1674,11 @@ def _default_dashboard_scheduler(callback: Callable[[], None]) -> None:
     timer.start()
 
 
+def _default_dashboard_job_scheduler(callback: Callable[[], None]) -> None:
+    thread = threading.Thread(target=callback, name="workerbee-dashboard-action", daemon=True)
+    thread.start()
+
+
 def _default_ingress_sync_scheduler(callback: Callable[[], None]) -> None:
     timer = threading.Timer(1.0, callback)
     timer.daemon = True
@@ -1535,28 +1743,15 @@ def _handle_dashboard_action(
     if not secrets.compare_digest(token, daemon.dashboard_action_token):
         return 403, {"ok": False, "error": "invalid dashboard action token"}
     action = str(payload.get("action") or "")
-    if action == "start_projects":
-        result = daemon.start_projects(_dashboard_project_names(payload), sync_ingress=False)
-    elif action == "stop_projects":
-        result = daemon.stop_projects(_dashboard_project_names(payload), purge=False)
-    elif action == "delete_projects":
-        result = daemon.delete_projects(_dashboard_project_names(payload), sync_ingress=False)
-    elif action == "start_all_projects":
-        result = daemon.start_all_projects(sync_ingress=False)
-    elif action == "stop_all_projects":
-        result = daemon.stop_all_projects(purge=False)
-    elif action == "delete_all_projects":
-        result = daemon.delete_all_projects(sync_ingress=False)
-    elif action == "mcp_shutdown":
-        result = daemon.schedule_mcp_shutdown()
-    elif action == "mcp_reboot":
-        result = daemon.schedule_mcp_reboot()
-    else:
+    if action not in _DASHBOARD_ACTIONS:
         return 400, {"ok": False, "error": f"unknown dashboard action: {action}"}
-    return 200 if result.get("ok") is not False else 500, {
-        "ok": result.get("ok") is not False,
+    projects = _dashboard_project_names(payload)
+    job = daemon.enqueue_dashboard_action(action, projects)
+    return 202, {
+        "ok": True,
         "action": action,
-        "result": result,
+        "job_id": job["job_id"],
+        "job": job,
     }
 
 
@@ -1596,6 +1791,46 @@ def _dashboard_project_names(payload: dict[str, Any]) -> list[str]:
         seen.add(name)
         names.append(name)
     return names
+
+
+def _dashboard_action_result_error(result: dict[str, Any]) -> str | None:
+    if result.get("ok") is not False:
+        return None
+    raw_error = result.get("error")
+    if raw_error:
+        return str(raw_error)
+    errors = result.get("errors")
+    if isinstance(errors, list) and errors:
+        first = errors[0]
+        if isinstance(first, dict) and first.get("error"):
+            project = first.get("project")
+            prefix = f"{project}: " if project else ""
+            return f"{prefix}{first['error']}"
+        return str(first)
+    return "dashboard action failed"
+
+
+def _dashboard_summary(
+    projects: list[dict[str, Any]],
+    *,
+    global_dashboard: dict[str, Any],
+) -> dict[str, Any]:
+    errors = [item for item in projects if item.get("error")]
+    running = [item for item in projects if item.get("running")]
+    stopped = [item for item in projects if not item.get("running") and not item.get("error")]
+    ingress = [item for item in projects if item.get("ingress_ready")]
+    health_probe = global_dashboard.get("health_probe")
+    health_ok = bool(health_probe.get("ok")) if isinstance(health_probe, dict) else False
+    return {
+        "mcp_running": True,
+        "global_ingress_running": bool(global_dashboard.get("running")),
+        "https_health": health_ok,
+        "projects_total": len(projects),
+        "projects_running": len(running),
+        "projects_stopped": len(stopped),
+        "projects_error": len(errors),
+        "projects_ingress_ready": len(ingress),
+    }
 
 
 def _dashboard_url(status: dict[str, Any]) -> str | None:
@@ -1709,27 +1944,235 @@ def _profile_ingress_refresh_metadata(
     }
 
 
+def _project_exposed_routes(state_dir: Path, *, https_port: int) -> list[dict[str, Any]]:
+    sites_dir = state_dir / "caddy"
+    if not sites_dir.is_dir():
+        return []
+    routes: list[dict[str, Any]] = []
+    for path in sorted(sites_dir.glob("*.caddy")):
+        routes.extend(_caddy_exposed_routes(path, https_port=https_port))
+    return routes
+
+
+def _caddy_exposed_routes(path: Path, *, https_port: int) -> list[dict[str, Any]]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    routes: list[dict[str, Any]] = []
+    hosts: list[str] = []
+    path_stack: list[tuple[int, str]] = []
+    depth = 0
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        depth_before = depth
+        path_stack = [
+            (item_depth, item_path)
+            for item_depth, item_path in path_stack
+            if item_depth <= depth_before
+        ]
+        if depth_before == 0 and "{" in line:
+            hosts = _caddy_site_hosts(line.split("{", 1)[0])
+        if hosts and line.startswith(("handle ", "handle_path ")):
+            matcher = _caddy_handle_path(line)
+            if matcher:
+                path_stack.append((depth_before + 1, matcher))
+        if hosts and line.startswith("reverse_proxy "):
+            route_path = path_stack[-1][1] if path_stack else None
+            upstreams, proxy_path = _caddy_reverse_proxy_targets(line)
+            if proxy_path and route_path is None:
+                route_path = proxy_path
+            path_matchers = [route_path] if route_path else []
+            routes.append(
+                {
+                    "type": _classify_caddy_route(
+                        source_file=path.name,
+                        hosts=hosts,
+                        path_matchers=path_matchers,
+                    ),
+                    "source_file": path.name,
+                    "hosts": list(hosts),
+                    "path_matchers": path_matchers,
+                    "upstreams": upstreams,
+                    "public_urls": _caddy_public_urls(
+                        hosts=hosts,
+                        path_matchers=path_matchers,
+                        https_port=https_port,
+                    ),
+                }
+            )
+        depth = max(0, depth + line.count("{") - line.count("}"))
+        if depth == 0:
+            hosts = []
+            path_stack = []
+    return routes
+
+
+def _caddy_site_hosts(raw: str) -> list[str]:
+    hosts: list[str] = []
+    for part in raw.split(","):
+        text = part.strip()
+        if not text:
+            continue
+        if "://" in text:
+            parsed = urlsplit(text)
+            host = parsed.hostname or ""
+        else:
+            host = text.split()[0].split(":", 1)[0]
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def _caddy_handle_path(line: str) -> str | None:
+    expression = line.split("{", 1)[0].strip()
+    parts = expression.split()
+    if len(parts) < 2:
+        return None
+    candidate = parts[1].strip()
+    return candidate if candidate.startswith("/") else None
+
+
+def _caddy_reverse_proxy_targets(line: str) -> tuple[list[str], str | None]:
+    expression = line.split("{", 1)[0].strip()
+    raw_targets = expression.removeprefix("reverse_proxy").strip().split()
+    upstreams: list[str] = []
+    proxy_path: str | None = None
+    for target in raw_targets:
+        if target.startswith("/"):
+            proxy_path = target
+            continue
+        if _caddy_proxy_target_option(target):
+            continue
+        upstreams.append(target)
+    return upstreams, proxy_path
+
+
+def _caddy_proxy_target_option(target: str) -> bool:
+    return target.startswith("{") or target in {"*", "/*"}
+
+
+def _classify_caddy_route(
+    *,
+    source_file: str,
+    hosts: list[str],
+    path_matchers: list[str],
+) -> str:
+    if any(path.startswith("/static/dash-assets") for path in path_matchers):
+        return "static-assets"
+    if source_file == "k1s-profile.caddy" or source_file == "k1s-stack.caddy":
+        if any(host.startswith("k1s-api.") for host in hosts):
+            return "k1s-api"
+        if any(host.startswith("k1s.") for host in hosts):
+            return "k1s-dashboard"
+        if any(host.startswith("k1s-dash.") for host in hosts):
+            return "legacy-dashboard"
+    if any(host.startswith("api.") for host in hosts):
+        return "api"
+    if any(host.startswith("app.") for host in hosts):
+        return "app"
+    if any(host.startswith("s3.") for host in hosts):
+        return "app"
+    return "unknown"
+
+
+def _caddy_public_urls(
+    *,
+    hosts: list[str],
+    path_matchers: list[str],
+    https_port: int,
+) -> list[str]:
+    suffixes = path_matchers or ["/"]
+    urls: list[str] = []
+    for host in hosts:
+        for suffix in suffixes:
+            path = suffix if suffix.startswith("/") else f"/{suffix}"
+            urls.append(f"https://{host}:{https_port}{path}")
+    return urls
+
+
+def _exposed_route_summary(routes: list[dict[str, Any]]) -> str:
+    if not routes:
+        return "none"
+    hosts = {
+        host
+        for route in routes
+        for host in route.get("hosts", [])
+        if isinstance(host, str)
+    }
+    return f"{len(routes)} route(s), {len(hosts)} host(s)"
+
+
+def _render_route_details(item: dict[str, Any]) -> str:
+    routes = item.get("exposed_routes")
+    if not isinstance(routes, list) or not routes:
+        return '<span class="muted">No Caddy routes are currently exposed for this project.</span>'
+    rows: list[str] = []
+    for route in routes:
+        if not isinstance(route, dict):
+            continue
+        urls = route.get("public_urls") if isinstance(route.get("public_urls"), list) else []
+        upstreams = route.get("upstreams") if isinstance(route.get("upstreams"), list) else []
+        url_html = "<br>".join(_link(url) for url in urls) or '<span class="muted">-</span>'
+        upstream_html = "<br>".join(_esc(item) for item in upstreams) or "-"
+        rows.append(
+            "<tr>"
+            f"<td>{_esc(route.get('type'))}</td>"
+            f"<td>{url_html}</td>"
+            f"<td>{upstream_html}</td>"
+            f"<td>{_esc(route.get('source_file'))}</td>"
+            "</tr>"
+        )
+    return (
+        '<div class="route-panel">'
+        '<table class="route-table">'
+        "<thead><tr><th>Type</th><th>Public URL</th><th>Upstream</th><th>Source</th></tr></thead>"
+        f"<tbody>{''.join(rows)}</tbody>"
+        "</table>"
+        "</div>"
+    )
+
+
 def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str:
     projects = payload.get("projects") if isinstance(payload.get("projects"), list) else []
     rows = []
     for item in projects:
         if not isinstance(item, dict):
             continue
-        ingress = item.get("ingress") if isinstance(item.get("ingress"), dict) else {}
         project = _esc(item.get("project"))
-        running = bool(item.get("running"))
-        status = "running" if running else "stopped"
-        status_class = "ok" if running else "idle"
+        mode = _esc(item.get("mode") or DEFAULT_PROJECT_MODE)
+        stack_class = "ok" if item.get("stack_running") else "idle"
+        stack_label = "running" if item.get("stack_running") else "stopped"
+        profile_class = "ok" if item.get("profile_running") else "idle"
+        profile_label = item.get("profile_name") or "none"
+        if item.get("profile_running"):
+            profile_label = f"{profile_label} running"
+        ingress_status = str(item.get("ingress_status") or "idle")
+        ingress_class = (
+            "ok"
+            if ingress_status == "ready"
+            else ("warn" if ingress_status == "missing" else "idle")
+        )
+        error = item.get("error")
+        route_count = int(item.get("exposed_route_count") or 0)
         rows.append(
             "<tr>"
             f'<td><input type="checkbox" class="project-select" value="{project}" '
             f'aria-label="Select {project}"></td>'
             f"<td>{project}</td>"
-            f'<td><span class="pill {status_class}">{_esc(item.get("mode"))} / {status}</span></td>'
-            f"<td>{_esc(item.get('git_branch'))}</td>"
+            f'<td><span class="pill idle">{mode}</span></td>'
+            f'<td><span class="pill {stack_class}">{stack_label}</span></td>'
+            f'<td><span class="pill {profile_class}">{_esc(profile_label)}</span></td>'
+            f'<td><span class="pill {ingress_class}">{_esc(ingress_status)}</span></td>'
+            "<td>"
+            f'<button class="route-toggle" data-project="{project}" '
+            f'aria-expanded="false">Routes {route_count}</button>'
+            "</td>"
             f"<td>{_link(item.get('dashboard_url'))}</td>"
-            f"<td>{_link(ingress.get('global_dashboard_url'))}</td>"
-            f"<td>{_esc(item.get('error'))}</td>"
+            f"<td>{_esc(item.get('git_branch'))}</td>"
+            f"<td>{_esc(error)}</td>"
             f"<td>{_esc(item.get('state_dir'))}</td>"
             '<td class="row-actions"><div class="row-actions-inner">'
             f'<button data-action="start_projects" data-project="{project}">Start</button>'
@@ -1738,9 +2181,14 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             f'data-project="{project}">Delete</button>'
             "</div></td>"
             "</tr>"
+            f'<tr class="route-details" data-route-project="{project}" hidden>'
+            f'<td colspan="12">{_render_route_details(item)}</td>'
+            "</tr>"
         )
     if not rows:
-        rows.append('<tr><td class="muted" colspan="9">No WorkerBee projects registered.</td></tr>')
+        rows.append(
+            '<tr><td class="muted" colspan="12">No WorkerBee projects registered.</td></tr>'
+        )
     global_dash = payload.get("global_dashboard")
     ingress_json = json.dumps(global_dash, indent=2, sort_keys=True)
     return f"""<!doctype html>
@@ -1908,6 +2356,18 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         color: var(--muted);
         font-size: 12px;
       }}
+      .summary-grid, .jobs-grid {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+      }}
+      .summary-grid {{ margin: 8px 0 2px; }}
+      .jobs-grid {{ margin-top: 8px; }}
+      .route-details td {{ background: rgba(0, 0, 0, .14); }}
+      .route-panel {{ padding: 8px 0; }}
+      .route-table th, .route-table td {{ font-size: 12px; vertical-align: top; }}
+      .route-toggle {{ white-space: nowrap; }}
       .row-actions {{ white-space: nowrap; }}
       .row-actions-inner {{ display: inline-flex; gap: 6px; align-items: center; }}
       #action-result {{ margin-top: 10px; white-space: pre-wrap; }}
@@ -1924,6 +2384,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
       .pill.ok {{ border-color: rgba(76, 175, 80, .55); color: #b9f6ca; }}
       .pill.idle {{ border-color: rgba(251, 192, 45, .45); color: #ffe082; }}
       .pill.warn {{ border-color: rgba(255, 152, 0, .6); color: #ffd180; }}
+      .pill.bad {{ border-color: rgba(244, 67, 54, .7); color: #ffcdd2; }}
       .muted {{ color: var(--muted); }}
       @media (max-width: 720px) {{
         header {{ align-items: flex-start; flex-direction: column; }}
@@ -1969,6 +2430,8 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
           </label>
           <span id="refresh-status" class="muted">not refreshed</span>
         </div>
+        <div id="summary-grid" class="summary-grid"></div>
+        <div id="jobs-grid" class="jobs-grid"></div>
         <pre id="action-result" hidden></pre>
       </section>
       <section class="card">
@@ -1977,8 +2440,9 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
           <table>
             <thead>
               <tr>
-                <th>Select</th><th>Project</th><th>Mode / Status</th><th>Git Branch</th>
-                <th>k1s Dashboard</th><th>Global</th><th>Error</th><th>State</th><th>Actions</th>
+                <th>Select</th><th>Project</th><th>Mode</th><th>App Stack</th>
+                <th>k1s Profile</th><th>Ingress</th><th>Routes</th><th>Dashboard</th>
+                <th>Git Branch</th><th>Error</th><th>State</th><th>Actions</th>
               </tr>
             </thead>
             <tbody id="projects-body">{''.join(rows)}</tbody>
@@ -1993,12 +2457,16 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
     <script>
       const token = document.querySelector('meta[name="workerbee-action-token"]').content;
       const resultBox = document.getElementById('action-result');
+      const summaryGrid = document.getElementById('summary-grid');
+      const jobsGrid = document.getElementById('jobs-grid');
       const projectsBody = document.getElementById('projects-body');
       const ingressBox = document.getElementById('ingress-json');
       const refreshSelect = document.getElementById('refresh-interval');
       const refreshStatus = document.getElementById('refresh-status');
       const refreshKey = 'workerbee.dashboard.refreshIntervalMs';
       let refreshTimer = null;
+      const activeJobIds = new Set();
+      const expandedRouteProjects = new Set();
 
       function escapeHtml(value) {{
         return String(value ?? '')
@@ -2015,16 +2483,62 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         return `<a href="${{safe}}" target="_blank" rel="noreferrer">${{safe}}</a>`;
       }}
 
-      function statusLabel(item) {{
-        const mode = item.mode || 'lazy';
-        const kind = item.status_kind || (item.running ? 'running' : 'stopped');
-        const readable = String(kind).replace('+', ' + ');
-        return `${{mode}} / ${{readable}}`;
+      function pill(label, state = 'idle') {{
+        return `<span class="pill ${{state}}">${{escapeHtml(label)}}</span>`;
       }}
 
-      function statusClass(item) {{
-        if (item.error) return 'warn';
-        return item.running ? 'ok' : 'idle';
+      function stackPill(item) {{
+        return pill(item.stack_running ? 'running' : 'stopped', item.stack_running ? 'ok' : 'idle');
+      }}
+
+      function profilePill(item) {{
+        const profile = item.profile_name || 'none';
+        if (item.profile_running) return pill(`${{profile}} running`, 'ok');
+        return pill(profile === 'none' ? 'none' : `${{profile}} stopped`, 'idle');
+      }}
+
+      function ingressPill(item) {{
+        const status = item.ingress_status || 'idle';
+        const state = status === 'ready' ? 'ok' : (status === 'missing' ? 'warn' : 'idle');
+        return pill(status, state);
+      }}
+
+      function routeButton(item, safeProject, expanded = false) {{
+        const count = item.exposed_route_count || 0;
+        return `<button class="route-toggle" data-project="${{safeProject}}" `
+          + `aria-expanded="${{expanded ? 'true' : 'false'}}">Routes ${{count}}</button>`;
+      }}
+
+      function renderRouteDetails(item, safeProject, expanded = false) {{
+        const hidden = expanded ? '' : ' hidden';
+        const routes = Array.isArray(item.exposed_routes) ? item.exposed_routes : [];
+        if (!routes.length) {{
+          return `<tr class="route-details" data-route-project="${{safeProject}}"${{hidden}}>`
+            + '<td colspan="12"><span class="muted">'
+            + 'No Caddy routes are currently exposed for this project.'
+            + '</span></td></tr>';
+        }}
+        const rows = routes.map((route) => {{
+          const urls = Array.isArray(route.public_urls) ? route.public_urls : [];
+          const upstreams = Array.isArray(route.upstreams) ? route.upstreams : [];
+          const urlHtml = urls.length
+            ? urls.map((url) => link(url)).join('<br>')
+            : '<span class="muted">-</span>';
+          const upstreamHtml = upstreams.length
+            ? upstreams.map((item) => escapeHtml(item)).join('<br>')
+            : '-';
+          return '<tr>'
+            + `<td>${{escapeHtml(route.type || 'unknown')}}</td>`
+            + `<td>${{urlHtml}}</td>`
+            + `<td>${{upstreamHtml}}</td>`
+            + `<td>${{escapeHtml(route.source_file || '')}}</td>`
+            + '</tr>';
+        }}).join('');
+        return `<tr class="route-details" data-route-project="${{safeProject}}"${{hidden}}>`
+          + '<td colspan="12"><div class="route-panel"><table class="route-table">'
+          + '<thead><tr><th>Type</th><th>Public URL</th><th>Upstream</th>'
+          + '<th>Source</th></tr></thead>'
+          + `<tbody>${{rows}}</tbody></table></div></td></tr>`;
       }}
 
       function selectedSet() {{
@@ -2041,24 +2555,32 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         const selected = selectedSet();
         if (!Array.isArray(projects) || !projects.length) {{
           projectsBody.innerHTML =
-            '<tr><td class="muted" colspan="9">No WorkerBee projects registered.</td></tr>';
+            '<tr><td class="muted" colspan="12">No WorkerBee projects registered.</td></tr>';
+          expandedRouteProjects.clear();
+          configureRefreshTimer({{persist: false}});
           return;
+        }}
+        const presentProjects = new Set(projects.map((item) => String(item.project || '')));
+        for (const project of Array.from(expandedRouteProjects)) {{
+          if (!presentProjects.has(project)) expandedRouteProjects.delete(project);
         }}
         projectsBody.innerHTML = projects.map((item) => {{
           const project = String(item.project || '');
           const safeProject = escapeHtml(project);
           const checked = selected.has(project) ? ' checked' : '';
-          const ingress = item.ingress || {{}};
           const error = item.error || '';
+          const expanded = expandedRouteProjects.has(project);
           return '<tr>'
             + `<td><input type="checkbox" class="project-select" value="${{safeProject}}" `
             + `aria-label="Select ${{safeProject}}"${{checked}}></td>`
             + `<td>${{safeProject}}</td>`
-            + `<td><span class="pill ${{statusClass(item)}}">`
-            + `${{escapeHtml(statusLabel(item))}}</span></td>`
-            + `<td>${{escapeHtml(item.git_branch || '')}}</td>`
+            + `<td>${{pill(item.mode || 'lazy', 'idle')}}</td>`
+            + `<td>${{stackPill(item)}}</td>`
+            + `<td>${{profilePill(item)}}</td>`
+            + `<td>${{ingressPill(item)}}</td>`
+            + `<td>${{routeButton(item, safeProject, expanded)}}</td>`
             + `<td>${{link(item.dashboard_url)}}</td>`
-            + `<td>${{link(ingress.global_dashboard_url)}}</td>`
+            + `<td>${{escapeHtml(item.git_branch || '')}}</td>`
             + `<td>${{escapeHtml(error)}}</td>`
             + `<td>${{escapeHtml(item.state_dir || '')}}</td>`
             + '<td class="row-actions"><div class="row-actions-inner">'
@@ -2067,15 +2589,60 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             + `<button class="danger" data-action="delete_projects" `
             + `data-project="${{safeProject}}">Delete</button>`
             + '</div></td>'
-            + '</tr>';
+            + '</tr>'
+            + renderRouteDetails(item, safeProject, expanded);
         }}).join('');
+        configureRefreshTimer({{persist: false}});
+      }}
+
+      function renderSummary(summary = {{}}, globalDashboard = {{}}) {{
+        const health = summary.https_health ? 'healthy' : 'unknown';
+        const ingress = summary.global_ingress_running ? 'ingress running' : 'ingress stopped';
+        summaryGrid.innerHTML = [
+          pill('MCP running', 'ok'),
+          pill(ingress, summary.global_ingress_running ? 'ok' : 'warn'),
+          pill(`HTTPS ${{health}}`, summary.https_health ? 'ok' : 'warn'),
+          pill(`projects ${{summary.projects_total ?? 0}}`, 'idle'),
+          pill(`running ${{summary.projects_running ?? 0}}`, 'ok'),
+          pill(`stopped ${{summary.projects_stopped ?? 0}}`, 'idle'),
+          pill(`errors ${{summary.projects_error ?? 0}}`, summary.projects_error ? 'bad' : 'idle'),
+          pill(`routes ${{summary.projects_ingress_ready ?? 0}}`, 'idle')
+        ].join('');
+      }}
+
+      function jobState(job) {{
+        if (job.status === 'failed') return 'bad';
+        if (job.status === 'succeeded') return job.ok === false ? 'bad' : 'ok';
+        if (job.status === 'running') return 'warn';
+        return 'idle';
+      }}
+
+      function renderJobs(jobs = []) {{
+        const recent = Array.isArray(jobs) ? jobs.slice(0, 6) : [];
+        recent.forEach((job) => {{
+          if (job.status === 'queued' || job.status === 'running') {{
+            activeJobIds.add(job.job_id);
+          }} else {{
+            activeJobIds.delete(job.job_id);
+          }}
+        }});
+        jobsGrid.innerHTML = recent.map((job) => {{
+          const label = `${{job.action}}: ${{job.status}}`;
+          return pill(label, jobState(job));
+        }}).join('');
+        updateBusyControls();
       }}
 
       function renderDashboard(payload) {{
         renderProjects(payload.projects || []);
+        renderSummary(payload.summary || {{}}, payload.global_dashboard || {{}});
+        renderJobs(payload.action_jobs || []);
         ingressBox.textContent = JSON.stringify(payload.global_dashboard || {{}}, null, 2);
         const stamp = payload.updated_at ? new Date(payload.updated_at * 1000) : new Date();
-        refreshStatus.textContent = `updated ${{stamp.toLocaleTimeString()}}`;
+        const updated = `updated ${{stamp.toLocaleTimeString()}}`;
+        refreshStatus.textContent = expandedRouteProjects.size
+          ? `${{updated}}; refresh paused: route details open`
+          : updated;
       }}
 
       async function refreshProjects(options = {{}}) {{
@@ -2095,13 +2662,19 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         setTimeout(() => refreshProjects({{silent: true}}).catch(() => {{}}), 3000);
       }}
 
-      function configureRefreshTimer() {{
+      function configureRefreshTimer(options = {{}}) {{
         if (refreshTimer) {{
           clearInterval(refreshTimer);
           refreshTimer = null;
         }}
         const ms = parseInt(refreshSelect.value, 10) || 0;
-        localStorage.setItem(refreshKey, String(ms));
+        if (options.persist !== false) {{
+          localStorage.setItem(refreshKey, String(ms));
+        }}
+        if (expandedRouteProjects.size > 0) {{
+          refreshStatus.textContent = 'refresh paused: route details open';
+          return;
+        }}
         if (ms > 0) {{
           refreshTimer = setInterval(() => {{
             refreshProjects({{silent: true}}).catch((err) => {{
@@ -2126,10 +2699,77 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         return window.confirm(messages[action] || `Run ${{action}}?`);
       }}
 
+      function updateBusyControls() {{
+        const busy = activeJobIds.size > 0;
+        document.querySelectorAll('button[data-action]').forEach((button) => {{
+          button.disabled = busy;
+        }});
+      }}
+
+      function finishJob(job) {{
+        activeJobIds.delete(job.job_id);
+        updateBusyControls();
+        resultBox.hidden = false;
+        resultBox.textContent = JSON.stringify(job, null, 2);
+        refreshProjects({{silent: true}}).catch((err) => {{
+          refreshStatus.textContent = `refresh failed: ${{err.message}}`;
+        }});
+      }}
+
+      function pollJob(jobId, attempt = 0) {{
+        fetch(`/api/action-jobs/${{encodeURIComponent(jobId)}}`, {{
+          headers: {{'Accept': 'application/json'}},
+          cache: 'no-store'
+        }})
+          .then((response) => {{
+            if (!response.ok) throw new Error(`status ${{response.status}}`);
+            return response.json();
+          }})
+          .then((payload) => {{
+            const job = payload.job || {{}};
+            if (job.status === 'succeeded' || job.status === 'failed') {{
+              finishJob(job);
+              return;
+            }}
+            resultBox.textContent =
+              `Running ${{job.action || 'action'}}... ${{job.status || 'queued'}}`;
+            setTimeout(() => pollJob(jobId, attempt + 1), 750);
+          }})
+          .catch((err) => {{
+            resultBox.hidden = false;
+            resultBox.textContent =
+              `Verifying current state after interrupted poll (${{err.message}})...`;
+            scheduleRefreshAttempt();
+            if (attempt < 60) {{
+              setTimeout(() => pollJob(jobId, attempt + 1), 1000);
+            }} else {{
+              activeJobIds.delete(jobId);
+              updateBusyControls();
+            }}
+          }});
+      }}
+
+      function toggleRouteDetails(button) {{
+        const project = button.dataset.project || '';
+        const row = document.querySelector(
+          `.route-details[data-route-project="${{CSS.escape(project)}}"]`
+        );
+        if (!row) return;
+        const expanded = button.getAttribute('aria-expanded') === 'true';
+        row.hidden = expanded;
+        button.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+        if (expanded) {{
+          expandedRouteProjects.delete(project);
+        }} else {{
+          expandedRouteProjects.add(project);
+        }}
+        configureRefreshTimer({{persist: false}});
+      }}
+
       async function postAction(action, projects = []) {{
         if (!confirmation(action, projects)) return;
         resultBox.hidden = false;
-        resultBox.textContent = `Running ${{action}}...`;
+        resultBox.textContent = `Scheduling ${{action}}...`;
         try {{
           const response = await fetch('/api/actions', {{
             method: 'POST',
@@ -2137,10 +2777,15 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             body: JSON.stringify({{action, projects, token}})
           }});
           const payload = await response.json();
-          resultBox.textContent = JSON.stringify(payload, null, 2);
-          if (payload.ok && !action.startsWith('mcp_')) {{
-            setTimeout(() => refreshProjects({{silent: true}}).catch(() => {{}}), 750);
+          if (response.status === 202 && payload.job_id) {{
+            activeJobIds.add(payload.job_id);
+            updateBusyControls();
+            resultBox.textContent = `Queued ${{action}} as ${{payload.job_id}}`;
+            pollJob(payload.job_id);
+            scheduleRefreshAttempt();
+            return;
           }}
+          resultBox.textContent = JSON.stringify(payload, null, 2);
         }} catch (err) {{
           resultBox.textContent = `${{action}} request was interrupted (${{err.message}}).`;
           if (!action.startsWith('mcp_')) {{
@@ -2151,6 +2796,11 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
       }}
 
       document.addEventListener('click', (event) => {{
+        const routeButton = event.target.closest('button.route-toggle');
+        if (routeButton) {{
+          toggleRouteDetails(routeButton);
+          return;
+        }}
         const button = event.target.closest('button[data-action]');
         if (!button) return;
           const action = button.dataset.action;
@@ -2188,7 +2838,13 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
 
 
 def _dashboard_static_asset(path: str) -> tuple[bytes, str] | None:
-    if path == DASHBOARD_BACKGROUND_PATH:
+    background_aliases = {
+        DASHBOARD_BACKGROUND_PATH,
+        "/static/dash-assets/page-background-3840x2160.png",
+        "/static/dash-assets/page-background-tile-1024.png",
+        "/static/dash-assets/system-graph-background-1920x1080.png",
+    }
+    if path in background_aliases:
         filename = "page-background-1920x1080.png"
     elif path == DASHBOARD_LOGO_PATH:
         filename = "k1s-logo-32.png"
