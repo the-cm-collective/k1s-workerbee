@@ -8,6 +8,8 @@ import errno
 import hashlib
 import json
 import os
+import pty
+import selectors
 import shlex
 import shutil
 import signal
@@ -473,6 +475,67 @@ def helper_request(
     return json.loads(raw) if raw.strip() else {}
 
 
+def helper_stream_request(
+    socket_path: Path,
+    payload: dict[str, Any],
+    *,
+    timeout: float = 600.0,
+) -> int:
+    data = json.dumps(payload).encode("utf-8") + b"\n"
+    stdin_fd = sys.stdin.fileno()
+    stdout_fd = sys.stdout.fileno()
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(timeout)
+        _connect_helper_socket(sock, socket_path, timeout=timeout)
+        sock.sendall(data)
+        sock.setblocking(False)
+        selector = selectors.DefaultSelector()
+        selector.register(sock, selectors.EVENT_READ, "socket")
+        if sys.stdin.isatty():
+            os.set_blocking(stdin_fd, False)
+            selector.register(stdin_fd, selectors.EVENT_READ, "stdin")
+        try:
+            while True:
+                for key, _events in selector.select(timeout=0.5):
+                    if key.data == "socket":
+                        try:
+                            chunk = sock.recv(65536)
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            return 0
+                        os.write(stdout_fd, chunk)
+                    elif key.data == "stdin":
+                        try:
+                            chunk = os.read(stdin_fd, 65536)
+                        except BlockingIOError:
+                            continue
+                        except OSError:
+                            chunk = b""
+                        if not chunk:
+                            with suppress(Exception):
+                                selector.unregister(stdin_fd)
+                            with suppress(OSError):
+                                sock.shutdown(socket.SHUT_WR)
+                            continue
+                        _socket_send_all(sock, chunk)
+        finally:
+            selector.close()
+
+
+def _socket_send_all(sock: socket.socket, payload: bytes) -> None:
+    view = memoryview(payload)
+    while view:
+        try:
+            sent = sock.send(view)
+        except BlockingIOError:
+            time.sleep(0.01)
+            continue
+        if sent <= 0:
+            raise BrokenPipeError
+        view = view[sent:]
+
+
 def _connect_helper_socket(sock: socket.socket, socket_path: Path, *, timeout: float) -> None:
     deadline = time.monotonic() + max(0.1, timeout)
     retry_errnos = {
@@ -631,6 +694,8 @@ def serve_helper(
                 address=address,
                 allow_shared_k8s_containerd=allow_shared_k8s_containerd,
             )
+            if response.pop("_stream_complete", False):
+                return
             if response.pop("_shutdown", False):
                 stop.set()
             _send_helper_response(conn, response)
@@ -665,6 +730,16 @@ def _send_helper_response(conn: socket.socket, response: dict[str, Any]) -> None
         conn.sendall(json.dumps(response).encode("utf-8"))
 
 
+def _client_should_stream(command: list[str]) -> bool:
+    if not sys.stdin.isatty() or not sys.stdout.isatty():
+        return False
+    parsed = _parse_nerdctl_argv(command)
+    if parsed.get("command") != "exec":
+        return False
+    args = list(parsed.get("command_args") or [])
+    return any(arg in {"-i", "--interactive", "-it", "-ti"} for arg in args)
+
+
 def client_main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="workerbee-containerd-helper-client")
     parser.add_argument("--socket", type=Path, required=True)
@@ -673,6 +748,8 @@ def client_main(argv: list[str] | None = None) -> int:
     command = list(args.args)
     if command and command[0] == "--":
         command = command[1:]
+    if _client_should_stream(command):
+        return helper_stream_request(args.socket, {"action": "stream", "argv": command})
     stdin = sys.stdin.buffer.read() if not sys.stdin.isatty() else b""
     response = helper_request(
         args.socket,
@@ -729,8 +806,7 @@ def _handle_helper_connection(
     allow_shared_k8s_containerd: bool = False,
 ) -> dict[str, Any]:
     try:
-        raw = _recv_all(conn, limit=HELPER_REQUEST_LIMIT)
-        payload = json.loads(raw.decode("utf-8"))
+        payload, initial_stream = _recv_request(conn, limit=HELPER_REQUEST_LIMIT)
         action = str(payload.get("action") or "run")
         if action == "ping":
             return {"ok": True, "pid": os.getpid(), "euid": os.geteuid()}
@@ -738,6 +814,16 @@ def _handle_helper_connection(
             return {"ok": True, "_shutdown": True}
         if action == "remove_tree":
             return _handle_remove_tree(payload, state_root=state_root)
+        if action == "stream":
+            return _handle_stream(
+                payload,
+                conn=conn,
+                initial_input=initial_stream,
+                state_root=state_root,
+                nerdctl=nerdctl,
+                address=address,
+                allow_shared_k8s_containerd=allow_shared_k8s_containerd,
+            )
         if action != "run":
             return _error_response("CONTAINERD_HELPER_BAD_ACTION", f"unsupported action {action}")
         argv = payload.get("argv")
@@ -767,6 +853,113 @@ def _handle_helper_connection(
         }
     except Exception as exc:  # noqa: BLE001
         return _error_response("CONTAINERD_HELPER_INTERNAL_ERROR", str(exc))
+
+
+def _handle_stream(
+    payload: dict[str, Any],
+    *,
+    conn: socket.socket,
+    initial_input: bytes,
+    state_root: Path,
+    nerdctl: str,
+    address: str,
+    allow_shared_k8s_containerd: bool,
+) -> dict[str, Any]:
+    argv = payload.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
+        return _error_response("CONTAINERD_HELPER_BAD_ARGV", "argv must be a string list")
+    try:
+        validate_helper_argv(
+            argv,
+            state_root=state_root,
+            address=address,
+            allow_shared_k8s_containerd=allow_shared_k8s_containerd,
+        )
+    except WorkerBeeError as exc:
+        return _error_response(exc.code, exc.message, details=exc.public_dict())
+    master_fd: int | None = None
+    slave_fd: int | None = None
+    proc: subprocess.Popen[bytes] | None = None
+    try:
+        master_fd, slave_fd = pty.openpty()
+        proc = subprocess.Popen(  # noqa: S603 - argv is validated above
+            [nerdctl, *argv],
+            stdin=slave_fd,
+            stdout=slave_fd,
+            stderr=slave_fd,
+            close_fds=True,
+        )
+        os.close(slave_fd)
+        slave_fd = None
+        os.set_blocking(master_fd, False)
+        conn.setblocking(False)
+        if initial_input:
+            with suppress(OSError):
+                os.write(master_fd, initial_input)
+        selector = selectors.DefaultSelector()
+        selector.register(conn, selectors.EVENT_READ, "client")
+        selector.register(master_fd, selectors.EVENT_READ, "pty")
+        try:
+            while True:
+                if proc.poll() is not None:
+                    _drain_pty_to_conn(master_fd, conn)
+                    break
+                client_closed = False
+                for key, _events in selector.select(timeout=0.1):
+                    if key.data == "client":
+                        try:
+                            chunk = conn.recv(65536)
+                        except BlockingIOError:
+                            continue
+                        if not chunk:
+                            client_closed = True
+                            break
+                        with suppress(OSError):
+                            os.write(master_fd, chunk)
+                    elif key.data == "pty":
+                        try:
+                            chunk = os.read(master_fd, 65536)
+                        except BlockingIOError:
+                            continue
+                        except OSError:
+                            chunk = b""
+                        if not chunk:
+                            continue
+                        _socket_send_all(conn, chunk)
+                if client_closed:
+                    with suppress(Exception):
+                        proc.terminate()
+                    break
+        finally:
+            selector.close()
+        with suppress(Exception):
+            proc.wait(timeout=1)
+        return {"ok": True, "_stream_complete": True}
+    except Exception as exc:  # noqa: BLE001
+        return _error_response("CONTAINERD_HELPER_STREAM_FAILED", str(exc))
+    finally:
+        if proc is not None and proc.poll() is None:
+            with suppress(Exception):
+                proc.terminate()
+        if master_fd is not None:
+            with suppress(OSError):
+                os.close(master_fd)
+        if slave_fd is not None:
+            with suppress(OSError):
+                os.close(slave_fd)
+
+
+def _drain_pty_to_conn(master_fd: int, conn: socket.socket) -> None:
+    while True:
+        try:
+            chunk = os.read(master_fd, 65536)
+        except BlockingIOError:
+            return
+        except OSError:
+            return
+        if not chunk:
+            return
+        _socket_send_all(conn, chunk)
 
 
 def _handle_remove_tree(payload: dict[str, Any], *, state_root: Path) -> dict[str, Any]:
@@ -824,6 +1017,24 @@ def _recv_all(conn: socket.socket, *, limit: int) -> bytes:
             raise RuntimeError("containerd helper request exceeded size limit")
         chunks.append(chunk)
     return b"".join(chunks)
+
+
+def _recv_request(conn: socket.socket, *, limit: int) -> tuple[dict[str, Any], bytes]:
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = conn.recv(1024 * 1024)
+        if not chunk:
+            raw = b"".join(chunks)
+            return json.loads(raw.decode("utf-8")), b""
+        total += len(chunk)
+        if total > limit:
+            raise RuntimeError("containerd helper request exceeded size limit")
+        chunks.append(chunk)
+        raw = b"".join(chunks)
+        if b"\n" in raw:
+            line, extra = raw.split(b"\n", 1)
+            return json.loads(line.decode("utf-8")), extra
 
 
 def _error_response(
