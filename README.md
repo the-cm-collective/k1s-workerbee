@@ -37,62 +37,46 @@ containerized and scoped under WorkerBee-owned namespaces.
 
 ## Quickstart
 
-Install WorkerBee:
+### One-line install
 
 ```bash
 curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/latest/download/install-workerbee.sh | sh
+```
+
+This command uses GitHub's unauthenticated latest-release asset URL. While this
+repository is private, unauthenticated `curl` requests to release assets will
+fail; use the downloaded release artifacts method below instead.
+
+### Install from downloaded release artifacts
+
+On Linux or macOS, open the latest GitHub release in a browser and download both
+assets into the same local directory:
+
+```text
+install-workerbee.sh
+workerbee-wheelhouse.tar.gz
+```
+
+Then run the installer from that directory and point it at the downloaded
+wheelhouse archive:
+
+```bash
+chmod +x install-workerbee.sh
+WORKERBEE_INSTALL_BASE_URL="file://$(pwd)" ./install-workerbee.sh
+workerbee doctor
+```
+
+On macOS, pass an explicit Python 3.11+ interpreter when needed:
+
+```bash
+PYTHON=python3.11 WORKERBEE_INSTALL_BASE_URL="file://$(pwd)" ./install-workerbee.sh
 ```
 
 The installer uses the currently active Python virtual environment when `VIRTUAL_ENV` is set. If no venv is active, it creates a standalone WorkerBee venv under `${XDG_DATA_HOME:-~/.local/share}/workerbee/venv` and writes a `workerbee` wrapper to `~/.local/bin`. If that directory is not on `PATH`, the installer prints the exact `export PATH=...` line to add.
 
 WorkerBee does not install container runtimes. It uses Podman or Docker for the default workflow and supports explicit direct containerd development with `nerdctl`.
 
-Start the background MCP daemon:
-
-```bash
-workerbee mcp start
-```
-
-The command prints the local MCP URL and the global dashboard URL, normally
-`https://dashboard.workerbee.localhost:19443/`. Use `workerbee mcp status`,
-`workerbee mcp restart`, and `workerbee mcp stop` for lifecycle management. Use
-`workerbee mcp serve` only when you want a foreground/debug process. If the
-requested MCP port is already in use, `workerbee mcp start` fails fast; stop the
-owning process or pass `--port`.
-
-Connect Codex to the shared local MCP server:
-
-```bash
-codex mcp add workerbee --url http://127.0.0.1:8765/mcp
-codex mcp list
-workerbee agent instructions
-```
-
-For cloud-native repos, add this project instruction to `AGENTS.md`:
-
-```markdown
-When a task involves containers, services, manifests, ingress, databases, queues,
-security review, or integration behavior, call WorkerBee MCP
-`workerbee_v1_session_start` with the absolute repo cwd and task goal. Use the
-returned `project` for every WorkerBee tool call. Use the local shell for repo
-edits and ordinary tests, and use WorkerBee MCP for local image builds,
-manifest staging/deploy, status, logs, HTTPS ingress probes, security review,
-dashboard URLs, cleanup, and artifact export.
-
-If this is the first time WorkerBee is coming up for a project, there may be no
-deployed workload to inspect yet. Prefer existing repo manifests and
-Containerfiles/Dockerfiles. When they are absent, build a temporary native k1s
-deployment in WorkerBee state, deploy it locally, then rerun the requested
-runtime validation or security review. Keep first-run generated artifacts in
-WorkerBee state unless the user asks to commit them.
-```
-
-Use `workerbee agent install --check` to inspect whether the block is present.
-Use `workerbee agent install --append --target AGENTS.md` to append it to an
-existing repo file, or add `--allow-create` when you explicitly want WorkerBee
-to create the file.
-
-Build and install from a local wheelhouse:
+### Build and install from a local wheelhouse
 
 ```bash
 scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse
@@ -116,7 +100,54 @@ The default installer URL resolves through GitHub's latest-release redirect:
 https://github.com/the-cm-collective/k1s-workerbee/releases/latest/download/install-workerbee.sh
 ```
 
-Source checkout smoke workflow:
+### Start the background MCP daemon
+
+```bash
+workerbee mcp start
+```
+
+The command prints the local MCP URL and the global dashboard URL, normally
+`https://dashboard.workerbee.localhost:19443/`. Use `workerbee mcp status`,
+`workerbee mcp restart`, and `workerbee mcp stop` for lifecycle management. Use
+`workerbee mcp serve` only when you want a foreground/debug process. If the
+requested MCP port is already in use, `workerbee mcp start` fails fast; stop the
+owning process or pass `--port`.
+
+### Connect Codex to the shared local MCP server
+
+```bash
+codex mcp add workerbee --url http://127.0.0.1:8765/mcp
+codex mcp list
+workerbee agent instructions
+```
+
+### Add agent instructions to cloud-native repos
+
+Add this project instruction to `AGENTS.md`:
+
+```markdown
+When a task involves containers, services, manifests, ingress, databases, queues,
+security review, or integration behavior, call WorkerBee MCP
+`workerbee_v1_session_start` with the absolute repo cwd and task goal. Use the
+returned `project` for every WorkerBee tool call. Use the local shell for repo
+edits and ordinary tests, and use WorkerBee MCP for local image builds,
+manifest staging/deploy, status, logs, HTTPS ingress probes, security review,
+dashboard URLs, cleanup, and artifact export.
+
+If this is the first time WorkerBee is coming up for a project, there may be no
+deployed workload to inspect yet. Prefer existing repo manifests and
+Containerfiles/Dockerfiles. When they are absent, build a temporary native k1s
+deployment in WorkerBee state, deploy it locally, then rerun the requested
+runtime validation or security review. Keep first-run generated artifacts in
+WorkerBee state unless the user asks to commit them.
+```
+
+Use `workerbee agent install --check` to inspect whether the block is present.
+Use `workerbee agent install --append --target AGENTS.md` to append it to an
+existing repo file, or add `--allow-create` when you explicitly want WorkerBee
+to create the file.
+
+### Source checkout smoke workflow
 
 ```bash
 python -m pip install -e .[dev] --find-links dist/workerbee-wheelhouse
@@ -438,7 +469,7 @@ python3.11 --version
 docker version
 ```
 
-One-line install:
+### macOS one-line install
 
 ```bash
 curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/latest/download/install-workerbee.sh | PYTHON=python3.11 sh
@@ -446,12 +477,16 @@ export PATH="$HOME/.local/bin:$PATH"
 workerbee doctor
 ```
 
+While this repository is private, unauthenticated `curl` requests to release
+assets will fail. Use the downloaded release artifacts method in Quickstart when
+you need to install from manually downloaded GitHub release assets.
+
 The installer uses an active virtual environment when one is enabled. Without an
 active venv, it creates a standalone WorkerBee venv under
 `${XDG_DATA_HOME:-$HOME/.local/share}/workerbee/venv` and writes a wrapper to
 `~/.local/bin/workerbee`.
 
-Clone/dev install:
+### macOS clone/dev install
 
 ```bash
 git clone git@github.com:the-cm-collective/k1s-workerbee.git
