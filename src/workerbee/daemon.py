@@ -1914,6 +1914,7 @@ def _send_json(
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(body)))
+    _send_dynamic_security_headers(handler)
     handler.end_headers()
     _write_response_body(handler, body)
 
@@ -1923,6 +1924,8 @@ def _send_html(handler: BaseHTTPRequestHandler, html: str) -> None:
     handler.send_response(200)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
+    _send_dynamic_security_headers(handler)
+    handler.send_header("Content-Security-Policy", _dashboard_csp())
     handler.end_headers()
     _write_response_body(handler, body)
 
@@ -1932,6 +1935,7 @@ def _send_bytes(handler: BaseHTTPRequestHandler, body: bytes, content_type: str)
     handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(len(body)))
     handler.send_header("Cache-Control", "public, max-age=3600")
+    handler.send_header("X-Content-Type-Options", "nosniff")
     handler.end_headers()
     _write_response_body(handler, body)
 
@@ -1941,8 +1945,30 @@ def _send_not_found(handler: BaseHTTPRequestHandler) -> None:
     handler.send_response(404)
     handler.send_header("Content-Type", "text/plain; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
+    _send_dynamic_security_headers(handler)
     handler.end_headers()
     _write_response_body(handler, body)
+
+
+def _send_dynamic_security_headers(handler: BaseHTTPRequestHandler) -> None:
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Referrer-Policy", "no-referrer")
+    handler.send_header("X-Frame-Options", "DENY")
+
+
+def _dashboard_csp() -> str:
+    return (
+        "default-src 'self'; "
+        "base-uri 'none'; "
+        "object-src 'none'; "
+        "frame-ancestors 'none'; "
+        "img-src 'self' data:; "
+        "style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline'; "
+        "connect-src 'self'; "
+        "form-action 'none'"
+    )
 
 
 def _write_response_body(handler: BaseHTTPRequestHandler, body: bytes) -> None:

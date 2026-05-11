@@ -25,6 +25,7 @@ from workerbee.manifests import (
     resolve_stage_dir,
     validate_stage,
 )
+from workerbee.mcp_daemon import require_mcp_loopback_or_opt_in
 from workerbee.paths import default_state_root
 from workerbee.trust import trust_install, trust_status, trust_uninstall
 
@@ -87,7 +88,9 @@ def serve_mcp(
     state_dir: Path | None = None,
     state_root: Path | None = None,
     containerd_privilege: str = "auto",
+    allow_remote_mcp: bool = False,
 ) -> None:
+    require_mcp_loopback_or_opt_in(host, allow_remote_mcp=allow_remote_mcp)
     try:
         from mcp.server.fastmcp import FastMCP
     except Exception as exc:  # pragma: no cover - depends on optional runtime install

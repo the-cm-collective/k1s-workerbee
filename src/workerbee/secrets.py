@@ -59,6 +59,42 @@ def secret_policy_status(project_state: Path) -> dict[str, Any]:
     }
 
 
+def write_private_text(path: Path, text: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path: Path | None = None
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{path.name}.",
+        suffix=".tmp",
+        dir=path.parent,
+        text=True,
+    )
+    tmp_path = Path(tmp_name)
+    handle_open = False
+    try:
+        os.fchmod(fd, 0o600)
+        handle_open = True
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(tmp_path, path)
+        _chmod_private(path)
+        tmp_path = None
+    finally:
+        if not handle_open:
+            with suppress(OSError):
+                os.close(fd)
+        if tmp_path is not None:
+            with suppress(OSError):
+                tmp_path.unlink()
+    return path
+
+
+def write_private_json(path: Path, payload: Any) -> Path:
+    return write_private_text(
+        path,
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+    )
+
+
 def resolve_sops_age_key_file(project_state: Path, *, generate: bool = True) -> Path | None:
     configured = (
         os.getenv(WORKERBEE_SOPS_KEY_ENV)
@@ -136,8 +172,7 @@ def seal_yaml_mapping(
 ) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     if plaintext_secrets_allowed():
-        path.write_text(_dump_mapping(data), encoding="utf-8")
-        _chmod_private(path)
+        write_private_text(path, _dump_mapping(data))
         return path
     sops = shutil.which(_sops_binary())
     if sops is None:

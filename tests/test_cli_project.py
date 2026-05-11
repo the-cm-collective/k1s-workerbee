@@ -44,6 +44,7 @@ def test_mcp_start_accepts_background_bind_flags(tmp_path: Path) -> None:
             "9999",
             "--timeout",
             "1",
+            "--allow-remote-mcp",
         ]
     )
 
@@ -55,6 +56,7 @@ def test_mcp_start_accepts_background_bind_flags(tmp_path: Path) -> None:
     assert args.host == "127.0.0.1"
     assert args.port == 9999
     assert args.timeout == 1
+    assert args.allow_remote_mcp is True
 
 
 def test_config_set_parses_user_level_defaults(tmp_path: Path) -> None:

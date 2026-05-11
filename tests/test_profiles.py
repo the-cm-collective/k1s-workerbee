@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from stat import S_IMODE
 
 import pytest
 
 from workerbee.contract import MCP_TOOL_NAMES, WorkerBeeError
 from workerbee.ingress import ProjectIngressConfig
-from workerbee.profiles import K1sProfileRunner, builtin_profiles
+from workerbee.profiles import K1sProfileInfo, K1sProfileRunner, builtin_profiles
 
 
 def test_builtin_profiles_are_direct_containerd_only() -> None:
@@ -41,6 +42,37 @@ def test_profile_runner_rejects_non_containerd_runtime(tmp_path: Path, monkeypat
         runner.start(profile="k1s-dev-min-sqlite", timeout=0.01)
 
     assert exc.value.code == "K1S_PROFILE_REQUIRES_CONTAINERD"
+
+
+def test_profile_token_state_files_are_owner_only(tmp_path: Path) -> None:
+    runner = K1sProfileRunner(
+        project="secure-demo",
+        state_root=tmp_path,
+        runtime="containerd",
+        k1s_root=tmp_path / "k1s",
+    )
+
+    tokens = runner._tokens()  # noqa: SLF001
+    runner._write_info(  # noqa: SLF001
+        K1sProfileInfo(
+            project="secure-demo",
+            profile="k1s-dev-min-sqlite",
+            state_root=str(tmp_path),
+            state_dir=str(tmp_path / "projects" / "secure-demo"),
+            k1s_root=str(tmp_path / "k1s"),
+            runtime="containerd",
+            network="workerbee-secure-demo",
+            namespace="workerbee-secure-demo",
+            started_at=1.0,
+            apishim_token=tokens["apishim_token"],
+            admin_token=tokens["admin_token"],
+            read_token=tokens["read_token"],
+        )
+    )
+
+    token_file = tmp_path / "projects" / "secure-demo" / "profiles" / "tokens.json"
+    assert S_IMODE(token_file.stat().st_mode) == 0o600
+    assert S_IMODE(runner.info_file.stat().st_mode) == 0o600
 
 
 def test_ha_min_starts_only_containerized_components(

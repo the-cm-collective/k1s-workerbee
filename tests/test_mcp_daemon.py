@@ -11,6 +11,7 @@ from workerbee.mcp_daemon import (
     _wait_for_port_release,
     _wait_ready,
     mcp_daemon_status,
+    remote_mcp_allowed,
     restart_mcp_daemon,
     start_mcp_daemon,
     stop_mcp_daemon,
@@ -99,6 +100,100 @@ def test_start_mcp_daemon_fails_fast_when_port_is_in_use(
     assert result["error"]["code"] == "MCP_PORT_IN_USE"
 
 
+def test_start_mcp_daemon_refuses_remote_bind_without_opt_in(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, runtime="podman", host="0.0.0.0", port=9876)
+
+    def fail_popen(*_args, **_kwargs):
+        raise AssertionError("daemon should not spawn for remote MCP bind without opt-in")
+
+    monkeypatch.setattr("workerbee.mcp_daemon.subprocess.Popen", fail_popen)
+
+    result = start_mcp_daemon(config, timeout=1)
+
+    assert result["ok"] is False
+    assert result["started"] is False
+    assert result["error"]["code"] == "MCP_REMOTE_BIND_REQUIRES_AUTH"
+
+
+def test_start_mcp_daemon_allows_remote_bind_with_explicit_opt_in(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    class FakePopen:
+        pid = 4321
+
+        def __init__(self, argv: list[str], **kwargs: Any) -> None:
+            calls["argv"] = argv
+            calls["kwargs"] = kwargs
+
+    config = MCPDaemonConfig(
+        state_root=tmp_path,
+        runtime="podman",
+        host="0.0.0.0",
+        port=9876,
+        allow_remote_mcp=True,
+    )
+    monkeypatch.setattr("workerbee.mcp_daemon.subprocess.Popen", FakePopen)
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon._wait_ready",
+        lambda _config, **_kwargs: _ready_payload(),
+    )
+    monkeypatch.setattr("workerbee.mcp_daemon._pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr("workerbee.mcp_daemon._pid_matches_metadata", lambda *_args: True)
+
+    result = start_mcp_daemon(config, timeout=1)
+
+    assert result["ok"] is True
+    assert "--allow-remote-mcp" in calls["argv"]
+
+
+def test_remote_mcp_env_allows_remote_bind(monkeypatch) -> None:
+    monkeypatch.setenv("WORKERBEE_ALLOW_REMOTE_MCP", "1")
+
+    assert remote_mcp_allowed() is True
+
+
+def test_start_mcp_daemon_uses_effective_remote_mcp_opt_in(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    class FakePopen:
+        pid = 4322
+
+        def __init__(self, argv: list[str], **kwargs: Any) -> None:
+            calls["argv"] = argv
+            calls["kwargs"] = kwargs
+
+    monkeypatch.setenv("WORKERBEE_ALLOW_REMOTE_MCP", "1")
+    monkeypatch.setattr("workerbee.mcp_daemon.subprocess.Popen", FakePopen)
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon._wait_ready",
+        lambda _config, **_kwargs: _ready_payload(),
+    )
+    monkeypatch.setattr("workerbee.mcp_daemon._pid_alive", lambda pid: pid == 4322)
+    monkeypatch.setattr("workerbee.mcp_daemon._pid_matches_metadata", lambda *_args: True)
+
+    config = MCPDaemonConfig(
+        state_root=tmp_path,
+        runtime="podman",
+        host="0.0.0.0",
+        port=9876,
+    )
+    result = start_mcp_daemon(config, timeout=1)
+    metadata = json.loads(config.metadata_file.read_text(encoding="utf-8"))
+
+    assert result["ok"] is True
+    assert "--allow-remote-mcp" in calls["argv"]
+    assert metadata["allow_remote_mcp"] is True
+
+
 def test_restart_mcp_daemon_waits_for_port_release(
     tmp_path: Path,
     monkeypatch,
@@ -128,6 +223,46 @@ def test_restart_mcp_daemon_waits_for_port_release(
     assert result["ok"] is True
     assert result["port_release"]["ok"] is True
     assert starts == [3]
+
+
+def test_restart_mcp_daemon_refuses_remote_bind_before_stop(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, runtime="podman", host="0.0.0.0", port=9876)
+
+    def fail_stop(*_args, **_kwargs):
+        raise AssertionError("restart must not stop an existing daemon before bind guard passes")
+
+    monkeypatch.setattr("workerbee.mcp_daemon.stop_mcp_daemon", fail_stop)
+
+    result = restart_mcp_daemon(config, timeout=3)
+
+    assert result["ok"] is False
+    assert result["stop"] is None
+    assert result["start"]["error"]["code"] == "MCP_REMOTE_BIND_REQUIRES_AUTH"
+
+
+def test_status_and_stop_are_not_blocked_by_remote_bind_guard(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, runtime="podman", host="0.0.0.0", port=9876)
+    monkeypatch.setattr("workerbee.mcp_daemon._orphan_mcp_pids", lambda _config: [])
+    monkeypatch.setattr("workerbee.mcp_daemon._ensure_stop_privilege", lambda _config: {})
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon._metadata_with_privilege",
+        lambda _config, metadata, _privilege: metadata,
+    )
+    monkeypatch.setattr("workerbee.mcp_daemon._stop_global_ingress", lambda *_args: None)
+    monkeypatch.setattr("workerbee.mcp_daemon._stop_temporary_helper", lambda *_args: None)
+
+    status = mcp_daemon_status(config)
+    stopped = stop_mcp_daemon(config)
+
+    assert status["host"] == "0.0.0.0"
+    assert status["running"] is False
+    assert stopped["running"] is False
 
 
 def test_wait_for_port_release_stops_matching_orphan(

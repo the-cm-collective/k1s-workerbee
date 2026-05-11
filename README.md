@@ -267,12 +267,21 @@ dashboard/Caddy ingress container. Project stacks remain controlled with
 `workerbee stop`, `workerbee project mode stop`, or the MCP project stop/reset
 tools.
 
+WorkerBee MCP is local-only by default. `mcp start`, `mcp restart`, and
+`mcp serve` refuse non-loopback binds unless `--allow-remote-mcp` or
+`WORKERBEE_ALLOW_REMOTE_MCP=1` is set for a controlled local-network test.
+WorkerBee does not implement remote MCP authorization yet; future remote mode
+should follow the MCP OAuth 2.1 Resource Server model with OAuth Protected
+Resource Metadata rather than a custom bearer-token scheme.
+
 The global dashboard also provides token-protected local controls to start, stop,
 or delete one project, selected projects, or all known projects. Start can bring
 a saved project stack back up outside the original agent session. Delete means
 stop, purge project runtime/state, unregister the project from the global
 dashboard, and resync WorkerBee Caddy imports. The dashboard can also request
-MCP shutdown or an in-place MCP reboot.
+MCP shutdown or an in-place MCP reboot. Dashboard action responses and pages are
+served with no-store and browser security headers; cached static assets are
+served with content-type sniffing disabled.
 
 Staged deployment workflow:
 
@@ -302,7 +311,11 @@ controllers. To use an existing identity, set
 insecure local escape hatch is explicit:
 `WORKERBEE_ALLOW_PLAINTEXT_SECRETS=1`. Remote k1s deploy refuses native
 `secretRefs` unless `--allow-remote-secretrefs` is passed, because secret paths
-are resolved by the remote controller.
+are resolved by the remote controller. Agents can call
+`workerbee_v1_secret_policy_status(project)` to check whether a project is using
+SOPS mode, whether its age identity is ready, and whether plaintext mode has
+been explicitly enabled. WorkerBee token-bearing local state files are written
+owner-only.
 
 The live security assessment report scenario is opt-in because it builds and
 deploys a real local app through WorkerBee:
@@ -319,7 +332,11 @@ frontend/backend/db app, deploys it with WorkerBee's remote k1s deploy path, and
 probes the public HTTPS routes:
 
 ```bash
+unset WORKERBEE_CONTAINERD_ADDRESS AE_CONTAINERD_ADDRESS AE_CRI_ENDPOINT
+unset WORKERBEE_ALLOW_SHARED_K8S_CONTAINERD
 WORKERBEE_LIVE_REMOTE_K1S_DEPLOY=1 \
+WORKERBEE_LIVE_REMOTE_K1S_ROOT=/path/to/k1s \
+WORKERBEE_CONTAINERD_PRIVILEGE=sudo-helper \
 .venv/bin/python -m pytest tests/test_remote_k1s_live.py -q
 ```
 
@@ -474,6 +491,13 @@ containerd socket by default and always refuses MicroK8s CNI config paths. For a
 controlled local integration test that intentionally shares the MicroK8s
 containerd socket, set `WORKERBEE_ALLOW_SHARED_K8S_CONTAINERD=1`; the CNI config
 path must still remain under the WorkerBee state root.
+
+Existing host artifacts such as a `nerdctl0` interface or a
+`nerdctl-bridge.conflist` under `/var/snap/microk8s/.../args/cni-network` may
+predate the current guard. Treat those as host remediation work: inspect
+MicroK8s health, confirm Calico is pinned to the real host interface when
+needed, and remove stale MicroK8s CNI pollution manually during a maintenance
+window rather than through WorkerBee.
 
 When `--runtime containerd` is explicitly selected, WorkerBee MCP defaults to `--containerd-privilege auto`. Auto first tries unprivileged `nerdctl`; if that fails, WorkerBee prompts once with `sudo` and starts a state-scoped root helper. The helper exposes a WorkerBee-owned Unix socket and a generated `nerdctl` wrapper under the WorkerBee state root, validates every command, and only allows WorkerBee state-hash namespaces plus state-local data/CNI paths. This never runs for `--runtime auto`, Docker, or Podman. Use `--containerd-privilege unprivileged` if you preconfigured rootless/system access yourself.
 

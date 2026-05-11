@@ -34,7 +34,7 @@ from workerbee.runtime_support import (
     runtime_command_args,
     workerbee_runtime_labels,
 )
-from workerbee.secrets import secret_env_for_project
+from workerbee.secrets import secret_env_for_project, write_private_json
 from workerbee.supervisor import project_slug
 
 DEFAULT_K1S_PYTHON_IMAGE = "docker.io/library/python:3.12-slim"
@@ -669,9 +669,7 @@ class K1sProfileRunner:
             "admin_token": secrets.token_urlsafe(24),
             "read_token": secrets.token_urlsafe(24),
         }
-        token_file.parent.mkdir(parents=True, exist_ok=True)
-        token_file.write_text(json.dumps(tokens, indent=2, sort_keys=True), encoding="utf-8")
-        token_file.chmod(0o600)
+        write_private_json(token_file, tokens)
         return tokens
 
     def _component_name(
@@ -1186,10 +1184,7 @@ class K1sProfileRunner:
         return {"ok": ok, "network": self.network, "stdout": proc.stdout}
 
     def _write_info(self, info: K1sProfileInfo) -> None:
-        self.info_file.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.info_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(asdict(info), indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(self.info_file)
+        write_private_json(self.info_file, asdict(info))
 
     def _refresh_ingress_info(
         self,

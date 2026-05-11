@@ -30,7 +30,7 @@ from workerbee.runtime_support import (
     runtime_command_args,
     workerbee_runtime_labels,
 )
-from workerbee.secrets import secret_env_for_project
+from workerbee.secrets import secret_env_for_project, write_private_json
 from workerbee.supervisor import project_slug
 
 DEFAULT_TARGET_IMAGE = "docker.io/library/python:3.12-slim"
@@ -229,8 +229,7 @@ class RemoteK1sTarget:
             "read_token": secrets.token_urlsafe(24),
             "apishim_token": secrets.token_urlsafe(24),
         }
-        token_file.write_text(json.dumps(tokens, indent=2), encoding="utf-8")
-        token_file.chmod(0o600)
+        write_private_json(token_file, tokens)
         return tokens
 
     def _common_env(self) -> dict[str, str]:

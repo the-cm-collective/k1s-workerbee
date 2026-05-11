@@ -1,7 +1,12 @@
 from pathlib import Path
 from stat import S_IMODE
 
-from workerbee.secrets import file_is_sops_encrypted, seal_yaml_mapping, secret_policy_status
+from workerbee.secrets import (
+    file_is_sops_encrypted,
+    seal_yaml_mapping,
+    secret_policy_status,
+    write_private_json,
+)
 
 
 def test_file_is_sops_encrypted_requires_encrypted_values(tmp_path: Path) -> None:
@@ -25,6 +30,16 @@ def test_seal_yaml_mapping_plaintext_requires_explicit_opt_in(
     assert seal_yaml_mapping(secret, {"token": "local-dev"}, project_state=tmp_path) == secret
     assert "token: local-dev" in secret.read_text(encoding="utf-8")
     assert S_IMODE(secret.stat().st_mode) == 0o600
+
+
+def test_write_private_json_is_atomic_and_owner_only(tmp_path: Path) -> None:
+    target = tmp_path / "nested" / "tokens.json"
+
+    write_private_json(target, {"token": "local"})
+
+    assert target.read_text(encoding="utf-8").endswith("\n")
+    assert S_IMODE(target.stat().st_mode) == 0o600
+    assert not list(target.parent.glob(".tokens.json.*.tmp"))
 
 
 def test_secret_policy_status_reports_missing_configured_key(

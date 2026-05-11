@@ -1,4 +1,5 @@
 from pathlib import Path
+from stat import S_IMODE
 from types import SimpleNamespace
 
 from workerbee.ingress import ProjectIngressConfig
@@ -382,6 +383,7 @@ def test_containerd_stop_purge_uses_helper_for_project_state(
         apishim_token="-".join(["shim", "token"]),
     )
     sup._write_stack(info)  # noqa: SLF001
+    assert S_IMODE(sup.stack_file.stat().st_mode) == 0o600
 
     result = sup.stop(purge=True)
 

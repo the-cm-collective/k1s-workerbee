@@ -11,6 +11,7 @@ import sys
 import time
 from contextlib import suppress
 from dataclasses import dataclass
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
 from urllib.parse import SplitResult, urlsplit, urlunsplit
@@ -31,6 +32,7 @@ from workerbee.runtime_support import CONTAINERD_RUNTIME
 
 MCP_DAEMON_FILE = "mcp-daemon.json"
 MCP_DAEMON_LOG = "mcp-daemon.log"
+WORKERBEE_ALLOW_REMOTE_MCP_ENV = "WORKERBEE_ALLOW_REMOTE_MCP"
 
 
 @dataclass(frozen=True, slots=True)
@@ -41,6 +43,7 @@ class MCPDaemonConfig:
     host: str = "127.0.0.1"
     port: int = 8765
     containerd_privilege: str = "auto"
+    allow_remote_mcp: bool = False
 
     @property
     def mcp_url(self) -> str:
@@ -67,6 +70,7 @@ def config_from_args(
     host: str,
     port: int,
     containerd_privilege: str = "auto",
+    allow_remote_mcp: bool = False,
 ) -> MCPDaemonConfig:
     return MCPDaemonConfig(
         state_root=(state_root or default_state_root()).resolve(),
@@ -75,10 +79,18 @@ def config_from_args(
         host=host,
         port=port,
         containerd_privilege=containerd_privilege,
+        allow_remote_mcp=allow_remote_mcp,
     )
 
 
 def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[str, Any]:
+    try:
+        require_mcp_loopback_or_opt_in(
+            config.host,
+            allow_remote_mcp=config.allow_remote_mcp,
+        )
+    except WorkerBeeError as exc:
+        return _start_error(config, exc)
     status = mcp_daemon_status(config)
     if status["running"]:
         if config.runtime == CONTAINERD_RUNTIME:
@@ -144,6 +156,7 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
         if privilege.get("effective_mode") == "sudo-helper"
         else config.containerd_privilege
     )
+    allow_remote_mcp = remote_mcp_allowed(config.allow_remote_mcp)
     child_env = os.environ.copy()
     child_env.update(containerd_privilege_env(privilege))
     log = open(config.log_file, "ab")  # noqa: SIM115 - passed to daemon child
@@ -166,6 +179,8 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
         "--port",
         str(config.port),
     ]
+    if allow_remote_mcp:
+        argv.append("--allow-remote-mcp")
     try:
         proc = subprocess.Popen(
             argv,
@@ -192,6 +207,7 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
         "host": config.host,
         "port": config.port,
         "containerd_privilege_mode": config.containerd_privilege,
+        "allow_remote_mcp": allow_remote_mcp,
         "containerd_privilege": privilege,
         "mcp_url": config.mcp_url,
         "log_file": str(config.log_file),
@@ -277,6 +293,14 @@ def stop_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 10.0) -> dict[s
 
 
 def restart_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[str, Any]:
+    try:
+        require_mcp_loopback_or_opt_in(
+            config.host,
+            allow_remote_mcp=config.allow_remote_mcp,
+        )
+    except WorkerBeeError as exc:
+        start = _start_error(config, exc)
+        return {"ok": False, "stop": None, "start": start, "port_release": None}
     stop = stop_mcp_daemon(config)
     port_release = _wait_for_port_release(config, timeout=min(max(timeout, 1.0), 10.0))
     if not port_release["ok"]:
@@ -536,12 +560,51 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "host": config.host,
         "port": config.port,
         "containerd_privilege_mode": config.containerd_privilege,
+        "allow_remote_mcp": remote_mcp_allowed(config.allow_remote_mcp),
         "mcp_url": config.mcp_url,
         "codex_mcp_add": f"codex mcp add workerbee --url {config.mcp_url}",
         "agent_instructions": "workerbee agent instructions",
         "metadata_file": str(config.metadata_file),
         "log_file": str(config.log_file),
     }
+
+
+def require_mcp_loopback_or_opt_in(host: str, *, allow_remote_mcp: bool = False) -> None:
+    if _mcp_host_is_loopback(host) or remote_mcp_allowed(allow_remote_mcp):
+        return
+    raise WorkerBeeError(
+        code="MCP_REMOTE_BIND_REQUIRES_AUTH",
+        message="Refusing to expose WorkerBee MCP on a non-loopback host without opt-in",
+        details={
+            "host": host,
+            "allow_env": WORKERBEE_ALLOW_REMOTE_MCP_ENV,
+        },
+        remediation=(
+            "Bind WorkerBee MCP to 127.0.0.1/localhost, or pass --allow-remote-mcp "
+            f"or set {WORKERBEE_ALLOW_REMOTE_MCP_ENV}=1 for a controlled local network "
+            "test. WorkerBee does not yet implement standards-compliant MCP OAuth "
+            "authorization for remote exposure."
+        ),
+    )
+
+
+def remote_mcp_allowed(explicit: bool = False) -> bool:
+    return explicit or str(os.getenv(WORKERBEE_ALLOW_REMOTE_MCP_ENV) or "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _mcp_host_is_loopback(host: str) -> bool:
+    normalized = host.strip().strip("[]").lower()
+    if normalized in {"localhost", "ip6-localhost"}:
+        return True
+    try:
+        return ip_address(normalized).is_loopback
+    except ValueError:
+        return False
 
 
 def _read_metadata(path: Path) -> dict[str, Any]:

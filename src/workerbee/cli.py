@@ -299,23 +299,36 @@ def build_parser() -> argparse.ArgumentParser:
 
     mcp = sub.add_parser("mcp", help="Run the MCP server")
     mcp_sub = mcp.add_subparsers(dest="mcp_cmd", required=True)
-    def add_mcp_bind_flags(command: argparse.ArgumentParser) -> None:
+    def add_mcp_bind_flags(
+        command: argparse.ArgumentParser,
+        *,
+        allow_remote: bool = False,
+    ) -> None:
         command.add_argument("--host", default="127.0.0.1")
         command.add_argument("--port", type=int, default=8765)
+        if allow_remote:
+            command.add_argument(
+                "--allow-remote-mcp",
+                action="store_true",
+                help=(
+                    "Allow non-loopback MCP binds. WorkerBee does not yet implement "
+                    "standards-compliant MCP OAuth authorization for remote exposure."
+                ),
+            )
 
     start_mcp = mcp_sub.add_parser("start", help="Start WorkerBee MCP in the background")
-    add_mcp_bind_flags(start_mcp)
+    add_mcp_bind_flags(start_mcp, allow_remote=True)
     start_mcp.add_argument("--timeout", type=float, default=45.0)
     stop_mcp = mcp_sub.add_parser("stop", help="Stop the background WorkerBee MCP daemon")
     add_mcp_bind_flags(stop_mcp)
     stop_mcp.add_argument("--timeout", type=float, default=10.0)
     restart_mcp = mcp_sub.add_parser("restart", help="Restart WorkerBee MCP in the background")
-    add_mcp_bind_flags(restart_mcp)
+    add_mcp_bind_flags(restart_mcp, allow_remote=True)
     restart_mcp.add_argument("--timeout", type=float, default=45.0)
     status_mcp = mcp_sub.add_parser("status", help="Show background WorkerBee MCP status")
     add_mcp_bind_flags(status_mcp)
     serve = mcp_sub.add_parser("serve", help="Serve WorkerBee over Streamable HTTP MCP")
-    add_mcp_bind_flags(serve)
+    add_mcp_bind_flags(serve, allow_remote=True)
     return parser
 
 
@@ -361,6 +374,7 @@ def main(argv: list[str] | None = None) -> int:
                     state_dir=args.state_dir,
                     state_root=args.state_root,
                     containerd_privilege=containerd_privilege,
+                    allow_remote_mcp=args.allow_remote_mcp,
                 )
                 return 0
             if args.state_dir is not None and args.state_root is not None:
@@ -372,6 +386,7 @@ def main(argv: list[str] | None = None) -> int:
                 host=args.host,
                 port=args.port,
                 containerd_privilege=containerd_privilege,
+                allow_remote_mcp=bool(getattr(args, "allow_remote_mcp", False)),
             )
             if args.mcp_cmd == "start":
                 return _print(start_mcp_daemon(config, timeout=args.timeout), json_out=args.json)

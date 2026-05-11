@@ -7,6 +7,20 @@ from typing import Any
 import pytest
 
 from workerbee import mcp_server
+from workerbee.contract import WorkerBeeError
+
+
+def test_serve_mcp_refuses_remote_bind_without_opt_in(tmp_path) -> None:
+    with pytest.raises(WorkerBeeError) as exc:
+        mcp_server.serve_mcp(
+            project="default",
+            runtime="podman",
+            state_root=tmp_path,
+            host="0.0.0.0",
+            port=9876,
+        )
+
+    assert exc.value.code == "MCP_REMOTE_BIND_REQUIRES_AUTH"
 
 
 def test_secret_policy_status_mcp_tool_uses_daemon_status(

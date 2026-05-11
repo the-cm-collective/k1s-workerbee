@@ -13,6 +13,10 @@ from workerbee.daemon import (
     _handle_dashboard_action,
     _profile_control_plane_checks,
     _render_dashboard,
+    _send_bytes,
+    _send_html,
+    _send_json,
+    _send_not_found,
     _websocket_probe_once,
 )
 from workerbee.http import request
@@ -153,6 +157,42 @@ def test_global_dashboard_uses_k1s_visual_style() -> None:
     assert "expandedRouteProjects" in html
     assert "refresh paused: route details open" in html
     assert "window.location.reload()" not in html
+
+
+def test_dashboard_dynamic_responses_use_no_store_security_headers() -> None:
+    handler = _FakeDashboardHandler()
+
+    _send_html(handler, "<html></html>")
+
+    assert handler.status == 200
+    assert handler.headers["Cache-Control"] == "no-store"
+    assert handler.headers["X-Content-Type-Options"] == "nosniff"
+    assert handler.headers["Referrer-Policy"] == "no-referrer"
+    assert handler.headers["X-Frame-Options"] == "DENY"
+    assert "frame-ancestors 'none'" in handler.headers["Content-Security-Policy"]
+
+    handler = _FakeDashboardHandler()
+    _send_json(handler, {"ok": True})
+
+    assert handler.headers["Cache-Control"] == "no-store"
+    assert handler.headers["X-Content-Type-Options"] == "nosniff"
+    assert "Content-Security-Policy" not in handler.headers
+
+    handler = _FakeDashboardHandler()
+    _send_not_found(handler)
+
+    assert handler.status == 404
+    assert handler.headers["Cache-Control"] == "no-store"
+    assert handler.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_dashboard_static_assets_are_cacheable_but_nosniff() -> None:
+    handler = _FakeDashboardHandler()
+
+    _send_bytes(handler, b"asset", "image/png")
+
+    assert handler.headers["Cache-Control"] == "public, max-age=3600"
+    assert handler.headers["X-Content-Type-Options"] == "nosniff"
 
 
 def test_profile_control_plane_checks_use_loopback_with_public_host(
@@ -1378,3 +1418,28 @@ def test_global_ingress_exports_caddy_ca_bundle(tmp_path: Path, monkeypatch) -> 
     assert calls
     assert "cat" in calls[0]
     assert "/data/caddy/pki/authorities/local/root.crt" in calls[0]
+
+
+class _FakeDashboardHandler:
+    def __init__(self) -> None:
+        self.status: int | None = None
+        self.headers: dict[str, str] = {}
+        self.ended = False
+        self.wfile = _FakeBody()
+
+    def send_response(self, status: int) -> None:
+        self.status = status
+
+    def send_header(self, name: str, value: str) -> None:
+        self.headers[name] = value
+
+    def end_headers(self) -> None:
+        self.ended = True
+
+
+class _FakeBody:
+    def __init__(self) -> None:
+        self.data = b""
+
+    def write(self, body: bytes) -> None:
+        self.data += body

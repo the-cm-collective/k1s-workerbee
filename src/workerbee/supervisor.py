@@ -50,7 +50,7 @@ from workerbee.runtime_support import (
     workerbee_runtime_labels,
     write_containerd_cli_wrapper,
 )
-from workerbee.secrets import secret_env_for_project
+from workerbee.secrets import secret_env_for_project, write_private_json
 
 
 @dataclass(slots=True)
@@ -997,9 +997,7 @@ https://{api_host} {{
 
     def _write_stack(self, info: StackInfo) -> None:
         self._ensure_dirs()
-        tmp = self.stack_file.with_suffix(".tmp")
-        tmp.write_text(json.dumps(asdict(info), indent=2, sort_keys=True), encoding="utf-8")
-        tmp.replace(self.stack_file)
+        write_private_json(self.stack_file, asdict(info))
 
     def _resolve_runtime(self) -> str:
         return resolve_runtime(self.runtime_requested)

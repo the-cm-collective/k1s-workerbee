@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from stat import S_IMODE
 
 from workerbee.ingress import ProjectIngressConfig
 from workerbee.remote_k1s_target import (
@@ -98,6 +99,20 @@ def test_remote_k1s_target_info_masks_tokens(tmp_path: Path) -> None:
     assert public["admin_token"] == masked
     assert public["read_token"] == masked
     assert public["apishim_token"] == masked
+
+
+def test_remote_k1s_target_tokens_file_is_owner_only(tmp_path: Path) -> None:
+    target = RemoteK1sTarget(
+        state_root=tmp_path,
+        project="Remote App",
+        cwd=tmp_path,
+        k1s_root=tmp_path,
+    )
+
+    tokens = target._tokens()  # noqa: SLF001
+
+    assert tokens["admin_token"]
+    assert S_IMODE((target.target_dir / "tokens.json").stat().st_mode) == 0o600
 
 
 def test_helper_bridge_normalizes_nerdctl_json_lines_for_images() -> None:
