@@ -174,6 +174,15 @@ def serve_mcp(
         return protect("Projects", None, daemon.projects)
 
     @mcp.tool()
+    def workerbee_v1_secret_policy_status(project: str = "default") -> dict[str, Any]:
+        """Return secure-by-default secret policy status for a WorkerBee project."""
+        return protect(
+            "SecretPolicyStatus",
+            project,
+            lambda: daemon.secret_policy_status(project=project),
+        )
+
+    @mcp.tool()
     def workerbee_v1_project_mode_get(project: str = "default") -> dict[str, Any]:
         """Return persisted WorkerBee mode for a project."""
         return protect("ProjectModeGet", project, lambda: daemon.project_mode_get(project))

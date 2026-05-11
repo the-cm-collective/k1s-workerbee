@@ -14,6 +14,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from contextlib import contextmanager, suppress
@@ -27,6 +28,8 @@ from workerbee.runtime_support import (
     containerd_address,
     containerd_nerdctl_probe,
     nerdctl_binary,
+    raise_if_containerd_microk8s_conflict,
+    shared_k8s_containerd_allowed,
 )
 
 CONTAINERD_PRIVILEGE_MODES = ("auto", "sudo-helper", "unprivileged")
@@ -35,6 +38,7 @@ HELPER_METADATA_FILE = "containerd-helper.json"
 HELPER_LOG_FILE = "containerd-helper.log"
 HELPER_WRAPPER_FILE = "workerbee-nerdctl"
 HELPER_REQUEST_LIMIT = 512 * 1024 * 1024
+HELPER_SOCKET_PATH_LIMIT = 100
 
 _GLOBAL_VALUE_FLAGS = {
     "-H": "address",
@@ -154,6 +158,7 @@ def ensure_containerd_privilege(
             "env": {},
         }
 
+    raise_if_containerd_microk8s_conflict(address=containerd_address())
     probe = containerd_nerdctl_probe(containerd_address())
     if probe.get("ok"):
         return {
@@ -184,6 +189,7 @@ def ensure_containerd_privilege(
 
 def ensure_containerd_helper(state_root: Path, *, timeout: float = 20.0) -> dict[str, Any]:
     root = state_root.expanduser().resolve()
+    raise_if_containerd_microk8s_conflict(address=containerd_address())
     root.joinpath("global").mkdir(parents=True, exist_ok=True)
     wrapper = write_containerd_helper_client_wrapper(root)
     status = containerd_helper_status(root)
@@ -235,6 +241,8 @@ def ensure_containerd_helper(state_root: Path, *, timeout: float = 20.0) -> dict
         "--address",
         containerd_address(),
     ]
+    if shared_k8s_containerd_allowed():
+        argv.append("--allow-shared-k8s-containerd")
     log = open(paths["log"], "ab")  # noqa: SIM115 - child owns inherited descriptor
     try:
         proc = subprocess.Popen(
@@ -490,6 +498,7 @@ def validate_helper_argv(
     *,
     state_root: Path,
     address: str | None = None,
+    allow_shared_k8s_containerd: bool = False,
 ) -> dict[str, Any]:
     root = state_root.expanduser().resolve()
     parsed = _parse_nerdctl_argv(argv)
@@ -512,6 +521,10 @@ def validate_helper_argv(
             message="containerd helper requires the configured containerd address",
             details={"expected": expected_address, "actual": values.get("address")},
         )
+    raise_if_containerd_microk8s_conflict(
+        address=expected_address,
+        allow_shared_k8s_containerd=allow_shared_k8s_containerd,
+    )
     if command == "namespace" and command_args[:1] == ["ls"]:
         return {"ok": True, "command": command, "diagnostic": True}
     if command in _DENIED_COMMANDS or any(item in _DENIED_TOKENS for item in command_args):
@@ -547,6 +560,11 @@ def validate_helper_argv(
             message="containerd helper requires --cni-netconfpath under the WorkerBee state root",
             details={"cni_netconfpath": cni_netconfpath, "state_root": str(root)},
         )
+    raise_if_containerd_microk8s_conflict(
+        address=expected_address,
+        cni_netconfpath=Path(str(cni_netconfpath)),
+        allow_shared_k8s_containerd=allow_shared_k8s_containerd,
+    )
     return {
         "ok": True,
         "command": command,
@@ -565,6 +583,7 @@ def serve_helper(
     user_gid: int,
     nerdctl: str,
     address: str,
+    allow_shared_k8s_containerd: bool = False,
 ) -> None:
     if os.geteuid() != 0:
         raise SystemExit("workerbee containerd helper must run as root")
@@ -595,6 +614,7 @@ def serve_helper(
         "socket": str(socket_path),
         "nerdctl": nerdctl,
         "address": address,
+        "allow_shared_k8s_containerd": allow_shared_k8s_containerd,
         "user_uid": int(user_uid),
         "user_gid": int(user_gid),
         "started_at": time.time(),
@@ -609,6 +629,7 @@ def serve_helper(
                 state_root=root,
                 nerdctl=nerdctl,
                 address=address,
+                allow_shared_k8s_containerd=allow_shared_k8s_containerd,
             )
             if response.pop("_shutdown", False):
                 stop.set()
@@ -678,6 +699,7 @@ def main(argv: list[str] | None = None) -> int:
     serve.add_argument("--user-gid", type=int, required=True)
     serve.add_argument("--nerdctl", required=True)
     serve.add_argument("--address", required=True)
+    serve.add_argument("--allow-shared-k8s-containerd", action="store_true")
     client = sub.add_parser("client")
     client.add_argument("--socket", type=Path, required=True)
     client.add_argument("args", nargs=argparse.REMAINDER)
@@ -693,6 +715,7 @@ def main(argv: list[str] | None = None) -> int:
         user_gid=args.user_gid,
         nerdctl=args.nerdctl,
         address=args.address,
+        allow_shared_k8s_containerd=args.allow_shared_k8s_containerd,
     )
     return 0
 
@@ -703,6 +726,7 @@ def _handle_helper_connection(
     state_root: Path,
     nerdctl: str,
     address: str,
+    allow_shared_k8s_containerd: bool = False,
 ) -> dict[str, Any]:
     try:
         raw = _recv_all(conn, limit=HELPER_REQUEST_LIMIT)
@@ -720,7 +744,12 @@ def _handle_helper_connection(
         if not isinstance(argv, list) or not all(isinstance(item, str) for item in argv):
             return _error_response("CONTAINERD_HELPER_BAD_ARGV", "argv must be a string list")
         try:
-            validate_helper_argv(argv, state_root=state_root, address=address)
+            validate_helper_argv(
+                argv,
+                state_root=state_root,
+                address=address,
+                allow_shared_k8s_containerd=allow_shared_k8s_containerd,
+            )
         except WorkerBeeError as exc:
             return _error_response(exc.code, exc.message, details=exc.public_dict())
         stdin = base64.b64decode(str(payload.get("stdin_b64") or ""))
@@ -747,11 +776,25 @@ def _handle_remove_tree(payload: dict[str, Any], *, state_root: Path) -> dict[st
     root = state_root.expanduser().resolve()
     projects_root = root / "projects"
     target = Path(raw).expanduser().resolve()
-    if target == projects_root or not _under_root(target, projects_root):
+    allowed_global_roots = {
+        root / "global" / "caddy-data",
+        root / "global" / "containerd-cni-net.d",
+        root / "global" / "containerd-data",
+    }
+    project_allowed = target != projects_root and _under_root(target, projects_root)
+    global_allowed = any(
+        target == global_root or _under_root(target, global_root)
+        for global_root in allowed_global_roots
+    )
+    if not project_allowed and not global_allowed:
         return _error_response(
             "CONTAINERD_HELPER_REMOVE_PATH_DENIED",
-            "containerd helper only removes WorkerBee project state paths",
-            details={"path": str(target), "projects_root": str(projects_root)},
+            "containerd helper only removes WorkerBee project and runtime state paths",
+            details={
+                "path": str(target),
+                "projects_root": str(projects_root),
+                "global_roots": sorted(str(item) for item in allowed_global_roots),
+            },
         )
     if not target.exists() and not target.is_symlink():
         return {"ok": True, "removed": False, "path": str(target)}
@@ -846,10 +889,18 @@ def _helper_paths(state_root: Path) -> dict[str, Path]:
     root = state_root.expanduser().resolve()
     global_dir = root / "global"
     return {
-        "socket": global_dir / HELPER_SOCKET_FILE,
+        "socket": _helper_socket_path(root),
         "metadata": global_dir / HELPER_METADATA_FILE,
         "log": global_dir / HELPER_LOG_FILE,
     }
+
+
+def _helper_socket_path(root: Path) -> Path:
+    default = root / "global" / HELPER_SOCKET_FILE
+    if len(str(default)) <= HELPER_SOCKET_PATH_LIMIT:
+        return default
+    digest = hashlib.sha256(str(root).encode("utf-8")).hexdigest()[:16]  # noqa: S324
+    return Path(tempfile.gettempdir()) / f"workerbee-{digest}-{HELPER_SOCKET_FILE}"
 
 
 def _helper_wrapper_path(state_root: Path) -> Path:

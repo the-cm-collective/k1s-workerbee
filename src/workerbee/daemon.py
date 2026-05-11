@@ -1189,6 +1189,17 @@ class WorkerBeeDaemon:
             ),
         }
 
+    def secret_policy_status(self, project: str | None = None) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+        project_state = daemon_project_state_dir(name, state_root=self.state_root)
+        return {
+            "ok": True,
+            "project": name,
+            "state_root": str(self.state_root),
+            "project_state": str(project_state),
+            "secret_policy": secret_policy_status(project_state),
+        }
+
     def cleanup(self, *, execute: bool = False, purge_images: bool = False) -> dict[str, Any]:
         return cleanup_runtime(
             state_root=self.state_root,

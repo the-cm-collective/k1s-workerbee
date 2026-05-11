@@ -313,6 +313,25 @@ WORKERBEE_SECURITY_REPORT_OUT=/tmp/workerbee-security-report.json \
 .venv/bin/python -m pytest tests/test_security_live.py -q
 ```
 
+The remote k1s deploy live scenario is also opt-in. It starts a standalone
+same-host k1s target through direct containerd, builds the bundled realtime
+frontend/backend/db app, deploys it with WorkerBee's remote k1s deploy path, and
+probes the public HTTPS routes:
+
+```bash
+WORKERBEE_LIVE_REMOTE_K1S_DEPLOY=1 \
+.venv/bin/python -m pytest tests/test_remote_k1s_live.py -q
+```
+
+Set `WORKERBEE_LIVE_REMOTE_K1S_KEEP=1` to pause after a successful deployment
+for manual dashboard inspection. Press Enter when inspection is complete; the
+test then removes the remote target and WorkerBee containers. The test also
+prints and writes a fallback cleanup command in its JSON report, for example:
+
+```bash
+workerbee --runtime containerd --state-root <state-root> cleanup --execute --purge-images
+```
+
 `--stage` accepts either the absolute `stage_dir` returned by prepare or the named stage under the project `artifacts/staged` directory. `manifest prepare --source <file-or-dir>` can stage native k1s YAML or practical Kubernetes YAML. Kubernetes input is applied through the k1s shim `ae apply --k8s` path and should keep exactly one workload plus matching Service/Ingress documents per file. Native k1s manifests are the required input when exporting a native k1s bundle; Kubernetes input can be exported as Kubernetes YAML or a Helm skeleton. Kubernetes and Helm exports preserve Secret references but do not emit Secret values; create environment-specific Secret objects before applying those exports.
 
 `workerbee_v1_ingress_probe` supports `GET`, `HEAD`, `POST`, `PUT`,
@@ -446,6 +465,14 @@ uses state-local nerdctl data roots, state-local CNI config directories, and
 state-hash-scoped project networks. WorkerBee must never target reserved
 namespaces such as `ae`, `k8s.io`, `moby`, or `default`; those may belong to a
 real k1s/Kubernetes runtime on the same host.
+
+WorkerBee also generates a state-derived CNI bridge interface name instead of
+the global-looking `nerdctl0` default and allocates a deterministic
+WorkerBee-only subnet per project. On hosts with MicroK8s, WorkerBee refuses the
+MicroK8s containerd socket by default and always refuses MicroK8s CNI config
+paths. For a controlled local integration test that intentionally shares the
+MicroK8s containerd socket, set `WORKERBEE_ALLOW_SHARED_K8S_CONTAINERD=1`; the
+CNI config path must still remain under the WorkerBee state root.
 
 When `--runtime containerd` is explicitly selected, WorkerBee MCP defaults to `--containerd-privilege auto`. Auto first tries unprivileged `nerdctl`; if that fails, WorkerBee prompts once with `sudo` and starts a state-scoped root helper. The helper exposes a WorkerBee-owned Unix socket and a generated `nerdctl` wrapper under the WorkerBee state root, validates every command, and only allows WorkerBee state-hash namespaces plus state-local data/CNI paths. This never runs for `--runtime auto`, Docker, or Podman. Use `--containerd-privilege unprivileged` if you preconfigured rootless/system access yourself.
 

@@ -70,6 +70,7 @@ capabilities:
 - Lifecycle safety: prevent two independent MCP daemons from mutating the same state root, clean stale processes, avoid port drift, support purge/reset, and never expose bearer tokens in tool results.
 - Deployment inputs: support staged native k1s manifests as the primary path, practical Kubernetes YAML apply through `ae apply --k8s`, image build contexts, and simple generated app templates. Kubernetes input is intentionally limited to one workload plus optional Service/Ingress per file for v0.1; native k1s input is required for native k1s bundle export.
 - Secret handling: keep generated local-stack secrets SOPS/age-encrypted by default, require an explicit plaintext escape hatch for local runs, block unsafe remote native `secretRefs` unless explicitly allowed, and avoid emitting Secret values in Kubernetes/Helm exports.
+- Remote deploy validation: include an opt-in live scenario that starts a standalone local k1s target, deploys the bundled realtime frontend/backend/db app through the remote k1s deploy path, and can pause on dashboard/app URLs before automated cleanup.
 - Observability: defer richer resource summaries/events/ingress health to k1s-side work and track it through `docs/rfcs/k1s-workerbee-observability.md`.
 - TLS/dev CA: complete guided trust-store handling across NixOS, Debian/Fedora, macOS, Windows, Firefox/NSS, and containerized browser cases.
 - Artifact handoff: export native k1s bundles, Kubernetes YAML, Helm chart skeletons, and image metadata suitable for registry handoff.

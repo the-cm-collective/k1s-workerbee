@@ -37,6 +37,7 @@ MCP_TOOL_NAMES = [
     "workerbee_v1_manifest_deploy_local",
     "workerbee_v1_manifest_deploy_remote_k1s",
     "workerbee_v1_bundle_export",
+    "workerbee_v1_secret_policy_status",
     "workerbee_v1_security_assess",
     "workerbee_v1_security_review_project",
     "workerbee_v1_cleanup",

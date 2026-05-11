@@ -12,6 +12,7 @@ import subprocess
 import tempfile
 from contextlib import suppress
 from dataclasses import dataclass
+from ipaddress import ip_network
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,8 @@ WORKERBEE_LABEL = "workerbee.managed=true"
 CONTAINERD_RUNTIME = "containerd"
 CONTAINERD_RESERVED_NAMESPACES = frozenset({"ae", "k8s.io", "moby", "default"})
 CONTAINERD_REQUIRED_CNI_PLUGINS = ("bridge", "host-local", "loopback", "portmap")
+MICROK8S_ROOT = Path("/var/snap/microk8s")
+MICROK8S_CONTAINERD_SOCKET = MICROK8S_ROOT / "common" / "run" / "containerd.sock"
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +85,7 @@ def runtime_diagnostics(
         "containerd": {
             "address": containerd_address(),
             "socket_exists": _containerd_socket_exists(containerd_address()),
+            "microk8s_conflict": containerd_microk8s_conflict_info(),
             "reserved_namespaces": sorted(CONTAINERD_RESERVED_NAMESPACES),
         },
     }
@@ -173,6 +177,76 @@ def containerd_socket_path(address: str | None = None) -> Path | None:
     return None
 
 
+def shared_k8s_containerd_allowed() -> bool:
+    return _env_truthy("WORKERBEE_ALLOW_SHARED_K8S_CONTAINERD")
+
+
+def containerd_microk8s_conflict_info(
+    address: str | None = None,
+    cni_netconfpath: Path | str | None = None,
+    *,
+    allow_shared_k8s_containerd: bool | None = None,
+) -> dict[str, Any]:
+    selected_address = address or containerd_address()
+    socket_path = containerd_socket_path(selected_address)
+    cni_path = Path(str(cni_netconfpath)).expanduser() if cni_netconfpath is not None else None
+    allow_shared = (
+        shared_k8s_containerd_allowed()
+        if allow_shared_k8s_containerd is None
+        else bool(allow_shared_k8s_containerd)
+    )
+    uses_microk8s_socket = bool(
+        socket_path is not None and _is_microk8s_containerd_socket(socket_path)
+    )
+    uses_microk8s_cni = bool(cni_path is not None and _is_microk8s_path(cni_path))
+    reasons = []
+    if uses_microk8s_cni:
+        reasons.append("microk8s_cni_netconfpath")
+    if uses_microk8s_socket and not allow_shared:
+        reasons.append("microk8s_containerd_socket")
+    return {
+        "address": selected_address,
+        "socket_path": str(socket_path) if socket_path is not None else None,
+        "cni_netconfpath": str(cni_path) if cni_path is not None else None,
+        "microk8s_detected": _microk8s_detected(),
+        "uses_microk8s_socket": uses_microk8s_socket,
+        "uses_microk8s_cni_netconfpath": uses_microk8s_cni,
+        "allow_shared_k8s_containerd": allow_shared,
+        "blocked": bool(reasons),
+        "reasons": reasons,
+    }
+
+
+def raise_if_containerd_microk8s_conflict(
+    address: str | None = None,
+    cni_netconfpath: Path | str | None = None,
+    *,
+    allow_shared_k8s_containerd: bool | None = None,
+) -> None:
+    info = containerd_microk8s_conflict_info(
+        address,
+        cni_netconfpath,
+        allow_shared_k8s_containerd=allow_shared_k8s_containerd,
+    )
+    if not info["blocked"]:
+        return
+    raise WorkerBeeError(
+        code="CONTAINERD_MICROK8S_CONFLICT",
+        message=(
+            "Refusing to use MicroK8s containerd or CNI paths for WorkerBee "
+            "direct-containerd mode"
+        ),
+        details=info,
+        remediation=(
+            "Use Docker/Podman, a non-Kubernetes host containerd socket such as "
+            "`unix:///run/containerd/containerd.sock`, or an isolated WorkerBee "
+            "containerd. For an intentional controlled test against the MicroK8s "
+            "containerd socket, set WORKERBEE_ALLOW_SHARED_K8S_CONTAINERD=1; "
+            "WorkerBee still refuses MicroK8s CNI config paths."
+        ),
+    )
+
+
 def containerd_socket_access_info(address: str | None = None) -> dict[str, Any]:
     selected_address = address or containerd_address()
     path = containerd_socket_path(selected_address)
@@ -240,8 +314,22 @@ def containerd_socket_access_info(address: str | None = None) -> dict[str, Any]:
 def containerd_nerdctl_probe(address: str | None = None) -> dict[str, Any]:
     selected_address = address or containerd_address()
     socket_info = containerd_socket_access_info(selected_address)
+    conflict = containerd_microk8s_conflict_info(selected_address)
     nerdctl = shutil.which(nerdctl_binary())
     using_workerbee_helper = bool(os.getenv("WORKERBEE_CONTAINERD_HELPER_SOCKET"))
+    if conflict["blocked"]:
+        return {
+            "ok": False,
+            "code": "CONTAINERD_MICROK8S_CONFLICT",
+            "message": (
+                "WorkerBee direct-containerd mode refuses MicroK8s containerd by default"
+            ),
+            "cmd": None,
+            "stdout": "",
+            "socket": socket_info,
+            "namespaces": [],
+            "microk8s_conflict": conflict,
+        }
     if nerdctl is None:
         return {
             "ok": False,
@@ -399,10 +487,15 @@ def containerd_base_args(
 ) -> list[str]:
     data_root = containerd_data_root(state_root, project=project, system=system)
     cni_conf = containerd_cni_conf_dir(state_root, project=project, system=system)
+    subnet = _containerd_cni_subnet(state_root, project=project, system=system)
+    raise_if_containerd_microk8s_conflict(
+        address=containerd_address(),
+        cni_netconfpath=cni_conf,
+    )
     if ensure_dirs:
         data_root.mkdir(parents=True, exist_ok=True)
         cni_conf.mkdir(parents=True, exist_ok=True)
-        _ensure_containerd_default_bridge_config(cni_conf)
+        _ensure_containerd_default_bridge_config(cni_conf, subnet=subnet)
     namespace = containerd_namespace(state_root, project=project, system=system)
     _raise_if_reserved_containerd_namespace(namespace)
     return [
@@ -420,16 +513,31 @@ def containerd_base_args(
     ]
 
 
-def _ensure_containerd_default_bridge_config(cni_conf: Path) -> None:
+def _containerd_cni_subnet(
+    state_root: Path,
+    project: str | None = None,
+    *,
+    system: bool = False,
+) -> str:
+    return containerd_network_subnet(state_root, "system" if system or not project else project)
+
+
+def _ensure_containerd_default_bridge_config(cni_conf: Path, *, subnet: str) -> None:
     """Prevent nerdctl from recreating its default bridge per WorkerBee CNI dir."""
     config = cni_conf / "nerdctl-bridge.conflist"
-    if config.exists():
+    data = _containerd_default_bridge_config(cni_conf, subnet=subnet)
+    content = json.dumps(data, indent=2) + "\n"
+    if config.exists() and config.read_text(encoding="utf-8") == content:
         return
+    config.write_text(content, encoding="utf-8")
+
+
+def _containerd_default_bridge_config(cni_conf: Path, *, subnet: str) -> dict[str, Any]:
     nerdctl_id = hashlib.blake2s(
-        str(cni_conf.resolve()).encode("utf-8"),
+        str(cni_conf.resolve(strict=False)).encode("utf-8"),
         digest_size=32,
     ).hexdigest()
-    data = {
+    return {
         "cniVersion": "1.0.0",
         "name": "bridge",
         "nerdctlID": nerdctl_id,
@@ -437,12 +545,12 @@ def _ensure_containerd_default_bridge_config(cni_conf: Path) -> None:
         "plugins": [
             {
                 "type": "bridge",
-                "bridge": "nerdctl0",
+                "bridge": _containerd_bridge_name(cni_conf),
                 "isGateway": True,
                 "ipMasq": True,
                 "hairpinMode": True,
                 "ipam": {
-                    "ranges": [[{"gateway": "10.4.0.1", "subnet": "10.4.0.0/24"}]],
+                    "ranges": [[{"gateway": _subnet_gateway(subnet), "subnet": subnet}]],
                     "routes": [{"dst": "0.0.0.0/0"}],
                     "type": "host-local",
                 },
@@ -452,7 +560,19 @@ def _ensure_containerd_default_bridge_config(cni_conf: Path) -> None:
             {"type": "tuning"},
         ],
     }
-    config.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def _containerd_bridge_name(cni_conf: Path) -> str:
+    digest = hashlib.blake2s(
+        str(cni_conf.resolve(strict=False)).encode("utf-8"),
+        digest_size=5,
+    ).hexdigest()
+    return f"wb{digest}"
+
+
+def _subnet_gateway(subnet: str) -> str:
+    network = ip_network(subnet, strict=False)
+    return str(network.network_address + 1)
 
 
 def runtime_command_args(
@@ -537,6 +657,7 @@ def build_image_with_runtime(
         )
     cmd = [selected, "build", "-t", tag]
     cmd.extend(_container_build_file_args(build_context, build_file))
+    cmd.append("--no-cache")
     for label in label_values:
         cmd.extend(["--label", label])
     cmd.append(str(build_context))
@@ -586,6 +707,14 @@ def containerd_safety_info(state_root: Path, project: str | None = None) -> dict
     project_namespace = (
         containerd_namespace(root, project=project_name) if project_name else None
     )
+    system_cni_conf = containerd_cni_conf_dir(root, system=True)
+    project_cni_conf = (
+        containerd_cni_conf_dir(root, project=project_name) if project_name else None
+    )
+    conflict = containerd_microk8s_conflict_info(
+        address=containerd_address(),
+        cni_netconfpath=project_cni_conf or system_cni_conf,
+    )
     namespaces = [system_namespace] + ([project_namespace] if project_namespace else [])
     reserved_overlap = sorted(set(namespaces).intersection(CONTAINERD_RESERVED_NAMESPACES))
     active_namespaces, namespace_probe_error = _list_containerd_namespaces()
@@ -593,15 +722,34 @@ def containerd_safety_info(state_root: Path, project: str | None = None) -> dict
         item for item in active_namespaces if not item.startswith(f"workerbee-{_state_hash(root)}-")
     ]
     warnings = []
+    nerdctl0_exists = _netdev_exists("nerdctl0")
     if _containerd_socket_exists(containerd_address()):
         warnings.append(
             "WorkerBee is using a shared host containerd socket; isolation relies on "
             "WorkerBee state-hash namespaces and state-local nerdctl/CNI roots."
         )
+    if conflict["blocked"]:
+        warnings.append(
+            "WorkerBee direct-containerd mode is blocked because it would use MicroK8s "
+            "containerd or CNI paths."
+        )
+    if conflict["uses_microk8s_socket"] and conflict["allow_shared_k8s_containerd"]:
+        warnings.append(
+            "WORKERBEE_ALLOW_SHARED_K8S_CONTAINERD is set; WorkerBee is allowed to share "
+            "the MicroK8s containerd socket for this run, but CNI config paths remain isolated."
+        )
+    if conflict["microk8s_detected"] and nerdctl0_exists:
+        warnings.append(
+            "`nerdctl0` exists on a MicroK8s host. Calico IP autodetection can select the "
+            "wrong interface unless MicroK8s is pinned to the real host NIC."
+        )
     return {
         "state_hash": _state_hash(root),
         "address": containerd_address(),
         "socket_exists": _containerd_socket_exists(containerd_address()),
+        "microk8s_detected": conflict["microk8s_detected"],
+        "microk8s_conflict": conflict,
+        "nerdctl0_exists": nerdctl0_exists,
         "reserved_namespaces": sorted(CONTAINERD_RESERVED_NAMESPACES),
         "reserved_overlap": reserved_overlap,
         "active_namespaces": active_namespaces,
@@ -614,13 +762,11 @@ def containerd_safety_info(state_root: Path, project: str | None = None) -> dict
         "project_data_root": (
             str(containerd_data_root(root, project=project_name)) if project_name else None
         ),
-        "system_cni_conf_dir": str(containerd_cni_conf_dir(root, system=True)),
-        "project_cni_conf_dir": (
-            str(containerd_cni_conf_dir(root, project=project_name)) if project_name else None
-        ),
+        "system_cni_conf_dir": str(system_cni_conf),
+        "project_cni_conf_dir": str(project_cni_conf) if project_cni_conf else None,
         "cni_bin_dir": containerd_cni_bin_dir(),
         "warnings": warnings,
-        "ok": not reserved_overlap,
+        "ok": not reserved_overlap and not conflict["blocked"],
     }
 
 
@@ -650,9 +796,20 @@ def _cleanup_containerd_runtime(
                 action["namespace"] = namespace
                 actions.append(action)
         if purge_images:
-            for action in _cleanup_images(cmd, execute=execute):
+            for action in _cleanup_images(cmd, execute=execute, all_images=True):
                 action["namespace"] = namespace
                 actions.append(action)
+        if execute:
+            proc = cmd.run(["namespace", "rm", namespace], timeout=30)
+            if proc.returncode == 0:
+                actions.append(
+                    {
+                        "kind": "namespace",
+                        "name": namespace,
+                        "action": "remove",
+                        "returncode": proc.returncode,
+                    }
+                )
     return {
         "ok": True,
         "runtime": CONTAINERD_RUNTIME,
@@ -688,6 +845,7 @@ def _build_image_containerd(
     else:
         cmd = [*base, "build", "-t", tag]
         cmd.extend(_container_build_file_args(context, dockerfile))
+        cmd.append("--no-cache")
         for label in labels:
             cmd.extend(["--label", label])
         cmd.append(str(context))
@@ -767,6 +925,7 @@ def _build_with_fallback_and_load(
 ) -> dict[str, Any]:
     build_cmd = [fallback, "build", "-t", tag]
     build_cmd.extend(_container_build_file_args(context, dockerfile))
+    build_cmd.append("--no-cache")
     for label in labels:
         build_cmd.extend(["--label", label])
     build_cmd.append(str(context))
@@ -891,12 +1050,22 @@ def _known_projects(state_root: Path) -> set[str]:
     return {project_slug_for_runtime(name) for name in projects}
 
 
-def _cleanup_images(cmd: RuntimeCommand, *, execute: bool) -> list[dict[str, Any]]:
+def _cleanup_images(
+    cmd: RuntimeCommand,
+    *,
+    execute: bool,
+    all_images: bool = False,
+) -> list[dict[str, Any]]:
     proc = cmd.run(["images", "--format", "{{.Repository}}:{{.Tag}} {{.ID}}"], timeout=15)
     images = []
     for line in proc.stdout.splitlines():
         ref, _, image_id = line.partition(" ")
-        if ref.startswith("workerbee-") and image_id:
+        if image_id and (
+            all_images
+            or ref.startswith("workerbee-")
+            or ref.startswith("localhost/workerbee-")
+            or "/workerbee-" in ref
+        ):
             images.append({"kind": "image", "id": image_id, "ref": ref, "action": "remove"})
     if execute and images:
         cmd.run(["rmi", "-f", *[str(item["id"]) for item in images]], timeout=120)
@@ -981,6 +1150,34 @@ def _docker_desktop_hint() -> bool | None:
         return "desktop" in proc.stdout.strip().lower()
     except Exception:
         return None
+
+
+def _env_truthy(name: str) -> bool:
+    return str(os.getenv(name) or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _microk8s_detected() -> bool:
+    return MICROK8S_ROOT.exists() or shutil.which("microk8s") is not None
+
+
+def _is_microk8s_containerd_socket(path: Path) -> bool:
+    resolved = path.expanduser().resolve(strict=False)
+    return resolved == MICROK8S_CONTAINERD_SOCKET or (
+        resolved.name == "containerd.sock" and _is_microk8s_path(resolved)
+    )
+
+
+def _is_microk8s_path(path: Path) -> bool:
+    resolved = path.expanduser().resolve(strict=False)
+    try:
+        resolved.relative_to(MICROK8S_ROOT)
+        return True
+    except ValueError:
+        return False
+
+
+def _netdev_exists(name: str) -> bool:
+    return Path("/sys/class/net", name).exists()
 
 
 def _runtime_guidance() -> str:

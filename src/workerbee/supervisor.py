@@ -16,6 +16,11 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+try:
+    import yaml
+except Exception:  # pragma: no cover - PyYAML is provided by the k1s runtime package
+    yaml = None  # type: ignore[assignment]
+
 from workerbee.containerd_helper import remove_containerd_helper_tree
 from workerbee.http import request, wait_for_http
 from workerbee.ingress import ProjectIngressConfig
@@ -115,6 +120,7 @@ class WorkerBeeSupervisor:
 
         runtime = self._resolve_runtime()
         self._ensure_dirs()
+        self._cleanup_project_runtime_containers(runtime, include_namespaces=False)
         state_root = self.state_dir.parent.parent
         network = (
             containerd_network_name(state_root, self.project)
@@ -360,7 +366,13 @@ class WorkerBeeSupervisor:
         ]
         if namespace:
             args.extend(["--force-namespace", "-n", namespace])
-        result = self.run_ae(args, info=info, timeout=timeout)
+        result = self._apply_manifest_direct(
+            info=info,
+            manifest=path,
+            namespace=namespace,
+            timeout=timeout,
+            fallback_args=args,
+        )
         return {
             "ok": True,
             "project": self.project,
@@ -402,6 +414,104 @@ class WorkerBeeSupervisor:
             "namespace": namespace,
             "ingress_urls": self._ingress_urls_for_paths([path]),
             "apply": result,
+        }
+
+    def _apply_manifest_direct(
+        self,
+        *,
+        info: StackInfo,
+        manifest: Path,
+        namespace: str | None,
+        timeout: int,
+        fallback_args: list[str],
+    ) -> dict[str, Any]:
+        if yaml is None:
+            return self.run_ae(fallback_args, info=info, timeout=timeout)
+        docs = [
+            doc
+            for doc in yaml.safe_load_all(manifest.read_text(encoding="utf-8"))
+            if isinstance(doc, dict)
+        ]
+        if len(docs) != 1:
+            raise ValueError("expected a single Deployment manifest document")
+        payload = docs[0]
+        if namespace:
+            metadata = payload.setdefault("metadata", {})
+            if not isinstance(metadata, dict):
+                raise ValueError("manifest metadata must be a mapping")
+            metadata["namespace"] = namespace
+
+        cmd = _mask_sensitive_args(
+            [
+                self.python_executable,
+                "-m",
+                "ae.cli",
+                "--server",
+                info.controller_url,
+                "--token",
+                info.admin_token,
+                "apply",
+                "-f",
+                str(manifest),
+                *(["--force-namespace", "-n", namespace] if namespace else []),
+            ]
+        )
+        try:
+            response = request(
+                f"{info.controller_url.rstrip('/')}/apply",
+                method="POST",
+                token=info.admin_token,
+                headers={"Accept": "application/json"},
+                json_body=payload,
+                timeout=float(_bounded_cli_http_timeout(timeout)),
+            )
+            body = response.text
+        except Exception as exc:  # noqa: BLE001 - preserve ae.cli-style deploy diagnostics
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "cmd": cmd,
+                        "returncode": 1,
+                        "stdout": f"remote apply failed: {exc}\n",
+                        "stderr": "",
+                    },
+                    indent=2,
+                )
+            ) from exc
+        if response.status >= 400:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "cmd": cmd,
+                        "returncode": 1,
+                        "stdout": f"remote apply failed: HTTP {response.status}\n{body}",
+                        "stderr": "",
+                    },
+                    indent=2,
+                )
+            )
+        try:
+            data = response.json() or {}
+        except Exception as exc:  # noqa: BLE001 - preserve ae.cli-style deploy diagnostics
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "cmd": cmd,
+                        "returncode": 1,
+                        "stdout": f"remote apply failed: invalid JSON response: {exc}\n{body}",
+                        "stderr": "",
+                    },
+                    indent=2,
+                )
+            ) from exc
+        return {
+            "cmd": cmd,
+            "returncode": 0,
+            "stdout": _remote_apply_stdout(data),
+            "stderr": "",
+            "http_status": response.status,
+            "response": data,
+            "transport": "direct-controller",
         }
 
     def deploy_remote_manifest(
@@ -1258,23 +1368,8 @@ https://{api_host} {{
             return False
 
     def _cleanup_runtime(self, info: StackInfo, *, purge: bool) -> None:
-        namespace_filter = f"ae.namespace={POC_NAMESPACE}"
         if info.runtime == "podman":
-            ids = _split_lines(
-                subprocess.run(
-                    ["podman", "ps", "-aq", "--filter", f"label={namespace_filter}"],
-                    text=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                ).stdout
-            )
-            if ids:
-                subprocess.run(
-                    ["podman", "rm", "-f", *ids],
-                    check=False,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+            self._cleanup_project_runtime_containers(info.runtime, include_namespaces=True)
             if purge:
                 subprocess.run(
                     ["podman", "network", "rm", info.network],
@@ -1287,24 +1382,44 @@ https://{api_host} {{
             self._cleanup_containerd_runtime(network=info.network, purge=purge)
             return
 
-        ids = _split_lines(
+        self._cleanup_project_runtime_containers(info.runtime, include_namespaces=True)
+        if purge:
             subprocess.run(
-                ["docker", "ps", "-aq", "--filter", f"label={namespace_filter}"],
-                text=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-            ).stdout
-        )
-        if ids:
-            subprocess.run(
-                ["docker", "rm", "-f", *ids],
+                ["docker", "network", "rm", info.network],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
             )
-        if purge:
+
+    def _cleanup_project_runtime_containers(
+        self,
+        runtime: str,
+        *,
+        include_namespaces: bool,
+    ) -> None:
+        if runtime not in {"docker", "podman"}:
+            return
+        ids: list[str] = []
+        seen: set[str] = set()
+        for label_filter in _project_cleanup_label_filters(
+            self.project,
+            include_namespaces=include_namespaces,
+        ):
+            found = _split_lines(
+                subprocess.run(
+                    [runtime, "ps", "-aq", "--filter", f"label={label_filter}"],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                ).stdout
+            )
+            for item in found:
+                if item not in seen:
+                    seen.add(item)
+                    ids.append(item)
+        if ids:
             subprocess.run(
-                ["docker", "network", "rm", info.network],
+                [runtime, "rm", "-f", *ids],
                 check=False,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
@@ -1761,8 +1876,11 @@ def _resolve_app_ref(
 
 
 def _set_cli_http_timeout(env: dict[str, str], timeout: int) -> None:
-    bounded = max(10, min(int(timeout), 600))
-    env["AE_CLI_HTTP_TIMEOUT"] = str(bounded)
+    env["AE_CLI_HTTP_TIMEOUT"] = str(_bounded_cli_http_timeout(timeout))
+
+
+def _bounded_cli_http_timeout(timeout: int) -> int:
+    return max(10, min(int(timeout), 600))
 
 
 def _remote_apply_retry_attempts(args: list[str], timeout: int) -> int:
@@ -1780,6 +1898,33 @@ def _retryable_remote_apply_timeout(args: list[str], result: dict[str, Any]) -> 
         return False
     combined = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}".lower()
     return "read timed out" in combined or "read timeout" in combined
+
+
+def _project_cleanup_label_filters(project: str, *, include_namespaces: bool) -> list[str]:
+    filters = [
+        f"workerbee.project={project}",
+        f"workerbee.k1s.dev/project={project}",
+    ]
+    if include_namespaces:
+        filters.extend(
+            [
+                f"ae.namespace={POC_NAMESPACE}",
+                f"ae.namespace={project}",
+            ]
+        )
+    return list(dict.fromkeys(filters))
+
+
+def _remote_apply_stdout(data: dict[str, Any]) -> str:
+    if str(data.get("status", "")).lower() == "accepted":
+        return (
+            f"applied desired state for {data.get('app')} "
+            f"resourceVersion={data.get('resourceVersion')}\n"
+        )
+    return (
+        f"applied {data.get('app')} rev={data.get('revision')}({data.get('status')}) "
+        f"ops=+{data.get('created')}/~{data.get('updated')}/-{data.get('removed')}\n"
+    )
 
 
 def _env_int(name: str) -> int | None:

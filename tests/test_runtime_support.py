@@ -5,6 +5,9 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from workerbee.contract import WorkerBeeError
 from workerbee.runtime_support import (
     build_image_with_runtime,
     cleanup_runtime,
@@ -17,6 +20,7 @@ from workerbee.runtime_support import (
     containerd_network_name,
     containerd_network_subnet,
     containerd_safety_info,
+    raise_if_containerd_microk8s_conflict,
     runtime_command_args,
     write_containerd_cli_wrapper,
 )
@@ -47,12 +51,100 @@ def test_containerd_runtime_scopes_project_namespace_and_data_root(tmp_path: Pat
         / "nerdctl-bridge.conflist"
     )
     bridge = json.loads(bridge_config.read_text(encoding="utf-8"))
+    subnet = containerd_network_subnet(tmp_path, "My App")
     assert bridge["name"] == "bridge"
-    assert bridge["plugins"][0]["bridge"] == "nerdctl0"
-    assert bridge["plugins"][0]["ipam"]["ranges"][0][0]["subnet"] == "10.4.0.0/24"
+    assert bridge["plugins"][0]["bridge"].startswith("wb")
+    assert bridge["plugins"][0]["bridge"] != "nerdctl0"
+    assert len(bridge["plugins"][0]["bridge"]) <= 15
+    assert bridge["plugins"][0]["ipam"]["ranges"][0][0]["subnet"] == subnet
+    assert bridge["plugins"][0]["ipam"]["ranges"][0][0]["gateway"] == (
+        subnet.removesuffix(".0/24") + ".1"
+    )
     assert containerd_network_name(tmp_path, "My App") == f"workerbee-{state_hash}-my-app"
     assert containerd_network_subnet(tmp_path, "My App").startswith("10.")
     assert containerd_network_subnet(tmp_path, "My App").endswith(".0/24")
+
+
+def test_containerd_default_bridge_rewrites_stale_nerdctl0_config(tmp_path: Path) -> None:
+    cni_dir = tmp_path / "projects" / "demo" / "containerd-cni-net.d"
+    cni_dir.mkdir(parents=True)
+    stale = cni_dir / "nerdctl-bridge.conflist"
+    stale.write_text(
+        json.dumps(
+            {
+                "cniVersion": "1.0.0",
+                "name": "bridge",
+                "plugins": [
+                    {
+                        "type": "bridge",
+                        "bridge": "nerdctl0",
+                        "ipam": {
+                            "ranges": [[{"gateway": "10.4.0.1", "subnet": "10.4.0.0/24"}]],
+                            "type": "host-local",
+                        },
+                    }
+                ],
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    containerd_base_args(state_root=tmp_path, project="demo")
+
+    rewritten = json.loads(stale.read_text(encoding="utf-8"))
+    assert rewritten["plugins"][0]["bridge"] != "nerdctl0"
+    assert rewritten["plugins"][0]["ipam"]["ranges"][0][0]["subnet"] == (
+        containerd_network_subnet(tmp_path, "demo")
+    )
+
+
+def test_containerd_microk8s_socket_denied_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "WORKERBEE_CONTAINERD_ADDRESS",
+        "unix:///var/snap/microk8s/common/run/containerd.sock",
+    )
+
+    with pytest.raises(WorkerBeeError) as exc:
+        containerd_base_args(state_root=tmp_path, project="demo")
+
+    assert exc.value.code == "CONTAINERD_MICROK8S_CONFLICT"
+
+
+def test_containerd_microk8s_socket_allows_intentional_override(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv(
+        "WORKERBEE_CONTAINERD_ADDRESS",
+        "unix:///var/snap/microk8s/common/run/containerd.sock",
+    )
+    monkeypatch.setenv("WORKERBEE_ALLOW_SHARED_K8S_CONTAINERD", "1")
+
+    args = containerd_base_args(state_root=tmp_path, project="demo")
+
+    assert args[args.index("--address") + 1] == (
+        "unix:///var/snap/microk8s/common/run/containerd.sock"
+    )
+    assert args[args.index("--cni-netconfpath") + 1].startswith(str(tmp_path))
+
+
+def test_containerd_microk8s_cni_path_denied_even_with_override(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("WORKERBEE_ALLOW_SHARED_K8S_CONTAINERD", "1")
+
+    with pytest.raises(WorkerBeeError) as exc:
+        raise_if_containerd_microk8s_conflict(
+            address="unix:///run/containerd/containerd.sock",
+            cni_netconfpath="/var/snap/microk8s/current/args/cni-network",
+        )
+
+    assert exc.value.code == "CONTAINERD_MICROK8S_CONFLICT"
+    assert "microk8s_cni_netconfpath" in exc.value.details["reasons"]
 
 
 def test_runtime_command_args_uses_nerdctl_only_for_containerd(tmp_path: Path) -> None:
@@ -102,6 +194,7 @@ def test_docker_build_uses_containerfile_when_no_dockerfile(
     assert result["ok"] is True
     assert calls[0][0:4] == ["docker", "build", "-t", "workerbee-demo:test"]
     assert calls[0][4:6] == ["-f", str(containerfile)]
+    assert "--no-cache" in calls[0]
 
 
 def test_docker_build_accepts_explicit_dockerfile_with_repo_root_context(
@@ -132,6 +225,7 @@ def test_docker_build_accepts_explicit_dockerfile_with_repo_root_context(
     assert result["ok"] is True
     assert result["dockerfile"] == str(dockerfile)
     assert ["-f", str(dockerfile)] == calls[0][4:6]
+    assert "--no-cache" in calls[0]
     assert calls[0][-1] == str(context)
 
 
@@ -175,6 +269,7 @@ def test_containerd_fallback_build_loads_image_from_state_local_tar(
 
     assert result["ok"] is True
     assert result["build_backend"] == "podman-save-load"
+    assert "--no-cache" in calls[0]
     assert calls[-1][-3:] == ["load", "-i", calls[-1][-1]]
     assert not list((tmp_path / "global" / "image-transfer").glob("*.tar"))
 
@@ -217,6 +312,7 @@ def test_containerd_build_skips_nerdctl_when_buildctl_missing_and_fallback_exist
 
     assert result["ok"] is True
     assert result["attempts"][0]["skipped"] is True
+    assert any(cmd[:2] == ["podman", "build"] and "--no-cache" in cmd for cmd in calls)
     assert not any(cmd[0] == "nerdctl" and "build" in cmd for cmd in calls)
 
 

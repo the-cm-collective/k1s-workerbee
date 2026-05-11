@@ -99,6 +99,17 @@ def test_containerd_privilege_env_synthesizes_from_helper_status(tmp_path: Path)
     assert env["WORKERBEE_CONTAINERD_HELPER_SOCKET"] == str(socket)
 
 
+def test_helper_socket_path_falls_back_for_long_state_root(tmp_path: Path) -> None:
+    long_root = tmp_path / ("nested-" + ("x" * 80)) / ("state-" + ("y" * 80))
+    paths = containerd_helper._helper_paths(long_root)  # noqa: SLF001
+
+    assert paths["metadata"] == long_root.resolve() / "global" / "containerd-helper.json"
+    assert paths["log"] == long_root.resolve() / "global" / "containerd-helper.log"
+    assert paths["socket"].name.endswith("containerd-helper.sock")
+    assert len(str(paths["socket"])) <= containerd_helper.HELPER_SOCKET_PATH_LIMIT
+    assert paths["socket"].parent != long_root.resolve() / "global"
+
+
 def test_containerd_privilege_summary_suppresses_expected_probe_details(tmp_path: Path) -> None:
     summary = containerd_privilege_summary(
         {
@@ -135,12 +146,19 @@ def test_helper_remove_tree_is_limited_to_project_state(tmp_path: Path) -> None:
     project = tmp_path / "projects" / "demo"
     project.mkdir(parents=True)
     (project / "root-owned-placeholder").write_text("data", encoding="utf-8")
+    global_data = tmp_path / "global" / "containerd-data"
+    global_data.mkdir(parents=True)
+    (global_data / "root-owned-placeholder").write_text("data", encoding="utf-8")
 
     result = _handle_remove_tree({"path": str(project)}, state_root=tmp_path)
 
     assert result["ok"] is True
     assert result["removed"] is True
     assert not project.exists()
+    global_result = _handle_remove_tree({"path": str(global_data)}, state_root=tmp_path)
+    assert global_result["ok"] is True
+    assert global_result["removed"] is True
+    assert not global_data.exists()
     denied = _handle_remove_tree({"path": str(tmp_path / "global")}, state_root=tmp_path)
     assert denied["ok"] is False
     assert denied["error"]["code"] == "CONTAINERD_HELPER_REMOVE_PATH_DENIED"
@@ -257,6 +275,56 @@ def test_validate_helper_argv_allows_workerbee_scoped_command(tmp_path: Path) ->
         state_root=tmp_path,
         address="unix:///run/containerd/containerd.sock",
     )
+
+
+def test_validate_helper_argv_denies_microk8s_socket_by_default(tmp_path: Path) -> None:
+    state_hash = _state_hash(tmp_path)
+    address = "unix:///var/snap/microk8s/common/run/containerd.sock"
+
+    with pytest.raises(WorkerBeeError) as exc:
+        validate_helper_argv(
+            [
+                "--address",
+                address,
+                "--namespace",
+                f"workerbee-{state_hash}-demo",
+                "--data-root",
+                str(tmp_path / "projects" / "demo" / "containerd-data"),
+                "--cni-netconfpath",
+                str(tmp_path / "projects" / "demo" / "containerd-cni-net.d"),
+                "ps",
+            ],
+            state_root=tmp_path,
+            address=address,
+        )
+
+    assert exc.value.code == "CONTAINERD_MICROK8S_CONFLICT"
+
+
+def test_validate_helper_argv_allows_microk8s_socket_with_explicit_override(
+    tmp_path: Path,
+) -> None:
+    state_hash = _state_hash(tmp_path)
+    address = "unix:///var/snap/microk8s/common/run/containerd.sock"
+
+    result = validate_helper_argv(
+        [
+            "--address",
+            address,
+            "--namespace",
+            f"workerbee-{state_hash}-demo",
+            "--data-root",
+            str(tmp_path / "projects" / "demo" / "containerd-data"),
+            "--cni-netconfpath",
+            str(tmp_path / "projects" / "demo" / "containerd-cni-net.d"),
+            "ps",
+        ],
+        state_root=tmp_path,
+        address=address,
+        allow_shared_k8s_containerd=True,
+    )
+
+    assert result["ok"] is True
 
 
 def test_validate_helper_argv_denies_reserved_namespace(tmp_path: Path) -> None:

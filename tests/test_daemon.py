@@ -67,6 +67,26 @@ def test_capabilities_surface_probe_and_image_build_hints(tmp_path: Path, monkey
     assert "dockerfile" in payload["tool_hints"]["workerbee_v1_image_build"]
 
 
+def test_secret_policy_status_is_project_scoped_and_read_only(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("WORKERBEE_ALLOW_PLAINTEXT_SECRETS", raising=False)
+    monkeypatch.delenv("WORKERBEE_SOPS_AGE_KEY_FILE", raising=False)
+    monkeypatch.delenv("SOPS_AGE_KEY_FILE", raising=False)
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="podman", default_project="alpha")
+
+    result = daemon.secret_policy_status(project="Beta Project!")
+
+    assert result["ok"] is True
+    assert result["project"] == "beta-project"
+    assert result["state_root"] == str(tmp_path)
+    assert result["project_state"].endswith("/projects/beta-project")
+    assert result["secret_policy"]["mode"] == "sops"
+    assert result["secret_policy"]["key_ready"] is False
+    assert not (Path(result["project_state"]) / "secrets" / "age" / "keys.txt").exists()
+
+
 def test_global_ingress_project_config_is_localhost_scoped(tmp_path: Path) -> None:
     ingress = GlobalIngress(
         state_root=tmp_path,
