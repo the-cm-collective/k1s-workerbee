@@ -456,7 +456,10 @@ def serve_mcp(
             project,
             lambda: daemon.with_project(
                 project,
-                lambda supervisor: validate_stage(resolve_stage_dir(supervisor, stage)),
+                lambda supervisor: validate_stage(
+                    resolve_stage_dir(supervisor, stage),
+                    cwd=supervisor.cwd,
+                ),
             ),
         )
 
@@ -512,6 +515,7 @@ def serve_mcp(
         namespace: str | None = None,
         timeout: int = 180,
         project: str = "default",
+        allow_remote_secretrefs: bool = False,
     ) -> dict[str, Any]:
         """Apply staged native k1s or practical Kubernetes manifests to remote k1s."""
         return protect(
@@ -526,6 +530,7 @@ def serve_mcp(
                     token=token,
                     namespace=namespace,
                     timeout=timeout,
+                    allow_remote_secretrefs=allow_remote_secretrefs,
                 ),
                 require_not_stopped=True,
             ),

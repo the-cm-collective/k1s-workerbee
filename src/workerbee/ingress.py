@@ -124,10 +124,10 @@ class GlobalIngress:
         self._write_caddyfile(projects)
         self.reload()
 
-    def reload(self) -> None:
+    def reload(self) -> dict[str, Any]:
         if not self._container_running():
-            return
-        subprocess.run(
+            return {"ok": False, "container": self.container, "reason": "container is not running"}
+        proc = subprocess.run(
             runtime_command_args(
                 self.runtime,
                 state_root=self.state_root,
@@ -143,9 +143,16 @@ class GlobalIngress:
                 ],
             ),
             check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
+        return {
+            "ok": proc.returncode == 0,
+            "container": self.container,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout.strip(),
+        }
 
     def stop(self) -> dict[str, Any]:
         proc = subprocess.run(
@@ -276,6 +283,8 @@ https://dashboard.workerbee.localhost {{
         if self.runtime == CONTAINERD_RUNTIME:
             run_args.extend(["--net", "host"])
         else:
+            if self.runtime == "podman" and _podman_is_rootless():
+                run_args.extend(["--network", "slirp4netns:allow_host_loopback=true"])
             run_args.extend(["-p", f"127.0.0.1:{self.https_port}:443"])
         run_args.extend(
             [
@@ -603,6 +612,20 @@ def _localhost_dns_ok() -> bool:
 def _missing_container(output: str) -> bool:
     lowered = output.lower()
     return "no such container" in lowered or "not found" in lowered
+
+
+def _podman_is_rootless() -> bool:
+    try:
+        proc = subprocess.run(
+            ["podman", "info", "--format", "{{.Host.Security.Rootless}}"],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except Exception:
+        return False
+    return proc.stdout.strip().lower() == "true"
 
 
 def _env_int(name: str) -> int | None:

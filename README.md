@@ -294,6 +294,16 @@ records the latest stage and agents can usually call
 metadata exists, WorkerBee returns an actionable error listing available stages
 so the agent can stage/deploy first or retry with an explicit stage.
 
+Secrets are SOPS/age-first by default. WorkerBee-generated stacks create a
+project-local age identity under the WorkerBee state tree, write generated
+secret files as `.sops.yaml`, and pass `SOPS_AGE_KEY_FILE` to local k1s
+controllers. To use an existing identity, set
+`WORKERBEE_SOPS_AGE_KEY_FILE=/path/to/keys.txt` before starting WorkerBee. The
+insecure local escape hatch is explicit:
+`WORKERBEE_ALLOW_PLAINTEXT_SECRETS=1`. Remote k1s deploy refuses native
+`secretRefs` unless `--allow-remote-secretrefs` is passed, because secret paths
+are resolved by the remote controller.
+
 The live security assessment report scenario is opt-in because it builds and
 deploys a real local app through WorkerBee:
 
@@ -303,7 +313,7 @@ WORKERBEE_SECURITY_REPORT_OUT=/tmp/workerbee-security-report.json \
 .venv/bin/python -m pytest tests/test_security_live.py -q
 ```
 
-`--stage` accepts either the absolute `stage_dir` returned by prepare or the named stage under the project `artifacts/staged` directory. `manifest prepare --source <file-or-dir>` can stage native k1s YAML or practical Kubernetes YAML. Kubernetes input is applied through the k1s shim `ae apply --k8s` path and should keep exactly one workload plus matching Service/Ingress documents per file. Native k1s manifests are the required input when exporting a native k1s bundle; Kubernetes input can be exported as Kubernetes YAML or a Helm skeleton.
+`--stage` accepts either the absolute `stage_dir` returned by prepare or the named stage under the project `artifacts/staged` directory. `manifest prepare --source <file-or-dir>` can stage native k1s YAML or practical Kubernetes YAML. Kubernetes input is applied through the k1s shim `ae apply --k8s` path and should keep exactly one workload plus matching Service/Ingress documents per file. Native k1s manifests are the required input when exporting a native k1s bundle; Kubernetes input can be exported as Kubernetes YAML or a Helm skeleton. Kubernetes and Helm exports preserve Secret references but do not emit Secret values; create environment-specific Secret objects before applying those exports.
 
 `workerbee_v1_ingress_probe` supports `GET`, `HEAD`, `POST`, `PUT`,
 `PATCH`, `DELETE`, and `OPTIONS` plus `json_body`, raw `body`, and custom `headers`.

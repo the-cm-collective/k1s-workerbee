@@ -22,6 +22,7 @@ from workerbee import __version__
 from workerbee.contract import WorkerBeeError
 from workerbee.ports import port_is_free
 from workerbee.runtime_support import CONTAINERD_RUNTIME, containerd_network_subnet
+from workerbee.secrets import file_is_sops_encrypted, plaintext_secrets_allowed
 from workerbee.supervisor import WorkerBeeSupervisor, project_slug
 
 SUPPORTED_TEMPLATES = {
@@ -77,7 +78,7 @@ def prepare_stage(
     _write_json(stage.stage_dir / "bundle.json", bundle)
     _write_json(stage.stage_dir / "images.json", {"images": []})
     _write_stage_readme(stage)
-    validation = validate_stage(stage.stage_dir)
+    validation = validate_stage(stage.stage_dir, cwd=supervisor.cwd)
     _write_json(stage.stage_dir / "images.json", {"images": validation.get("images", [])})
     return {
         "project": project,
@@ -88,7 +89,7 @@ def prepare_stage(
     }
 
 
-def validate_stage(stage_dir: Path) -> dict[str, Any]:
+def validate_stage(stage_dir: Path, *, cwd: Path | None = None) -> dict[str, Any]:
     root = stage_dir.expanduser().resolve()
     manifest_dir = root / "manifests"
     paths = sorted(manifest_dir.glob("*.yaml")) + sorted(manifest_dir.glob("*.yml"))
@@ -128,6 +129,8 @@ def validate_stage(stage_dir: Path) -> dict[str, Any]:
             continue
         if detail["input_kind"] == NATIVE_K1S:
             findings.extend(_validate_native_documents(path, docs))
+            if cwd is not None:
+                findings.extend(_validate_native_secret_refs(path, docs, cwd=cwd))
         if detail["input_kind"] == KUBERNETES:
             findings.extend(_validate_k8s_documents(path, docs))
         for doc in docs:
@@ -211,7 +214,7 @@ def deploy_local_stage(
     namespace: str | None = None,
     timeout: int = 180,
 ) -> dict[str, Any]:
-    validation = validate_stage(stage_dir)
+    validation = validate_stage(stage_dir, cwd=supervisor.cwd)
     if not validation["ok"]:
         raise WorkerBeeError(
             code="VALIDATION_FAILED",
@@ -219,6 +222,7 @@ def deploy_local_stage(
             details=validation,
             remediation="Fix staged files and run validation again.",
         )
+    enforce_stage_secret_policy(stage_dir, validation=validation, cwd=supervisor.cwd)
     results = []
     native_manifests: list[Path] = []
     for detail in validation["manifest_details"]:
@@ -600,7 +604,7 @@ def deploy_profile_stage(
     sync_ingress: Callable[[], dict[str, Any]] | None = None,
     reset_existing: bool = False,
 ) -> dict[str, Any]:
-    validation = validate_stage(stage_dir)
+    validation = validate_stage(stage_dir, cwd=supervisor.cwd)
     if not validation["ok"]:
         raise WorkerBeeError(
             code="VALIDATION_FAILED",
@@ -608,6 +612,7 @@ def deploy_profile_stage(
             details=validation,
             remediation="Fix staged files and run validation again.",
         )
+    enforce_stage_secret_policy(stage_dir, validation=validation, cwd=supervisor.cwd)
     connection = profile_runner.connection(profile=profile, timeout=float(timeout))
     env_overrides = {
         "AE_APISHIM_CA_BUNDLE": str(connection["ca_bundle"]),
@@ -740,6 +745,7 @@ def deploy_remote_k1s_stage(
     token: str,
     namespace: str | None = None,
     timeout: int = 180,
+    allow_remote_secretrefs: bool = False,
 ) -> dict[str, Any]:
     if not server:
         raise ValueError("remote k1s server URL is required")
@@ -749,13 +755,20 @@ def deploy_remote_k1s_stage(
             message="remote k1s admin token is required",
             remediation="Provide a controller admin token scoped to every manifest namespace/name.",
         )
-    validation = validate_stage(stage_dir)
+    validation = validate_stage(stage_dir, cwd=supervisor.cwd)
     if not validation["ok"]:
         raise WorkerBeeError(
             code="VALIDATION_FAILED",
             message="staged manifests are not valid",
             details=validation,
         )
+    enforce_stage_secret_policy(
+        stage_dir,
+        validation=validation,
+        cwd=supervisor.cwd,
+        remote=True,
+        allow_remote_secretrefs=allow_remote_secretrefs,
+    )
     results = []
     for detail in validation["manifest_details"]:
         manifest = Path(str(detail["path"]))
@@ -795,9 +808,16 @@ def export_bundle(
     namespace: str | None = None,
 ) -> dict[str, Any]:
     fmt = fmt.lower()
-    validation = validate_stage(stage_dir)
+    validation = validate_stage(stage_dir, cwd=supervisor.cwd)
     if not validation["manifests"]:
         raise RuntimeError("no staged manifests to export")
+    if not validation["ok"]:
+        raise WorkerBeeError(
+            code="VALIDATION_FAILED",
+            message="staged manifests are not valid",
+            details=validation,
+            remediation="Fix staged files and run validation again.",
+        )
     out_dir = stage_dir.expanduser().resolve() / "exports" / fmt
     if out_dir.exists():
         shutil.rmtree(out_dir)
@@ -818,8 +838,11 @@ def export_bundle(
                     "artifacts and hand convert before deploying to k1s."
                 ),
             )
-        manifest_out = out_dir / "manifests"
-        shutil.copytree(stage_dir / "manifests", manifest_out)
+        _export_k1s_native(
+            validation["manifest_details"],
+            out_dir,
+            cwd=supervisor.cwd,
+        )
         _write_json(out_dir / "bundle.json", _export_metadata(fmt, validation))
         _write_export_readme(out_dir, fmt=fmt)
     elif fmt == "k8s":
@@ -1145,6 +1168,55 @@ def _export_metadata(fmt: str, validation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _export_k1s_native(
+    manifests: list[dict[str, Any]],
+    out_dir: Path,
+    *,
+    cwd: Path,
+) -> None:
+    manifest_out = out_dir / "manifests"
+    secret_out = out_dir / "secrets"
+    manifest_out.mkdir(parents=True, exist_ok=True)
+    copied_secrets: dict[Path, str] = {}
+    for detail in manifests:
+        source = Path(str(detail["path"]))
+        docs = _load_yaml_documents(source.read_text(encoding="utf-8"))
+        changed = False
+        for doc in docs:
+            if not isinstance(doc, dict) or _api_version(doc) != "ae.dev/v1alpha1":
+                continue
+            for ref in _native_secret_refs(doc):
+                raw_path = str(ref.get("path") or "").strip()
+                if not raw_path:
+                    continue
+                resolved = _resolve_secret_ref_path(raw_path, manifest=source, cwd=cwd)
+                if not resolved.is_file():
+                    continue
+                rel = copied_secrets.get(resolved)
+                if rel is None:
+                    secret_out.mkdir(parents=True, exist_ok=True)
+                    dest = _unique_secret_export_path(secret_out, resolved)
+                    shutil.copy2(resolved, dest)
+                    rel = f"secrets/{dest.name}"
+                    copied_secrets[resolved] = rel
+                ref["path"] = rel
+                changed = True
+        target = manifest_out / source.name
+        if changed and docs:
+            body = "\n---\n".join(_dump_yaml(doc).rstrip() for doc in docs) + "\n"
+            target.write_text(body, encoding="utf-8")
+        else:
+            shutil.copy2(source, target)
+
+
+def _unique_secret_export_path(secret_out: Path, source: Path) -> Path:
+    target = secret_out / source.name
+    if not target.exists():
+        return target
+    digest = blake2s(str(source).encode("utf-8"), digest_size=4).hexdigest()
+    return secret_out / f"{source.stem}-{digest}{source.suffix}"
+
+
 def _export_k8s(
     supervisor: WorkerBeeSupervisor,
     manifests: list[dict[str, Any]],
@@ -1159,7 +1231,7 @@ def _export_k8s(
         if detail["input_kind"] == KUBERNETES:
             shutil.copy2(manifest, target)
             continue
-        args = ["export-k8s", "-f", manifest, "--emit-configs", "--emit-secrets", "--validate"]
+        args = ["export-k8s", "-f", manifest, "--emit-configs", "--validate"]
         if namespace:
             args.extend(["--namespace", namespace])
         result = supervisor.run_ae_cli(args, timeout=90)
@@ -1215,7 +1287,7 @@ appVersion: "0.1.0"
             body = Path(manifest).read_text(encoding="utf-8")
         else:
             result = supervisor.run_ae_cli(
-                ["export-k8s", "-f", manifest, "--emit-configs", "--emit-secrets", "--validate"],
+                ["export-k8s", "-f", manifest, "--emit-configs", "--validate"],
                 timeout=90,
             )
             body = result["stdout"]
@@ -1277,6 +1349,151 @@ def _validate_native_documents(path: Path, docs: list[dict[str, Any]]) -> list[d
             "message": "native k1s apply expects one ae.dev/v1alpha1 document per file",
         }
     ]
+
+
+def enforce_stage_secret_policy(
+    stage_dir: Path,
+    *,
+    validation: dict[str, Any] | None = None,
+    cwd: Path | None = None,
+    remote: bool = False,
+    allow_remote_secretrefs: bool = False,
+) -> None:
+    root = stage_dir.expanduser().resolve()
+    findings = _stage_secret_policy_findings(
+        validation=validation or validate_stage(root, cwd=cwd),
+        cwd=cwd or root,
+        remote=remote,
+        allow_remote_secretrefs=allow_remote_secretrefs,
+    )
+    errors = [item for item in findings if item.get("level") == "error"]
+    if not errors:
+        return
+    code = str(errors[0].get("code") or "SECRET_POLICY_FAILED")
+    if len({str(item.get("code") or "") for item in errors}) > 1:
+        code = "SECRET_POLICY_FAILED"
+    raise WorkerBeeError(
+        code=code,
+        message="staged secret handling does not satisfy WorkerBee secure defaults",
+        details={"stage_dir": str(root), "findings": errors},
+        remediation=(
+            "Use SOPS-encrypted secretRefs or set WORKERBEE_ALLOW_PLAINTEXT_SECRETS=1 "
+            "for an insecure local-only run."
+        ),
+    )
+
+
+def _stage_secret_policy_findings(
+    *,
+    validation: dict[str, Any],
+    cwd: Path,
+    remote: bool,
+    allow_remote_secretrefs: bool,
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for detail in validation.get("manifest_details", []):
+        if not isinstance(detail, dict) or detail.get("input_kind") != NATIVE_K1S:
+            continue
+        path = Path(str(detail.get("path") or ""))
+        if not path.is_file():
+            continue
+        docs = _load_yaml_documents(path.read_text(encoding="utf-8"))
+        findings.extend(_validate_native_secret_refs(path, docs, cwd=cwd))
+        if remote and not allow_remote_secretrefs:
+            for doc in docs:
+                if not isinstance(doc, dict) or _api_version(doc) != "ae.dev/v1alpha1":
+                    continue
+                for ref in _native_secret_refs(doc):
+                    findings.append(
+                        {
+                            "level": "error",
+                            "code": "REMOTE_SECRET_HANDOFF_UNSAFE",
+                            "path": str(path),
+                            "secret_ref": str(ref.get("name") or ""),
+                            "secret_path": str(ref.get("path") or ""),
+                            "message": (
+                                "remote k1s deploy refuses secretRefs by default because "
+                                "secret paths are resolved on the remote controller."
+                            ),
+                        }
+                    )
+    return findings
+
+
+def _validate_native_secret_refs(
+    path: Path,
+    docs: list[dict[str, Any]],
+    *,
+    cwd: Path,
+) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for doc in docs:
+        if not isinstance(doc, dict) or _api_version(doc) != "ae.dev/v1alpha1":
+            continue
+        for ref in _native_secret_refs(doc):
+            name = str(ref.get("name") or "")
+            raw_path = str(ref.get("path") or "").strip()
+            if not raw_path:
+                findings.append(
+                    {
+                        "level": "error",
+                        "code": "SECRET_FILE_NOT_FOUND",
+                        "path": str(path),
+                        "secret_ref": name,
+                        "message": "secretRef is missing a path.",
+                    }
+                )
+                continue
+            secret_path = _resolve_secret_ref_path(raw_path, manifest=path, cwd=cwd)
+            if not secret_path.is_file():
+                findings.append(
+                    {
+                        "level": "error",
+                        "code": "SECRET_FILE_NOT_FOUND",
+                        "path": str(path),
+                        "secret_ref": name,
+                        "secret_path": raw_path,
+                        "resolved_secret_path": str(secret_path),
+                        "message": "secretRef path does not exist.",
+                    }
+                )
+                continue
+            if plaintext_secrets_allowed() or file_is_sops_encrypted(secret_path):
+                continue
+            findings.append(
+                {
+                    "level": "error",
+                    "code": "PLAINTEXT_SECRET_REF",
+                    "path": str(path),
+                    "secret_ref": name,
+                    "secret_path": str(secret_path),
+                    "message": (
+                        "secretRef points to a plaintext file while secure defaults "
+                        "are enabled."
+                    ),
+                }
+            )
+    return findings
+
+
+def _native_secret_refs(doc: dict[str, Any]) -> list[dict[str, Any]]:
+    spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
+    refs = spec.get("secretRefs") or spec.get("secret_refs") or []
+    return [item for item in refs if isinstance(item, dict)] if isinstance(refs, list) else []
+
+
+def _resolve_secret_ref_path(value: str, *, manifest: Path, cwd: Path) -> Path:
+    raw = Path(value).expanduser()
+    if raw.is_absolute():
+        return raw.resolve()
+    candidates = [
+        (cwd / raw).resolve(),
+        (manifest.parent / raw).resolve(),
+    ]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
 
 
 def _validate_k8s_documents(path: Path, docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1394,6 +1611,9 @@ def _write_export_readme(out_dir: Path, *, fmt: str) -> None:
 Review and hand edit these artifacts before production deployment.
 Image references discovered during validation are recorded in `images.json`; retag
 and push local `workerbee-*` images before remote deployment.
+WorkerBee keeps generated secret material SOPS-encrypted by default. Kubernetes
+and Helm exports reference Secret names but do not emit Secret values; create
+environment-specific Secret objects before applying those exports.
 
 Suggested command:
 

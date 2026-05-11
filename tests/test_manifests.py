@@ -106,6 +106,185 @@ def test_export_k1s_bundle_copies_staged_manifests(tmp_path: Path, monkeypatch) 
     assert any(path.endswith("images.json") for path in result["files"])
 
 
+def test_validate_stage_rejects_plaintext_secretrefs_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sup = _supervisor(tmp_path, monkeypatch)
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    secret = tmp_path / "secret.yaml"
+    secret.write_text("token: dont-store-plaintext\n", encoding="utf-8")
+    (manifests / "web.k1s.yaml").write_text(
+        f"""apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  image: workerbee-web:dev
+  secretRefs:
+    - name: app-secret
+      path: {secret}
+      env:
+        - name: API_TOKEN
+          key: token
+""",
+        encoding="utf-8",
+    )
+
+    result = validate_stage(stage, cwd=sup.cwd)
+
+    assert result["ok"] is False
+    assert {item["code"] for item in result["findings"]} >= {"PLAINTEXT_SECRET_REF"}
+
+
+def test_validate_stage_allows_plaintext_secretrefs_with_explicit_opt_in(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("WORKERBEE_ALLOW_PLAINTEXT_SECRETS", "1")
+    sup = _supervisor(tmp_path, monkeypatch)
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    secret = tmp_path / "secret.yaml"
+    secret.write_text("token: local-dev-only\n", encoding="utf-8")
+    (manifests / "web.k1s.yaml").write_text(
+        f"""apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  image: workerbee-web:dev
+  secretRefs:
+    - name: app-secret
+      path: {secret}
+      env:
+        - name: API_TOKEN
+          key: token
+""",
+        encoding="utf-8",
+    )
+
+    result = validate_stage(stage, cwd=sup.cwd)
+
+    assert result["ok"] is True
+
+
+def test_remote_deploy_fails_closed_for_secretrefs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sup = _supervisor(tmp_path, monkeypatch)
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    secret = tmp_path / "secret.sops.yaml"
+    secret.write_text("token: ENC[test]\nsops: {}\n", encoding="utf-8")
+    (manifests / "web.k1s.yaml").write_text(
+        f"""apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  image: workerbee-web:dev
+  secretRefs:
+    - name: app-secret
+      path: {secret}
+""",
+        encoding="utf-8",
+    )
+
+    try:
+        deploy_remote_k1s_stage(
+            supervisor=sup,
+            stage_dir=stage,
+            server="https://k1s.example",
+            token="-".join(["admin", "token"]),
+        )
+    except WorkerBeeError as exc:
+        assert exc.code == "REMOTE_SECRET_HANDOFF_UNSAFE"
+    else:
+        raise AssertionError("remote deploy should fail closed for secretRefs")
+
+
+def test_k1s_export_copies_sops_secretrefs_and_rewrites_bundle_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sup = _supervisor(tmp_path, monkeypatch)
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    secret = tmp_path / "secret.sops.yaml"
+    secret.write_text("token: ENC[test]\nsops: {}\n", encoding="utf-8")
+    (manifests / "web.k1s.yaml").write_text(
+        f"""apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  image: workerbee-web:dev
+  secretRefs:
+    - name: app-secret
+      path: {secret}
+""",
+        encoding="utf-8",
+    )
+
+    result = export_bundle(supervisor=sup, stage_dir=stage, fmt="k1s")
+    out_dir = Path(result["output_dir"])
+    manifest = out_dir / "manifests" / "web.k1s.yaml"
+
+    assert (out_dir / "secrets" / "secret.sops.yaml").is_file()
+    assert "path: secrets/secret.sops.yaml" in manifest.read_text(encoding="utf-8")
+
+
+def test_k8s_export_does_not_emit_secret_resources_by_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sup = _supervisor(tmp_path, monkeypatch)
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    secret = tmp_path / "secret.sops.yaml"
+    secret.write_text("token: ENC[test]\nsops: {}\n", encoding="utf-8")
+    manifest = manifests / "web.k1s.yaml"
+    manifest.write_text(
+        f"""apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  image: workerbee-web:dev
+  secretRefs:
+    - name: app-secret
+      path: {secret}
+""",
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(
+        _self,
+        args: list[str],
+        *,
+        timeout: int = 60,
+        env_overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        _ = (timeout, env_overrides)
+        calls.append(args)
+        return {"stdout": "apiVersion: apps/v1\nkind: Deployment\nmetadata:\n  name: web\n"}
+
+    sup.run_ae_cli = MethodType(fake_run, sup)  # type: ignore[method-assign]
+
+    export_bundle(supervisor=sup, stage_dir=stage, fmt="k8s")
+
+    assert calls == [["export-k8s", "-f", str(manifest.resolve()), "--emit-configs", "--validate"]]
+
+
 def test_validate_kubernetes_stage_accepts_one_workload_bundle(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
     manifests = stage / "manifests"

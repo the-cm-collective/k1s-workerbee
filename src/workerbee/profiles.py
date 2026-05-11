@@ -34,6 +34,7 @@ from workerbee.runtime_support import (
     runtime_command_args,
     workerbee_runtime_labels,
 )
+from workerbee.secrets import secret_env_for_project
 from workerbee.supervisor import project_slug
 
 DEFAULT_K1S_PYTHON_IMAGE = "docker.io/library/python:3.12-slim"
@@ -726,7 +727,6 @@ class K1sProfileRunner:
             "AE_CONTAINERD_CNI_CONF_DIR": str(project_cni_conf),
             "NETCONFPATH": str(project_cni_conf),
             "AE_NETWORK_NAME": self.network,
-            "AE_ALLOW_PLAINTEXT_SECRETS": "1",
             "AE_API_MUTATIONS": "1",
             "AE_LABS": "1",
             "AE_DASHBOARD": "1",
@@ -738,6 +738,7 @@ class K1sProfileRunner:
             "AE_PROJECTION_ROOT": str(profile_dir / "state" / "projections"),
             "DEV_PROFILE_DIR": str(profile_dir / "state"),
         }
+        env.update(secret_env_for_project(self.project_state))
         if descriptor.state_backend == "sqlite":
             env["AE_STATE_DB"] = str(profile_dir / "state" / "controller.db")
         if descriptor.etcd:

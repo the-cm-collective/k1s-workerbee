@@ -16,7 +16,7 @@ from workerbee.agent import (
     derive_session_project_info,
     install_agent_instructions,
 )
-from workerbee.contract import WorkerBeeError
+from workerbee.contract import AGENT_FEEDBACK_SCHEMA, WorkerBeeError
 from workerbee.daemon import WorkerBeeDaemon
 from workerbee.k1s_runtime import K1sRuntime
 from workerbee.probe import probe_workerbee_url
@@ -155,6 +155,26 @@ def test_start_mode_starts_and_emits_user_message(
     assert result["mode"] == "start"
     assert result["events"][0]["type"] == "project_stack_started"
     assert "Dashboard:" in result["user_message"]
+
+
+def test_capabilities_advertise_agent_feedback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("workerbee.k1s_runtime.resolve_k1s_runtime", lambda **_: _runtime())
+    monkeypatch.setattr("workerbee.daemon.runtime_diagnostics", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(
+        "workerbee.daemon.containerd_privilege_status",
+        lambda **_kwargs: {"enabled": False, "effective_mode": "off", "runtime": "auto"},
+    )
+    daemon = WorkerBeeDaemon(state_root=tmp_path / "state", cwd=tmp_path)
+
+    capabilities = daemon.capabilities()
+
+    assert capabilities["agent_feedback"] == {
+        "schema": AGENT_FEEDBACK_SCHEMA,
+        "embedded_in_existing_results": True,
+    }
 
 
 def test_probe_restricts_to_workerbee_hosts(tmp_path: Path) -> None:

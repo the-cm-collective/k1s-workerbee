@@ -240,6 +240,14 @@ def build_parser() -> argparse.ArgumentParser:
     manifest_k1s.add_argument("--token", required=True)
     manifest_k1s.add_argument("-n", "--namespace", default=None)
     manifest_k1s.add_argument("--timeout", type=int, default=180)
+    manifest_k1s.add_argument(
+        "--allow-remote-secretrefs",
+        action="store_true",
+        help=(
+            "Allow native k1s secretRefs during remote deploy. By default WorkerBee "
+            "fails closed because secret paths are resolved on the remote controller."
+        ),
+    )
     bundle = sub.add_parser("bundle", help="Export staged artifacts")
     bundle_sub = bundle.add_subparsers(dest="bundle_cmd", required=True)
     bundle_export = bundle_sub.add_parser("export", help="Export k1s, k8s, or Helm bundle")
@@ -538,7 +546,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if args.manifest_cmd == "validate":
                 return _print(
-                    validate_stage(resolve_stage_dir(sup, args.stage)),
+                    validate_stage(resolve_stage_dir(sup, args.stage), cwd=sup.cwd),
                     json_out=args.json,
                 )
             if args.manifest_cmd == "deploy-local":
@@ -589,6 +597,7 @@ def main(argv: list[str] | None = None) -> int:
                         token=args.token,
                         namespace=args.namespace,
                         timeout=args.timeout,
+                        allow_remote_secretrefs=args.allow_remote_secretrefs,
                     ),
                     json_out=args.json,
                 )

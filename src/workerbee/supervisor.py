@@ -45,6 +45,7 @@ from workerbee.runtime_support import (
     workerbee_runtime_labels,
     write_containerd_cli_wrapper,
 )
+from workerbee.secrets import secret_env_for_project
 
 
 @dataclass(slots=True)
@@ -474,7 +475,6 @@ class WorkerBeeSupervisor:
                     "--namespace",
                     "workerbee-poc",
                     "--emit-configs",
-                    "--emit-secrets",
                     "--emit-namespace",
                     "--validate",
                 ],
@@ -767,10 +767,10 @@ https://{api_host} {{
             "legacy_dashboard": self.ingress.url(legacy_dash_host, "/dashboard"),
         }
 
-    def _reload_ingress(self) -> None:
+    def _reload_ingress(self) -> dict[str, Any]:
         if not self.ingress:
-            return
-        subprocess.run(
+            return {"ok": False, "enabled": False, "reason": "ingress is not configured"}
+        proc = subprocess.run(
             runtime_command_args(
                 self._resolve_runtime(),
                 state_root=self.state_dir.parent.parent,
@@ -786,9 +786,16 @@ https://{api_host} {{
                 ],
             ),
             check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
         )
+        return {
+            "ok": proc.returncode == 0,
+            "enabled": True,
+            "returncode": proc.returncode,
+            "stdout": proc.stdout.strip(),
+        }
 
     def _remove_stack_ingress_site(self) -> None:
         if not self.ingress:
@@ -808,23 +815,7 @@ https://{api_host} {{
         env = self._base_env(stack)
         _set_cli_http_timeout(env, timeout)
         cmd_args = _normalize_cli_option_args(args)
-        proc = subprocess.run(
-            [self.python_executable, "-m", "ae.cli", *cmd_args],
-            cwd=self.cwd,
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-        )
-        result = {
-            "cmd": _mask_sensitive_args([self.python_executable, "-m", "ae.cli", *cmd_args]),
-            "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-        }
-        if proc.returncode != 0:
-            raise RuntimeError(json.dumps(result, indent=2))
-        return result
+        return self._run_ae_command(cmd_args, env=env, timeout=timeout)
 
     def run_ae_cli(
         self,
@@ -838,23 +829,42 @@ https://{api_host} {{
             env.update(env_overrides)
         _set_cli_http_timeout(env, timeout)
         cmd_args = _normalize_cli_option_args(args)
-        proc = subprocess.run(
-            [self.python_executable, "-m", "ae.cli", *cmd_args],
-            cwd=self.cwd,
-            env=env,
-            text=True,
-            capture_output=True,
-            timeout=timeout,
-        )
-        result = {
-            "cmd": _mask_sensitive_args([self.python_executable, "-m", "ae.cli", *cmd_args]),
-            "returncode": proc.returncode,
-            "stdout": proc.stdout,
-            "stderr": proc.stderr,
-        }
-        if proc.returncode != 0:
+        return self._run_ae_command(cmd_args, env=env, timeout=timeout)
+
+    def _run_ae_command(
+        self,
+        cmd_args: list[str],
+        *,
+        env: dict[str, str],
+        timeout: int,
+    ) -> dict[str, Any]:
+        attempts = _remote_apply_retry_attempts(cmd_args, timeout)
+        result: dict[str, Any] = {}
+        for attempt in range(1, attempts + 1):
+            proc = subprocess.run(
+                [self.python_executable, "-m", "ae.cli", *cmd_args],
+                cwd=self.cwd,
+                env=env,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+            )
+            result = {
+                "cmd": _mask_sensitive_args([self.python_executable, "-m", "ae.cli", *cmd_args]),
+                "returncode": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+            }
+            if attempt > 1:
+                result["attempts"] = attempt
+                result["retried"] = True
+            if proc.returncode == 0:
+                return result
+            if attempt < attempts and _retryable_remote_apply_timeout(cmd_args, result):
+                time.sleep(_env_float("WORKERBEE_AE_APPLY_RETRY_DELAY", 3.0))
+                continue
             raise RuntimeError(json.dumps(result, indent=2))
-        return result
+        raise RuntimeError(json.dumps(result, indent=2))
 
     def load_stack(self) -> StackInfo | None:
         try:
@@ -1049,9 +1059,9 @@ https://{api_host} {{
                 "AE_APISHIM_CA_BUNDLE": str(self.state_dir / "apishim.ca.crt"),
                 "AE_APISHIM_SESSION_SECRET": _stable_secret(self.state_dir / "session.secret"),
                 "AE_DASHBOARD_BOOTSTRAP_TOKEN": info.admin_token,
-                "AE_ALLOW_PLAINTEXT_SECRETS": "1",
             }
         )
+        env.update(secret_env_for_project(self.state_dir))
         if info.runtime == CONTAINERD_RUNTIME:
             env.update(
                 {
@@ -1753,6 +1763,23 @@ def _resolve_app_ref(
 def _set_cli_http_timeout(env: dict[str, str], timeout: int) -> None:
     bounded = max(10, min(int(timeout), 600))
     env["AE_CLI_HTTP_TIMEOUT"] = str(bounded)
+
+
+def _remote_apply_retry_attempts(args: list[str], timeout: int) -> int:
+    if timeout <= 10 or not _is_remote_apply(args):
+        return 1
+    return min(4, max(2, int(timeout) // 30 + 1))
+
+
+def _is_remote_apply(args: list[str]) -> bool:
+    return "apply" in args and "--server" in args
+
+
+def _retryable_remote_apply_timeout(args: list[str], result: dict[str, Any]) -> bool:
+    if not _is_remote_apply(args):
+        return False
+    combined = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}".lower()
+    return "read timed out" in combined or "read timeout" in combined
 
 
 def _env_int(name: str) -> int | None:

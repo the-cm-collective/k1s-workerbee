@@ -975,6 +975,33 @@ def test_global_ingress_containerd_writes_host_network_https_port(tmp_path: Path
     assert "default_bind 127.0.0.1" in text
 
 
+def test_global_ingress_rootless_podman_allows_host_loopback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("workerbee.ingress._caddy_container_running", lambda *_args: False)
+    monkeypatch.setattr("workerbee.ingress._podman_is_rootless", lambda: True)
+    monkeypatch.setattr("workerbee.ingress.subprocess.run", fake_run)
+
+    ingress._ensure_caddy_container()  # noqa: SLF001
+
+    run_cmd = next(cmd for cmd in calls if "run" in cmd)
+    assert "--network" in run_cmd
+    assert "slirp4netns:allow_host_loopback=true" in run_cmd
+
+
 def test_global_ingress_readiness_uses_local_backend_and_tcp(
     tmp_path: Path,
     monkeypatch,

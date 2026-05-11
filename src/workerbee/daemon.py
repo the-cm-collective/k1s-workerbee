@@ -49,6 +49,7 @@ from workerbee.runtime_support import (
     resolve_runtime,
     runtime_diagnostics,
 )
+from workerbee.secrets import secret_policy_status
 from workerbee.security import DEFAULT_SECURITY_CHECKS, assess_stage_security
 from workerbee.supervisor import WorkerBeeSupervisor, project_slug
 
@@ -1070,7 +1071,7 @@ class WorkerBeeDaemon:
 
     def capabilities(self) -> dict[str, Any]:
         from workerbee import __version__
-        from workerbee.contract import API_VERSION, MCP_TOOL_NAMES
+        from workerbee.contract import AGENT_FEEDBACK_SCHEMA, API_VERSION, MCP_TOOL_NAMES
         from workerbee.k1s_runtime import resolve_k1s_runtime
 
         try:
@@ -1100,6 +1101,10 @@ class WorkerBeeDaemon:
                 ),
                 "ingress_probe": "WorkerBee-managed localhost HTTPS hosts only",
             },
+            "agent_feedback": {
+                "schema": AGENT_FEEDBACK_SCHEMA,
+                "embedded_in_existing_results": True,
+            },
             "tool_hints": {
                 "workerbee_v1_ingress_probe": {
                     "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -1116,7 +1121,16 @@ class WorkerBeeDaemon:
                         "for example dockerfile='backend/Dockerfile'."
                     )
                 },
+                "workerbee_v1_manifest_deploy_remote_k1s": {
+                    "allow_remote_secretrefs": (
+                        "Defaults to false; WorkerBee refuses remote secretRefs unless "
+                        "the caller explicitly accepts remote controller path handling."
+                    )
+                },
             },
+            "secret_policy": secret_policy_status(
+                daemon_project_state_dir(self.default_project, state_root=self.state_root)
+            ),
             "templates": [
                 "frontend-api",
                 "frontend-api-store",

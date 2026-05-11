@@ -7,6 +7,7 @@ from workerbee import poc
 from workerbee.k1s_runtime import K1sRuntime
 from workerbee.poc import POC_NAMESPACE, validate_poc_urls, write_stack_files
 from workerbee.runtime_support import CONTAINERD_RUNTIME, containerd_network_name
+from workerbee.secrets import file_is_sops_encrypted
 from workerbee.supervisor import StackInfo, WorkerBeeSupervisor
 
 
@@ -34,6 +35,9 @@ def test_write_stack_files_contains_representative_features(tmp_path: Path) -> N
     assert "storage:" in text
     assert "readiness:" in text
     assert "ingress:" in text
+    assert artifacts.secret_file.name == "api-secret.sops.yaml"
+    assert file_is_sops_encrypted(artifacts.secret_file)
+    assert "workerbee-poc-token" not in artifacts.secret_file.read_text(encoding="utf-8")
     assert artifacts.urls["frontend"] == "http://127.0.0.1:19082"
 
 

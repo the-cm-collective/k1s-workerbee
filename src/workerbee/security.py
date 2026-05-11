@@ -71,7 +71,7 @@ def assess_stage_security(
     """Return advisory security findings for a staged WorkerBee bundle."""
     normalized_checks = _normalize_checks(checks)
     root = stage_dir.expanduser().resolve()
-    validation = validate_stage(root)
+    validation = validate_stage(root, cwd=supervisor.cwd)
     findings: list[dict[str, Any]] = []
     evidence: list[dict[str, Any]] = []
 
@@ -146,6 +146,30 @@ def _assess_manifest_stage(
         if not isinstance(item, dict):
             continue
         if item.get("level") == "error":
+            validation_code = str(item.get("code") or "")
+            if validation_code in {
+                "PLAINTEXT_SECRET_REF",
+                "SECRET_FILE_NOT_FOUND",
+                "REMOTE_SECRET_HANDOFF_UNSAFE",
+            }:
+                findings.append(
+                    _finding(
+                        code=validation_code,
+                        severity="high",
+                        message=str(item.get("message") or "secret handling validation failed"),
+                        path=_str_or_none(item.get("path")),
+                        evidence={
+                            "secret_ref": item.get("secret_ref"),
+                            "secret_path": "***" if item.get("secret_path") else None,
+                        },
+                        refs=("OWASP CI/CD Security Risks", "OWASP Kubernetes Top 10"),
+                        remediation=(
+                            "Use SOPS-encrypted secretRefs or an explicitly configured "
+                            "environment secret source."
+                        ),
+                    )
+                )
+                continue
             findings.append(
                 _finding(
                     code="MANIFEST_VALIDATION_ERROR",

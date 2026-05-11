@@ -19,6 +19,7 @@ from workerbee.runtime_support import (
     build_image_with_runtime,
     workerbee_runtime_labels,
 )
+from workerbee.secrets import seal_yaml_mapping
 
 POC_NAMESPACE = "workerbee-poc"
 POC_APPS = ("store", "api", "frontend")
@@ -89,9 +90,13 @@ def write_stack_files(
     data_dir.mkdir(parents=True, exist_ok=True)
 
     config_file = data_dir / "api-config.yaml"
-    secret_file = data_dir / "api-secret.yaml"
+    secret_file = data_dir / "api-secret.sops.yaml"
     config_file.write_text("mode: poc\ncolor: amber\nfeature_flag: workerbee\n", encoding="utf-8")
-    secret_file.write_text("token: workerbee-poc-token\n", encoding="utf-8")
+    seal_yaml_mapping(
+        secret_file,
+        {"token": "workerbee-poc-token"},
+        project_state=state_dir,
+    )
 
     urls = {
         "store": f"http://127.0.0.1:{service_ports['store']}",
