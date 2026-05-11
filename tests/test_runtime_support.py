@@ -51,14 +51,16 @@ def test_containerd_runtime_scopes_project_namespace_and_data_root(tmp_path: Pat
         / "nerdctl-bridge.conflist"
     )
     bridge = json.loads(bridge_config.read_text(encoding="utf-8"))
-    subnet = containerd_network_subnet(tmp_path, "My App")
+    project_subnet = containerd_network_subnet(tmp_path, "My App")
+    bridge_subnet = containerd_network_subnet(tmp_path, "my-app-default-bridge")
     assert bridge["name"] == "bridge"
     assert bridge["plugins"][0]["bridge"].startswith("wb")
     assert bridge["plugins"][0]["bridge"] != "nerdctl0"
     assert len(bridge["plugins"][0]["bridge"]) <= 15
-    assert bridge["plugins"][0]["ipam"]["ranges"][0][0]["subnet"] == subnet
+    assert bridge["plugins"][0]["ipam"]["ranges"][0][0]["subnet"] == bridge_subnet
+    assert bridge["plugins"][0]["ipam"]["ranges"][0][0]["subnet"] != project_subnet
     assert bridge["plugins"][0]["ipam"]["ranges"][0][0]["gateway"] == (
-        subnet.removesuffix(".0/24") + ".1"
+        bridge_subnet.removesuffix(".0/24") + ".1"
     )
     assert containerd_network_name(tmp_path, "My App") == f"workerbee-{state_hash}-my-app"
     assert containerd_network_subnet(tmp_path, "My App").startswith("10.")
@@ -95,7 +97,7 @@ def test_containerd_default_bridge_rewrites_stale_nerdctl0_config(tmp_path: Path
     rewritten = json.loads(stale.read_text(encoding="utf-8"))
     assert rewritten["plugins"][0]["bridge"] != "nerdctl0"
     assert rewritten["plugins"][0]["ipam"]["ranges"][0][0]["subnet"] == (
-        containerd_network_subnet(tmp_path, "demo")
+        containerd_network_subnet(tmp_path, "demo-default-bridge")
     )
 
 

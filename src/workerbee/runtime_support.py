@@ -519,7 +519,8 @@ def _containerd_cni_subnet(
     *,
     system: bool = False,
 ) -> str:
-    return containerd_network_subnet(state_root, "system" if system or not project else project)
+    name = "system" if system or not project else project_slug_for_runtime(project)
+    return containerd_network_subnet(state_root, f"{name}-default-bridge")
 
 
 def _ensure_containerd_default_bridge_config(cni_conf: Path, *, subnet: str) -> None:

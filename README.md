@@ -468,11 +468,12 @@ real k1s/Kubernetes runtime on the same host.
 
 WorkerBee also generates a state-derived CNI bridge interface name instead of
 the global-looking `nerdctl0` default and allocates a deterministic
-WorkerBee-only subnet per project. On hosts with MicroK8s, WorkerBee refuses the
-MicroK8s containerd socket by default and always refuses MicroK8s CNI config
-paths. For a controlled local integration test that intentionally shares the
-MicroK8s containerd socket, set `WORKERBEE_ALLOW_SHARED_K8S_CONTAINERD=1`; the
-CNI config path must still remain under the WorkerBee state root.
+WorkerBee-only subnet for the default bridge that is separate from the explicit
+project network subnet. On hosts with MicroK8s, WorkerBee refuses the MicroK8s
+containerd socket by default and always refuses MicroK8s CNI config paths. For a
+controlled local integration test that intentionally shares the MicroK8s
+containerd socket, set `WORKERBEE_ALLOW_SHARED_K8S_CONTAINERD=1`; the CNI config
+path must still remain under the WorkerBee state root.
 
 When `--runtime containerd` is explicitly selected, WorkerBee MCP defaults to `--containerd-privilege auto`. Auto first tries unprivileged `nerdctl`; if that fails, WorkerBee prompts once with `sudo` and starts a state-scoped root helper. The helper exposes a WorkerBee-owned Unix socket and a generated `nerdctl` wrapper under the WorkerBee state root, validates every command, and only allows WorkerBee state-hash namespaces plus state-local data/CNI paths. This never runs for `--runtime auto`, Docker, or Podman. Use `--containerd-privilege unprivileged` if you preconfigured rootless/system access yourself.
 
