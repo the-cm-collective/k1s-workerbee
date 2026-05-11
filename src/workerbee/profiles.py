@@ -997,7 +997,7 @@ class K1sProfileRunner:
 
     def _profile_apishim_public_base(self, apishim_port: int) -> str:
         if self.ingress:
-            return self.ingress.url(f"k1s-api.{self.project}.workerbee.localhost", "/").rstrip("/")
+            return self.ingress.url(f"k1s.{self.project}.workerbee.localhost", "/").rstrip("/")
         return f"http://127.0.0.1:{int(apishim_port)}"
 
     def _run_component(
@@ -1252,6 +1252,9 @@ https://{controller_host}, https://{legacy_dash_host} {{
     header -Strict-Transport-Security
     tls internal
 {asset_proxy.rstrip()}
+    handle /api/v1* {{
+        reverse_proxy {self.ingress.host_alias}:{apishim_port}
+    }}
     handle {{
         reverse_proxy {self.ingress.host_alias}:{controller_port}
     }}
