@@ -30,6 +30,7 @@ MCP_TOOL_NAMES = [
     "workerbee_v1_profile_workload_validate",
     "workerbee_v1_logs",
     "workerbee_v1_exec",
+    "workerbee_v1_ingress_status",
     "workerbee_v1_ingress_probe",
     "workerbee_v1_image_build",
     "workerbee_v1_manifest_prepare",

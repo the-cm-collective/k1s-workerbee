@@ -13,6 +13,17 @@ from typing import Any
 from workerbee.ingress import load_global_ingress_info
 
 
+def trust_command_guidance() -> dict[str, str]:
+    return {
+        "export": "workerbee ingress ca --output workerbee-ca.crt",
+        "install_system": "workerbee trust install --target system",
+        "install_nss": "workerbee trust install --target nss",
+        "install_user": "workerbee trust install --target user",
+        "uninstall_system": "workerbee trust uninstall --target system",
+        "uninstall_nss": "workerbee trust uninstall --target nss",
+    }
+
+
 def trust_status(state_root: Path) -> dict[str, Any]:
     info = load_global_ingress_info(state_root)
     ca_raw = str((info or {}).get("ca_bundle") or "")
@@ -27,6 +38,7 @@ def trust_status(state_root: Path) -> dict[str, Any]:
         "certutil": shutil.which("certutil"),
         "targets": _target_status(ca),
         "nixos_guidance": _nixos_guidance(ca) if backend == "nixos" else None,
+        "commands": trust_command_guidance(),
     }
 
 

@@ -1,8 +1,11 @@
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
 from workerbee import cli
 from workerbee.cli import build_parser
+
+LAN_BIND_HOST = "0.0.0.0"  # noqa: S104 - explicit LAN bind fixture
 
 
 def test_project_mode_accepts_cwd_project_and_open(tmp_path: Path) -> None:
@@ -50,7 +53,7 @@ def test_mcp_start_accepts_background_bind_flags(tmp_path: Path) -> None:
             "--ingress-domain",
             "workerbee.home.arpa",
             "--ingress-bind",
-            "0.0.0.0",
+            LAN_BIND_HOST,
             "--ingress-ca-port",
             "19080",
             "--ingress-dns",
@@ -77,13 +80,30 @@ def test_mcp_start_accepts_background_bind_flags(tmp_path: Path) -> None:
     assert args.allow_remote_mcp is True
     assert args.ingress_exposure == "lan"
     assert args.ingress_domain == "workerbee.home.arpa"
-    assert args.ingress_bind == "0.0.0.0"
+    assert args.ingress_bind == LAN_BIND_HOST
     assert args.ingress_ca_port == 19080
     assert args.ingress_dns == "forwarding"
     assert args.ingress_dns_port == 1053
     assert args.ingress_dns_bind == "127.0.0.1"
     assert args.ingress_dns_answer == "192.168.1.23"
     assert args.ingress_dns_upstream == ["127.0.0.1:5300"]
+
+
+def test_ingress_ca_parser_accepts_output(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "--state-root",
+            str(tmp_path),
+            "ingress",
+            "ca",
+            "--output",
+            str(tmp_path / "workerbee-ca.crt"),
+        ]
+    )
+
+    assert args.cmd == "ingress"
+    assert args.ingress_cmd == "ca"
+    assert args.output == tmp_path / "workerbee-ca.crt"
 
 
 def test_config_set_parses_user_level_defaults(tmp_path: Path) -> None:
@@ -108,7 +128,7 @@ def test_config_set_parses_user_level_defaults(tmp_path: Path) -> None:
             "--ingress-domain",
             "workerbee.home.arpa",
             "--ingress-bind",
-            "0.0.0.0",
+            LAN_BIND_HOST,
             "--ingress-ca-port",
             "19080",
             "--ingress-dns",
@@ -134,7 +154,7 @@ def test_config_set_parses_user_level_defaults(tmp_path: Path) -> None:
     assert args.mcp_timeout == 90
     assert args.ingress_exposure == "lan"
     assert args.ingress_domain == "workerbee.home.arpa"
-    assert args.ingress_bind == "0.0.0.0"
+    assert args.ingress_bind == LAN_BIND_HOST
     assert args.ingress_ca_port == 19080
     assert args.ingress_dns == "forwarding"
     assert args.ingress_dns_port == 1053
@@ -189,7 +209,7 @@ def test_cli_defaults_apply_to_mcp_commands(tmp_path: Path, monkeypatch) -> None
             f'"state_root":"{tmp_path / "state"}","mcp_host":"127.0.0.2",'
             '"mcp_port":9999,"mcp_timeout":90,'
             '"ingress_exposure":"lan","ingress_domain":"workerbee.home.arpa",'
-            '"ingress_bind":"0.0.0.0","ingress_ca_port":19080,'
+            f'"ingress_bind":"{LAN_BIND_HOST}","ingress_ca_port":19080,'
             '"ingress_dns":"forwarding","ingress_dns_port":1053,'
             '"ingress_dns_bind":"127.0.0.1","ingress_dns_answer":"192.168.1.23",'
             '"ingress_dns_upstream":"127.0.0.1:5300"}'
@@ -216,7 +236,7 @@ def test_cli_defaults_apply_to_mcp_commands(tmp_path: Path, monkeypatch) -> None
     assert config.port == 9999
     assert config.ingress_exposure == "lan"
     assert config.ingress_domain == "workerbee.home.arpa"
-    assert config.ingress_bind == "0.0.0.0"
+    assert config.ingress_bind == LAN_BIND_HOST
     assert config.ingress_ca_port == 19080
     assert config.ingress_dns == "forwarding"
     assert config.ingress_dns_port == 1053
@@ -224,6 +244,84 @@ def test_cli_defaults_apply_to_mcp_commands(tmp_path: Path, monkeypatch) -> None
     assert config.ingress_dns_answer == "192.168.1.23"
     assert config.ingress_dns_upstreams == ("127.0.0.1:5300",)
     assert captured["timeout"] == 90
+
+
+def test_ingress_ca_exports_ready_ca(tmp_path: Path, capsys) -> None:
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    ca = global_dir / "caddy-local-root.crt"
+    ca.write_text("-----BEGIN CERTIFICATE-----\ncert\n", encoding="utf-8")
+    (global_dir / "ingress.json").write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "runtime": "podman",
+                "ca_bundle": str(ca),
+                "ca_download_url": "http://ca.workerbee.home.arpa:19080/workerbee-ca.crt",
+            }
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "workerbee-ca.crt"
+
+    rc = cli.main(
+        [
+            "--state-root",
+            str(tmp_path),
+            "ingress",
+            "ca",
+            "--output",
+            str(output),
+        ]
+    )
+
+    text = capsys.readouterr().out
+    assert rc == 0
+    assert output.read_text(encoding="utf-8") == ca.read_text(encoding="utf-8")
+    assert f"ca exported: {output}" in text
+    assert f"ca source: {ca}" in text
+    assert "ca url: http://ca.workerbee.home.arpa:19080/workerbee-ca.crt" in text
+
+
+def test_mcp_status_prints_ca_guidance_for_lan_mode(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    def fake_status(config):
+        return {
+            "ok": True,
+            "mcp_url": config.mcp_url,
+            "dashboard_url": "https://dashboard.workerbee.home.arpa:19443/",
+            "ca_download_url": "http://ca.workerbee.home.arpa:19080/workerbee-ca.crt",
+            "ca_commands": {
+                "export": "workerbee ingress ca --output workerbee-ca.crt",
+                "trust_system": "workerbee trust install --target system",
+                "trust_nss": "workerbee trust install --target nss",
+                "download_curl": (
+                    "curl -fsSL http://ca.workerbee.home.arpa:19080/workerbee-ca.crt "
+                    "-o workerbee-ca.crt"
+                ),
+            },
+            "dns": {
+                "enabled": True,
+                "bind_host": "192.168.1.23",
+                "port": 53,
+                "base_domain": "workerbee.home.arpa",
+            },
+            "running": True,
+            "state_root": str(tmp_path),
+        }
+
+    monkeypatch.setattr(cli, "mcp_daemon_status", fake_status)
+
+    assert cli.main(["--state-root", str(tmp_path), "mcp", "status"]) == 0
+
+    text = capsys.readouterr().out
+    assert "ca export: workerbee ingress ca --output workerbee-ca.crt" in text
+    assert "local trust: workerbee trust install --target system" in text
+    assert "browser trust: workerbee trust install --target nss" in text
+    assert "lan device: curl -fsSL http://ca.workerbee.home.arpa:19080/workerbee-ca.crt" in text
 
 
 def test_explicit_cli_flags_override_defaults(tmp_path: Path, monkeypatch) -> None:

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
+import shutil
 import socket
 import subprocess
 import time
@@ -25,19 +27,20 @@ from workerbee.runtime_support import (
     workerbee_runtime_labels,
 )
 
-
 INGRESS_EXPOSURE_LOOPBACK = "loopback"
 INGRESS_EXPOSURE_LAN = "lan"
 VALID_INGRESS_EXPOSURES = {INGRESS_EXPOSURE_LOOPBACK, INGRESS_EXPOSURE_LAN}
 DEFAULT_INGRESS_DOMAIN = "workerbee.localhost"
 DEFAULT_INGRESS_CA_HTTP_PORT = 19080
+INGRESS_BIND_LOOPBACK = "127.0.0.1"
+INGRESS_BIND_LAN = "0.0.0.0"  # noqa: S104 - explicit LAN ingress bind address
 
 
 @dataclass(frozen=True, slots=True)
 class IngressSettings:
     exposure: str = INGRESS_EXPOSURE_LOOPBACK
     base_domain: str = DEFAULT_INGRESS_DOMAIN
-    bind_host: str = "127.0.0.1"
+    bind_host: str = INGRESS_BIND_LOOPBACK
     ca_http_port: int = DEFAULT_INGRESS_CA_HTTP_PORT
     dns: DNSSettings = field(default_factory=DNSSettings)
 
@@ -56,7 +59,7 @@ class ProjectIngressConfig:
     dashboard_port: int = 0
     exposure: str = INGRESS_EXPOSURE_LOOPBACK
     base_domain: str = DEFAULT_INGRESS_DOMAIN
-    bind_host: str = "127.0.0.1"
+    bind_host: str = INGRESS_BIND_LOOPBACK
     ca_download_url: str | None = None
     ca_http_port: int = DEFAULT_INGRESS_CA_HTTP_PORT
     dns: dict[str, Any] = field(default_factory=dict)
@@ -101,7 +104,7 @@ class GlobalIngressInfo:
     runtime: str
     exposure: str = INGRESS_EXPOSURE_LOOPBACK
     base_domain: str = DEFAULT_INGRESS_DOMAIN
-    bind_host: str = "127.0.0.1"
+    bind_host: str = INGRESS_BIND_LOOPBACK
     dashboard_dns_ok: bool = True
     ca_download_url: str | None = None
     ca_sha256: str | None = None
@@ -110,7 +113,11 @@ class GlobalIngressInfo:
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)
-        data["ca_ready"] = _safe_is_file(Path(self.ca_bundle))
+        ca = Path(self.ca_bundle)
+        ca_ready = _safe_is_file(ca)
+        data["ca_ready"] = ca_ready
+        data["ca_sha256"] = _safe_sha256(ca) if ca_ready else None
+        data["ca_commands"] = ca_command_guidance(data) if ca_ready else {}
         return data
 
 
@@ -155,7 +162,11 @@ def resolve_ingress_settings(
     if selected_bind is None:
         selected_bind = os.getenv("WORKERBEE_INGRESS_BIND")
     if selected_bind in (None, ""):
-        selected_bind = "0.0.0.0" if selected_exposure == INGRESS_EXPOSURE_LAN else "127.0.0.1"
+        selected_bind = (
+            INGRESS_BIND_LAN
+            if selected_exposure == INGRESS_EXPOSURE_LAN
+            else INGRESS_BIND_LOOPBACK
+        )
     selected_bind = str(selected_bind).strip()
     if not selected_bind:
         raise ValueError("WorkerBee ingress bind address cannot be empty")
@@ -227,7 +238,7 @@ class GlobalIngress:
         )
         self.container = existing.get("caddy_container") or _container_name(self.state_root)
         if self.runtime == CONTAINERD_RUNTIME:
-            self.host_alias = "127.0.0.1"
+            self.host_alias = INGRESS_BIND_LOOPBACK
         else:
             self.host_alias = (
                 "host.containers.internal" if self.runtime == "podman" else "host.docker.internal"
@@ -555,6 +566,57 @@ def load_global_ingress_info(state_root: Path) -> dict[str, Any] | None:
         return None
 
 
+def ca_command_guidance(info: dict[str, Any]) -> dict[str, str]:
+    commands = {
+        "export": "workerbee ingress ca --output workerbee-ca.crt",
+        "trust_system": "workerbee trust install --target system",
+        "trust_nss": "workerbee trust install --target nss",
+    }
+    ca_download_url = str(info.get("ca_download_url") or "").strip()
+    if ca_download_url:
+        commands["download_curl"] = f"curl -fsSL {shlex.quote(ca_download_url)} -o workerbee-ca.crt"
+    return commands
+
+
+def export_global_ingress_ca(
+    state_root: Path,
+    *,
+    output: Path,
+    runtime: str = "auto",
+) -> dict[str, Any]:
+    root = state_root.resolve()
+    status = global_ingress_status(root, runtime=runtime)
+    ca_raw = str(status.get("ca_bundle") or "")
+    ca = Path(ca_raw) if ca_raw else None
+    if not ca:
+        raise FileNotFoundError(
+            "WorkerBee Caddy CA is not ready; start WorkerBee first with "
+            "`workerbee mcp start`."
+        )
+    if not _safe_is_file(ca):
+        raise FileNotFoundError(
+            f"WorkerBee Caddy CA is not ready at {ca}; restart WorkerBee MCP or wait for "
+            "`workerbee mcp status` to show ca_ready."
+        )
+    destination = output.expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(ca, destination)
+    with suppress(OSError):
+        destination.chmod(0o644)
+    ca_sha256 = _safe_sha256(ca)
+    return {
+        "ok": True,
+        "ca_export": True,
+        "state_root": str(root),
+        "ca_bundle": str(ca),
+        "output": str(destination),
+        "ca_ready": True,
+        "ca_sha256": ca_sha256,
+        "ca_download_url": status.get("ca_download_url"),
+        "ca_commands": ca_command_guidance(status),
+    }
+
+
 def global_ingress_status(state_root: Path, *, runtime: str = "auto") -> dict[str, Any]:
     root = state_root.resolve()
     info = load_global_ingress_info(root)
@@ -588,12 +650,16 @@ def global_ingress_status(state_root: Path, *, runtime: str = "auto") -> dict[st
     health_running = bool(health_probe.get("ok"))
     running = runtime_running or health_running
     probe_error = runtime_probe.get("error") if not runtime_running else None
+    ca = Path(str(info.get("ca_bundle") or ""))
+    ca_ready = _safe_is_file(ca)
     return {
         **info,
         "enabled": bool(running),
         "running": bool(running),
         "stale": not bool(running),
-        "ca_ready": _safe_is_file(Path(str(info.get("ca_bundle") or ""))),
+        "ca_ready": ca_ready,
+        "ca_sha256": _safe_sha256(ca) if ca_ready else None,
+        "ca_commands": ca_command_guidance(info) if ca_ready else {},
         "runtime_running": runtime_running,
         "https_running": health_running,
         "runtime_probe": runtime_probe,
@@ -715,7 +781,7 @@ def _global_dashboard_health_probe(info: dict[str, Any]) -> dict[str, Any]:
     fallback = _loopback_dashboard_health_probe(
         parsed,
         ca_ready=ca_ready,
-        connect_host=_bind_probe_host(str(info.get("bind_host") or "127.0.0.1")),
+        connect_host=_bind_probe_host(str(info.get("bind_host") or INGRESS_BIND_LOOPBACK)),
     )
     if fallback is not None:
         fallback["primary_url"] = health_url
@@ -736,7 +802,7 @@ def _loopback_dashboard_health_probe(
     parsed: SplitResult,
     *,
     ca_ready: bool,
-    connect_host: str = "127.0.0.1",
+    connect_host: str = INGRESS_BIND_LOOPBACK,
 ) -> dict[str, Any] | None:
     if parsed.scheme != "https" or not parsed.port:
         return None
@@ -803,10 +869,9 @@ def _dns_enabled(mode: str | None) -> bool:
 
 def _detect_lan_ip() -> str | None:
     candidates: list[str] = []
-    with suppress(OSError):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("8.8.8.8", 80))
-            candidates.append(str(sock.getsockname()[0]))
+    with suppress(OSError), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.connect(("8.8.8.8", 80))
+        candidates.append(str(sock.getsockname()[0]))
     with suppress(OSError):
         for family, _type, _proto, _canon, address in socket.getaddrinfo(
             socket.gethostname(),
@@ -825,8 +890,8 @@ def _detect_lan_ip() -> str | None:
 
 
 def _bind_probe_host(bind_host: str) -> str:
-    if bind_host in {"", "0.0.0.0"}:
-        return "127.0.0.1"
+    if bind_host in {"", INGRESS_BIND_LAN}:
+        return INGRESS_BIND_LOOPBACK
     if bind_host == "::":
         return "::1"
     return bind_host
@@ -877,6 +942,13 @@ def _env_int(name: str) -> int | None:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _safe_sha256(path: Path) -> str | None:
+    try:
+        return _sha256(path)
+    except OSError:
+        return None
 
 
 def _safe_is_file(path: Path) -> bool:

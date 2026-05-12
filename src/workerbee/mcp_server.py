@@ -172,9 +172,18 @@ def serve_mcp(
         )
         raise
     print(f"WorkerBee global dashboard: {ingress.dashboard_url}", flush=True)
+    ingress_public = ingress.public_dict() if hasattr(ingress, "public_dict") else {}
+    ca_commands = ingress_public.get("ca_commands") if isinstance(ingress_public, dict) else {}
     ca_download_url = getattr(ingress, "ca_download_url", None)
     if ca_download_url:
         print(f"WorkerBee CA download: {ca_download_url}", flush=True)
+    if isinstance(ca_commands, dict) and ca_commands:
+        if ca_commands.get("export"):
+            print(f"WorkerBee CA export: {ca_commands['export']}", flush=True)
+        if ca_commands.get("trust_system"):
+            print(f"WorkerBee local trust: {ca_commands['trust_system']}", flush=True)
+        if ca_commands.get("trust_nss"):
+            print(f"WorkerBee browser trust: {ca_commands['trust_nss']}", flush=True)
     dns = getattr(ingress, "dns", None)
     if isinstance(dns, dict) and dns.get("enabled"):
         print(
@@ -220,6 +229,11 @@ def serve_mcp(
     def workerbee_v1_projects() -> dict[str, Any]:
         """Return all project-scoped WorkerBee stacks known to this MCP daemon."""
         return protect("Projects", None, daemon.projects)
+
+    @mcp.tool()
+    def workerbee_v1_ingress_status() -> dict[str, Any]:
+        """Return WorkerBee global ingress, DNS, CA readiness, and command guidance."""
+        return protect("IngressStatus", None, daemon.global_dashboard)
 
     @mcp.tool()
     def workerbee_v1_secret_policy_status(project: str = "default") -> dict[str, Any]:

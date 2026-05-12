@@ -411,7 +411,7 @@ def restart_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dic
         start = _start_error(config, exc)
         return {"ok": False, "stop": None, "start": start, "port_release": None}
     try:
-        config.ingress_settings
+        _ = config.ingress_settings
     except Exception as exc:  # noqa: BLE001
         start = _start_error(config, exc, code="INGRESS_CONFIG_INVALID")
         return {"ok": False, "stop": None, "start": start, "port_release": None}
@@ -460,6 +460,7 @@ def mcp_daemon_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "stale": stale,
         "dashboard_url": ingress.get("dashboard_url") or metadata.get("dashboard_url"),
         "ca_download_url": ingress.get("ca_download_url") or metadata.get("ca_download_url"),
+        "ca_commands": ingress.get("ca_commands") or metadata.get("ca_commands") or {},
         "dns": ingress.get("dns") or metadata.get("ingress_dns"),
         "global_dashboard": ingress,
         "containerd_privilege": containerd_privilege_summary(
@@ -484,6 +485,7 @@ def _wait_ready(config: MCPDaemonConfig, *, timeout: float) -> dict[str, Any]:
                 return {
                     "dashboard_url": dashboard_url,
                     "ca_download_url": ingress.get("ca_download_url"),
+                    "ca_commands": ingress.get("ca_commands") or {},
                     "global_dashboard": ingress,
                     "ready_at": time.time(),
                 }

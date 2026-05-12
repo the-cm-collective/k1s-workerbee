@@ -21,8 +21,9 @@ containerized and scoped under WorkerBee-owned namespaces.
 - Immediate global dashboard at `https://dashboard.workerbee.localhost:19443/`
   with project lifecycle controls and self-healing k1s profile ingress links.
 - Local HTTPS ingress through Caddy under `*.workerbee.localhost`, with
-  explicit LAN dev exposure, optional WorkerBee DNS forwarding, and explicit CA
-  trust/download handling when enabled.
+  explicit LAN dev exposure, optional WorkerBee DNS forwarding for
+  `*.workerbee.home.arpa`-style names, and explicit CA export, local trust, or
+  LAN download handling when enabled.
 - Agent workflow for image builds, native k1s manifest staging/deploy,
   status/log inspection, bounded exec, HTTPS probes, cleanup, and iteration.
 - Advisory security assessment for staged manifests, existing exports, and
@@ -282,6 +283,15 @@ session, start or restart MCP with LAN ingress:
 workerbee mcp restart --ingress-exposure lan
 ```
 
+For a localhost-only stack, retrieve or install the same Caddy local CA from the
+host when you want the browser or system tools to trust WorkerBee HTTPS:
+
+```bash
+workerbee ingress ca --output workerbee-ca.crt
+workerbee trust install --target system
+workerbee trust install --target nss
+```
+
 LAN mode binds WorkerBee Caddy on `0.0.0.0`, derives an `sslip.io` base domain
 from the host LAN IP when `--ingress-domain` is omitted, and prints a plain HTTP
 CA download URL such as
@@ -314,9 +324,11 @@ With DNS forwarding enabled, a LAN device can normally install the CA from
 `http://ca.workerbee.home.arpa:19080/workerbee-ca.crt`, set its DNS server to
 the WorkerBee host IP, and browse project URLs such as
 `https://app.<project>.workerbee.home.arpa:19443/` without editing router DNS.
-`workerbee mcp status` prints the dashboard URL, LAN CA download URL, and DNS
-listen value. `workerbee ingress status --json` and the global dashboard include
-the full ingress/DNS state, including the base domain and upstream resolvers.
+`workerbee mcp status` prints the dashboard URL, CA export/trust commands, LAN
+CA download URL, and DNS listen value. `workerbee ingress status --json`,
+`workerbee_v1_ingress_status`, and the global dashboard include the full
+ingress/DNS/CA state, including the base domain, CA SHA256, CA command guidance,
+and upstream resolvers.
 
 The global dashboard also provides token-protected local controls to start, stop,
 or delete one project, selected projects, or all known projects. Start can bring
@@ -395,8 +407,10 @@ workerbee --runtime containerd --state-root <state-root> cleanup --execute --pur
 
 `--stage` accepts either the absolute `stage_dir` returned by prepare or the named stage under the project `artifacts/staged` directory. `manifest prepare --source <file-or-dir>` can stage native k1s YAML or practical Kubernetes YAML. Kubernetes input is applied through the k1s shim `ae apply --k8s` path and should keep exactly one workload plus matching Service/Ingress documents per file. Native k1s manifests are the required input when exporting a native k1s bundle; Kubernetes input can be exported as Kubernetes YAML or a Helm skeleton. Kubernetes and Helm exports preserve Secret references but do not emit Secret values; create environment-specific Secret objects before applying those exports.
 
-`workerbee_v1_ingress_probe` supports `GET`, `HEAD`, `POST`, `PUT`,
-`PATCH`, `DELETE`, and `OPTIONS` plus `json_body`, raw `body`, and custom `headers`.
+`workerbee_v1_ingress_status` reports global ingress, DNS, CA readiness, CA
+SHA256, and command guidance for export/trust/LAN download.
+`workerbee_v1_ingress_probe` supports `GET`, `HEAD`, `POST`, `PUT`, `PATCH`,
+`DELETE`, and `OPTIONS` plus `json_body`, raw `body`, and custom `headers`.
 Use headers for signed smoke tests such as S3 presigned `PUT`; WorkerBee
 intentionally blocks overriding `Host` and `Content-Length`.
 

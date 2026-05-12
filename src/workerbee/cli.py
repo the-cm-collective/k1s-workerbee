@@ -35,6 +35,7 @@ from workerbee.containerd_helper import (
     temporary_containerd_privilege_env,
 )
 from workerbee.daemon import WorkerBeeDaemon
+from workerbee.ingress import export_global_ingress_ca
 from workerbee.k1s_runtime import resolve_k1s_runtime
 from workerbee.manifests import (
     deploy_local_stage,
@@ -175,6 +176,8 @@ def build_parser() -> argparse.ArgumentParser:
     ingress = sub.add_parser("ingress", help="Inspect WorkerBee global ingress")
     ingress_sub = ingress.add_subparsers(dest="ingress_cmd", required=True)
     ingress_sub.add_parser("status", help="Show global ingress status")
+    ingress_ca = ingress_sub.add_parser("ca", help="Export the WorkerBee Caddy CA")
+    ingress_ca.add_argument("--output", "-o", type=Path, default=Path("workerbee-ca.crt"))
     trust = sub.add_parser("trust", help="Manage explicit local CA trust")
     trust_sub = trust.add_subparsers(dest="trust_cmd", required=True)
     trust_sub.add_parser("status", help="Show local CA trust status")
@@ -578,8 +581,15 @@ def main(argv: list[str] | None = None) -> int:
             daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime, cwd=args.cwd)
             return _print(daemon.global_dashboard(), json_out=args.json)
         if args.cmd == "ingress":
-            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime, cwd=args.cwd)
-            return _print(daemon.global_dashboard(), json_out=args.json)
+            root = args.state_root or args.state_dir or default_state_root()
+            if args.ingress_cmd == "status":
+                daemon = WorkerBeeDaemon(state_root=root, runtime=args.runtime, cwd=args.cwd)
+                return _print(daemon.global_dashboard(), json_out=args.json)
+            if args.ingress_cmd == "ca":
+                return _print(
+                    export_global_ingress_ca(root, output=args.output, runtime=args.runtime),
+                    json_out=args.json,
+                )
         if args.cmd == "trust":
             root = (args.state_root or default_state_root()).resolve()
             if args.trust_cmd == "status":
@@ -933,6 +943,7 @@ def _print(payload: dict[str, Any], *, json_out: bool) -> int:
             print(f"dashboard: {payload['dashboard_url']}")
         if payload.get("ca_download_url"):
             print(f"ca: {payload['ca_download_url']}")
+        _print_ca_guidance(payload)
         dns = payload.get("dns")
         if isinstance(dns, dict) and dns.get("enabled"):
             print(
@@ -946,6 +957,40 @@ def _print(payload: dict[str, Any], *, json_out: bool) -> int:
         print(f"running: {payload.get('running')}")
         print(f"state: {payload.get('state_root')}")
         return 1 if payload.get("ok") is False else 0
+    if payload.get("ca_export"):
+        print(f"ca exported: {payload.get('output')}")
+        print(f"ca source: {payload.get('ca_bundle')}")
+        print(f"ca sha256: {payload.get('ca_sha256')}")
+        if payload.get("ca_download_url"):
+            print(f"ca url: {payload['ca_download_url']}")
+        return 1 if payload.get("ok") is False else 0
+    if _is_global_ingress_payload(payload):
+        if payload.get("dashboard_url"):
+            print(f"dashboard: {payload['dashboard_url']}")
+        print(f"ingress: {'running' if payload.get('running') else 'stopped'}")
+        if payload.get("ca_bundle"):
+            print(f"ca bundle: {payload['ca_bundle']}")
+        if payload.get("ca_sha256"):
+            print(f"ca sha256: {payload['ca_sha256']}")
+        if payload.get("ca_download_url"):
+            print(f"ca url: {payload['ca_download_url']}")
+        _print_ca_guidance(payload)
+        dns = payload.get("dns")
+        if isinstance(dns, dict) and dns.get("enabled"):
+            print(
+                f"dns: {dns.get('bind_host')}:{dns.get('port')} "
+                f"({dns.get('base_domain') or payload.get('base_domain')})"
+            )
+        print(f"state: {payload.get('state_root')}")
+        return 1 if payload.get("ok") is False else 0
+    if "system_trust_backend" in payload:
+        print(f"ca bundle: {payload.get('ca_bundle')}")
+        print(f"ca ready: {payload.get('ca_ready')}")
+        if payload.get("ca_sha256"):
+            print(f"ca sha256: {payload['ca_sha256']}")
+        print(f"system trust: {payload.get('system_trust_backend')}")
+        _print_ca_guidance(payload)
+        return 1 if payload.get("ok") is False else 0
     if "dashboard_url" in payload:
         print(f"dashboard: {payload['dashboard_url']}")
         print(f"controller: {payload.get('controller_url')}")
@@ -954,6 +999,52 @@ def _print(payload: dict[str, Any], *, json_out: bool) -> int:
         return 0
     print(json.dumps(payload, indent=2, sort_keys=True))
     return 1 if payload.get("ok") is False else 0
+
+
+def _extract_ca_commands(payload: dict[str, Any]) -> dict[str, Any]:
+    commands = payload.get("ca_commands") or payload.get("commands")
+    if isinstance(commands, dict):
+        return commands
+    global_dashboard = payload.get("global_dashboard")
+    if isinstance(global_dashboard, dict):
+        commands = global_dashboard.get("ca_commands")
+        if isinstance(commands, dict):
+            return commands
+    return {}
+
+
+def _print_ca_guidance(payload: dict[str, Any]) -> None:
+    commands = _extract_ca_commands(payload)
+    if not commands:
+        return
+    export = commands.get("export")
+    trust_system = commands.get("trust_system") or commands.get("install_system")
+    trust_nss = commands.get("trust_nss") or commands.get("install_nss")
+    download_curl = commands.get("download_curl")
+    if export:
+        print(f"ca export: {export}")
+    if trust_system:
+        print(f"local trust: {trust_system}")
+    if trust_nss:
+        print(f"browser trust: {trust_nss}")
+    if download_curl:
+        print(f"lan device: {download_curl}")
+
+
+def _is_global_ingress_payload(payload: dict[str, Any]) -> bool:
+    return (
+        "enabled" in payload
+        and "state_root" in payload
+        and any(
+            key in payload
+            for key in (
+                "base_domain",
+                "ca_bundle",
+                "caddy_container",
+                "https_port",
+            )
+        )
+    )
 
 
 def _handle_config(args: argparse.Namespace) -> int:

@@ -1140,6 +1140,9 @@ class WorkerBeeDaemon:
                 "embedded_in_existing_results": True,
             },
             "tool_hints": {
+                "workerbee_v1_ingress_status": {
+                    "returns": "global ingress, DNS, CA readiness, and CA command guidance",
+                },
                 "workerbee_v1_ingress_probe": {
                     "methods": ["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
                     "body_fields": ["json_body", "body"],
@@ -2698,6 +2701,7 @@ def _render_route_details(item: dict[str, Any]) -> str:
 def _render_global_ingress_panel(global_dashboard: Any) -> str:
     data = global_dashboard if isinstance(global_dashboard, dict) else {}
     dns = data.get("dns") if isinstance(data.get("dns"), dict) else {}
+    ca_commands = data.get("ca_commands") if isinstance(data.get("ca_commands"), dict) else {}
     dns_enabled = bool(dns.get("enabled"))
     dns_running = bool(dns.get("running"))
     dns_mode = str(dns.get("mode") or "off")
@@ -2726,6 +2730,10 @@ def _render_global_ingress_panel(global_dashboard: Any) -> str:
         _info_item("HTTPS", _host_port_value(data.get("bind_host"), data.get("https_port"))),
         _info_item("CA", _link(data.get("ca_download_url")), html=True),
         _info_item("CA SHA256", data.get("ca_sha256")),
+        _info_item("CA Export", ca_commands.get("export")),
+        _info_item("System Trust", ca_commands.get("trust_system")),
+        _info_item("Browser Trust", ca_commands.get("trust_nss")),
+        _info_item("LAN CA Curl", ca_commands.get("download_curl")),
         _info_item(
             "DNS",
             f'<span class="pill {dns_state[1]}">{_esc(dns_state[0])}</span>',
@@ -3183,6 +3191,9 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         const dns = globalDashboard.dns && typeof globalDashboard.dns === 'object'
           ? globalDashboard.dns
           : {{}};
+        const caCommands = (
+          globalDashboard.ca_commands && typeof globalDashboard.ca_commands === 'object'
+        ) ? globalDashboard.ca_commands : {{}};
         const dnsEnabled = Boolean(dns.enabled);
         const dnsRunning = Boolean(dns.running);
         const dnsMode = dns.mode || 'off';
@@ -3206,6 +3217,10 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
           ),
           infoItem('CA', link(globalDashboard.ca_download_url)),
           infoItem('CA SHA256', valueOrDash(globalDashboard.ca_sha256)),
+          infoItem('CA Export', valueOrDash(caCommands.export)),
+          infoItem('System Trust', valueOrDash(caCommands.trust_system)),
+          infoItem('Browser Trust', valueOrDash(caCommands.trust_nss)),
+          infoItem('LAN CA Curl', valueOrDash(caCommands.download_curl)),
           infoItem('DNS', pill(dnsLabel, dnsState)),
           infoItem('DNS Listen', valueOrDash(hostPort(dns.bind_host, dns.port))),
           infoItem('Device DNS', valueOrDash(deviceDns)),

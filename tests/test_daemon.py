@@ -9,8 +9,8 @@ from workerbee.daemon import (
     DASHBOARD_LOGO_PATH,
     WorkerBeeDaemon,
     _caddy_exposed_routes,
-    _dashboard_summary,
     _dashboard_static_asset,
+    _dashboard_summary,
     _handle_dashboard_action,
     _profile_control_plane_checks,
     _render_dashboard,
@@ -29,6 +29,8 @@ from workerbee.ingress import (
     global_ingress_status,
 )
 from workerbee.k1s_runtime import K1sRuntime
+
+LAN_BIND_HOST = "0.0.0.0"  # noqa: S104 - explicit LAN bind fixture
 
 
 def test_daemon_uses_state_root_for_project_supervisors(tmp_path: Path, monkeypatch) -> None:
@@ -178,16 +180,25 @@ def test_global_dashboard_renders_dns_enabled_state() -> None:
                 "runtime": "podman",
                 "exposure": "lan",
                 "base_domain": "workerbee.home.arpa",
-                "bind_host": "0.0.0.0",
+                "bind_host": LAN_BIND_HOST,
                 "https_port": 19443,
                 "dashboard_url": "https://dashboard.workerbee.home.arpa:19443/",
                 "ca_download_url": "http://ca.workerbee.home.arpa:19080/workerbee-ca.crt",
                 "ca_sha256": "abc123",
+                "ca_commands": {
+                    "export": "workerbee ingress ca --output workerbee-ca.crt",
+                    "trust_system": "workerbee trust install --target system",
+                    "trust_nss": "workerbee trust install --target nss",
+                    "download_curl": (
+                        "curl -fsSL http://ca.workerbee.home.arpa:19080/workerbee-ca.crt "
+                        "-o workerbee-ca.crt"
+                    ),
+                },
                 "dns": {
                     "enabled": True,
                     "running": True,
                     "mode": "forwarding",
-                    "bind_host": "0.0.0.0",
+                    "bind_host": LAN_BIND_HOST,
                     "port": 53,
                     "answer": "192.168.1.23",
                     "base_domain": "workerbee.home.arpa",
@@ -204,6 +215,8 @@ def test_global_dashboard_renders_dns_enabled_state() -> None:
     assert "192.168.1.23:53" in html
     assert "127.0.0.1:5300" in html
     assert "http://ca.workerbee.home.arpa:19080/workerbee-ca.crt" in html
+    assert "workerbee ingress ca --output workerbee-ca.crt" in html
+    assert "workerbee trust install --target system" in html
 
 
 def test_global_dashboard_renders_dns_disabled_state() -> None:
@@ -277,7 +290,7 @@ def test_lan_ca_download_serves_cert_and_fingerprint(tmp_path: Path) -> None:
     settings = IngressSettings(
         exposure="lan",
         base_domain="workerbee.home.arpa",
-        bind_host="0.0.0.0",
+        bind_host=LAN_BIND_HOST,
         ca_http_port=19080,
     )
     daemon = WorkerBeeDaemon(state_root=tmp_path, ingress_settings=settings)
@@ -1172,7 +1185,7 @@ def test_global_ingress_lan_writes_ca_bootstrap_route(tmp_path: Path) -> None:
     settings = IngressSettings(
         exposure="lan",
         base_domain="192-168-1-23.sslip.io",
-        bind_host="0.0.0.0",
+        bind_host=LAN_BIND_HOST,
         ca_http_port=19080,
     )
     ingress = GlobalIngress(
@@ -1188,7 +1201,7 @@ def test_global_ingress_lan_writes_ca_bootstrap_route(tmp_path: Path) -> None:
     text = ingress.caddy_file.read_text(encoding="utf-8")
     config = ingress.project_config("alpha")
 
-    assert "default_bind 0.0.0.0" in text
+    assert f"default_bind {LAN_BIND_HOST}" in text
     assert "https://dashboard.192-168-1-23.sslip.io" in text
     assert "http://ca.192-168-1-23.sslip.io:19080" in text
     assert "/workerbee-ca.crt /workerbee-ca.sha256" in text
@@ -1204,7 +1217,7 @@ def test_global_ingress_lan_publishes_https_and_ca_ports(
     settings = IngressSettings(
         exposure="lan",
         base_domain="workerbee.home.arpa",
-        bind_host="0.0.0.0",
+        bind_host=LAN_BIND_HOST,
         ca_http_port=19080,
     )
     ingress = GlobalIngress(
@@ -1229,15 +1242,15 @@ def test_global_ingress_lan_publishes_https_and_ca_ports(
     ingress._ensure_caddy_container()  # noqa: SLF001
 
     run_cmd = next(cmd for cmd in calls if "run" in cmd)
-    assert "0.0.0.0:19443:443" in run_cmd
-    assert "0.0.0.0:19080:19080" in run_cmd
+    assert f"{LAN_BIND_HOST}:19443:443" in run_cmd
+    assert f"{LAN_BIND_HOST}:19080:19080" in run_cmd
 
 
 def test_global_ingress_public_info_includes_dns_status(tmp_path: Path) -> None:
     settings = IngressSettings(
         exposure="lan",
         base_domain="workerbee.home.arpa",
-        bind_host="0.0.0.0",
+        bind_host=LAN_BIND_HOST,
         ca_http_port=19080,
     )
     dns_status = {
@@ -1536,6 +1549,35 @@ def test_global_ingress_status_reports_running_container(
     assert status["running"] is True
     assert status["stale"] is False
     assert status["ca_ready"] is True
+    assert status["ca_commands"]["export"] == "workerbee ingress ca --output workerbee-ca.crt"
+
+
+def test_global_ingress_status_includes_lan_ca_download_command(tmp_path: Path) -> None:
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    ca = global_dir / "caddy-local-root.crt"
+    ca.write_text("cert", encoding="utf-8")
+    (global_dir / "ingress.json").write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "runtime": "podman",
+                "base_domain": "workerbee.home.arpa",
+                "ca_bundle": str(ca),
+                "ca_download_url": "http://ca.workerbee.home.arpa:19080/workerbee-ca.crt",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    status = global_ingress_status(tmp_path)
+
+    assert status["ca_ready"] is True
+    assert status["ca_sha256"]
+    assert status["ca_commands"]["download_curl"] == (
+        "curl -fsSL http://ca.workerbee.home.arpa:19080/workerbee-ca.crt "
+        "-o workerbee-ca.crt"
+    )
 
 
 def test_global_ingress_status_falls_back_to_exact_name_match(
