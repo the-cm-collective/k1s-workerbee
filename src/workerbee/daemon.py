@@ -2264,10 +2264,14 @@ def _dashboard_summary(
     ingress = [item for item in projects if item.get("ingress_ready")]
     health_probe = global_dashboard.get("health_probe")
     health_ok = bool(health_probe.get("ok")) if isinstance(health_probe, dict) else False
+    dns = global_dashboard.get("dns") if isinstance(global_dashboard.get("dns"), dict) else {}
     return {
         "mcp_running": True,
         "global_ingress_running": bool(global_dashboard.get("running")),
         "https_health": health_ok,
+        "dns_enabled": bool(dns.get("enabled")),
+        "dns_running": bool(dns.get("running")),
+        "dns_mode": str(dns.get("mode") or "off"),
         "projects_total": len(projects),
         "projects_running": len(running),
         "projects_stopped": len(stopped),
@@ -2691,6 +2695,74 @@ def _render_route_details(item: dict[str, Any]) -> str:
     )
 
 
+def _render_global_ingress_panel(global_dashboard: Any) -> str:
+    data = global_dashboard if isinstance(global_dashboard, dict) else {}
+    dns = data.get("dns") if isinstance(data.get("dns"), dict) else {}
+    dns_enabled = bool(dns.get("enabled"))
+    dns_running = bool(dns.get("running"))
+    dns_mode = str(dns.get("mode") or "off")
+    if not dns_enabled:
+        dns_state = ("DNS off", "idle")
+    elif dns_running:
+        dns_state = (f"DNS {dns_mode}", "ok")
+    else:
+        dns_state = ("DNS not running", "warn")
+    device_dns = ""
+    if dns_enabled:
+        answer = str(dns.get("answer") or "")
+        port = int(dns.get("port") or 53)
+        device_dns = f"{answer}:{port}" if answer else f"port {port}"
+    upstreams = dns.get("upstreams") if isinstance(dns.get("upstreams"), list) else []
+    rows = [
+        _info_item(
+            "Ingress",
+            f'<span class="pill {"ok" if data.get("running") else "warn"}">'
+            f'{"running" if data.get("running") else "stopped"}</span>',
+            html=True,
+        ),
+        _info_item("Exposure", data.get("exposure") or "loopback"),
+        _info_item("Base Domain", data.get("base_domain")),
+        _info_item("Dashboard", _link(data.get("dashboard_url")), html=True),
+        _info_item("HTTPS", _host_port_value(data.get("bind_host"), data.get("https_port"))),
+        _info_item("CA", _link(data.get("ca_download_url")), html=True),
+        _info_item("CA SHA256", data.get("ca_sha256")),
+        _info_item(
+            "DNS",
+            f'<span class="pill {dns_state[1]}">{_esc(dns_state[0])}</span>',
+            html=True,
+        ),
+        _info_item("DNS Listen", _host_port_value(dns.get("bind_host"), dns.get("port"))),
+        _info_item("Device DNS", device_dns),
+        _info_item("DNS Domain", dns.get("base_domain") or data.get("base_domain")),
+        _info_item("DNS Upstreams", ", ".join(str(item) for item in upstreams)),
+        _info_item("DNS TTL", dns.get("ttl")),
+    ]
+    return f'<div class="info-grid">{"".join(rows)}</div>'
+
+
+def _info_item(label: str, value: Any, *, html: bool = False) -> str:
+    if value in (None, ""):
+        body = '<span class="muted">-</span>'
+    elif html:
+        body = str(value)
+    else:
+        body = _esc(value)
+    return (
+        '<div class="info-item">'
+        f'<div class="info-label">{_esc(label)}</div>'
+        f'<div class="info-value">{body}</div>'
+        "</div>"
+    )
+
+
+def _host_port_value(host: Any, port: Any) -> str:
+    if not host and not port:
+        return ""
+    if not port:
+        return str(host or "")
+    return f"{host or '*'}:{port}"
+
+
 def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str:
     projects = payload.get("projects") if isinstance(payload.get("projects"), list) else []
     rows = []
@@ -2747,6 +2819,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         )
     global_dash = payload.get("global_dashboard")
     ingress_json = json.dumps(global_dash, indent=2, sort_keys=True)
+    ingress_panel = _render_global_ingress_panel(global_dash)
     return f"""<!doctype html>
 <html>
   <head>
@@ -2920,6 +2993,31 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
       }}
       .summary-grid {{ margin: 8px 0 2px; }}
       .jobs-grid {{ margin-top: 8px; }}
+      .info-grid {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+        gap: 8px 14px;
+        margin: 8px 0 10px;
+      }}
+      .info-item {{
+        min-width: 0;
+        border-bottom: 1px solid var(--panel-edge);
+        padding: 4px 0 6px;
+      }}
+      .info-label {{
+        color: var(--muted);
+        font-size: 12px;
+        margin-bottom: 2px;
+      }}
+      .info-value {{
+        font-size: 13px;
+        overflow-wrap: anywhere;
+      }}
+      .diagnostics-title {{
+        margin: 8px 0 6px;
+        color: var(--muted);
+        font-size: 12px;
+      }}
       .route-details td {{ background: rgba(0, 0, 0, .14); }}
       .route-panel {{ padding: 8px 0; }}
       .route-table th, .route-table td {{ font-size: 12px; vertical-align: top; }}
@@ -3006,7 +3104,9 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         </div>
       </section>
       <section class="card">
-        <h2>Ingress</h2>
+        <h2>Ingress & DNS</h2>
+        <div id="global-ingress-panel">{ingress_panel}</div>
+        <div class="diagnostics-title">Diagnostics</div>
         <pre id="ingress-json">{_esc(ingress_json)}</pre>
       </section>
     </main>
@@ -3057,6 +3157,62 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         const status = item.ingress_status || 'idle';
         const state = status === 'ready' ? 'ok' : (status === 'missing' ? 'warn' : 'idle');
         return pill(status, state);
+      }}
+
+      function infoItem(label, valueHtml) {{
+        return '<div class="info-item">'
+          + `<div class="info-label">${{escapeHtml(label)}}</div>`
+          + `<div class="info-value">${{valueHtml || '<span class="muted">-</span>'}}</div>`
+          + '</div>';
+      }}
+
+      function valueOrDash(value) {{
+        if (value === null || value === undefined || value === '') {{
+          return '<span class="muted">-</span>';
+        }}
+        return escapeHtml(value);
+      }}
+
+      function hostPort(host, port) {{
+        if (!host && !port) return '';
+        if (!port) return String(host || '');
+        return `${{host || '*'}}:${{port}}`;
+      }}
+
+      function renderGlobalIngressPanel(globalDashboard = {{}}) {{
+        const dns = globalDashboard.dns && typeof globalDashboard.dns === 'object'
+          ? globalDashboard.dns
+          : {{}};
+        const dnsEnabled = Boolean(dns.enabled);
+        const dnsRunning = Boolean(dns.running);
+        const dnsMode = dns.mode || 'off';
+        const dnsLabel = !dnsEnabled
+          ? 'DNS off'
+          : (dnsRunning ? `DNS ${{dnsMode}}` : 'DNS not running');
+        const dnsState = !dnsEnabled ? 'idle' : (dnsRunning ? 'ok' : 'warn');
+        const ingressState = globalDashboard.running ? 'ok' : 'warn';
+        const deviceDns = dnsEnabled
+          ? (dns.answer ? `${{dns.answer}}:${{dns.port || 53}}` : `port ${{dns.port || 53}}`)
+          : '';
+        const upstreams = Array.isArray(dns.upstreams) ? dns.upstreams.join(', ') : '';
+        return [
+          infoItem('Ingress', pill(globalDashboard.running ? 'running' : 'stopped', ingressState)),
+          infoItem('Exposure', valueOrDash(globalDashboard.exposure || 'loopback')),
+          infoItem('Base Domain', valueOrDash(globalDashboard.base_domain)),
+          infoItem('Dashboard', link(globalDashboard.dashboard_url)),
+          infoItem(
+            'HTTPS',
+            valueOrDash(hostPort(globalDashboard.bind_host, globalDashboard.https_port))
+          ),
+          infoItem('CA', link(globalDashboard.ca_download_url)),
+          infoItem('CA SHA256', valueOrDash(globalDashboard.ca_sha256)),
+          infoItem('DNS', pill(dnsLabel, dnsState)),
+          infoItem('DNS Listen', valueOrDash(hostPort(dns.bind_host, dns.port))),
+          infoItem('Device DNS', valueOrDash(deviceDns)),
+          infoItem('DNS Domain', valueOrDash(dns.base_domain || globalDashboard.base_domain)),
+          infoItem('DNS Upstreams', valueOrDash(upstreams)),
+          infoItem('DNS TTL', valueOrDash(dns.ttl))
+        ].join('');
       }}
 
       function routeButton(item, safeProject, expanded = false) {{
@@ -3154,10 +3310,20 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
       function renderSummary(summary = {{}}, globalDashboard = {{}}) {{
         const health = summary.https_health ? 'healthy' : 'unknown';
         const ingress = summary.global_ingress_running ? 'ingress running' : 'ingress stopped';
+        const dns = globalDashboard.dns && typeof globalDashboard.dns === 'object'
+          ? globalDashboard.dns
+          : {{}};
+        const dnsEnabled = summary.dns_enabled ?? Boolean(dns.enabled);
+        const dnsRunning = summary.dns_running ?? Boolean(dns.running);
+        const dnsMode = summary.dns_mode || dns.mode || 'off';
+        const dnsLabel = !dnsEnabled
+          ? 'DNS off'
+          : (dnsRunning ? `DNS ${{dnsMode}}` : 'DNS not running');
         summaryGrid.innerHTML = [
           pill('MCP running', 'ok'),
           pill(ingress, summary.global_ingress_running ? 'ok' : 'warn'),
           pill(`HTTPS ${{health}}`, summary.https_health ? 'ok' : 'warn'),
+          pill(dnsLabel, !dnsEnabled ? 'idle' : (dnsRunning ? 'ok' : 'warn')),
           pill(`projects ${{summary.projects_total ?? 0}}`, 'idle'),
           pill(`running ${{summary.projects_running ?? 0}}`, 'ok'),
           pill(`stopped ${{summary.projects_stopped ?? 0}}`, 'idle'),
@@ -3193,6 +3359,8 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         renderProjects(payload.projects || []);
         renderSummary(payload.summary || {{}}, payload.global_dashboard || {{}});
         renderJobs(payload.action_jobs || []);
+        document.getElementById('global-ingress-panel').innerHTML =
+          renderGlobalIngressPanel(payload.global_dashboard || {{}});
         ingressBox.textContent = JSON.stringify(payload.global_dashboard || {{}}, null, 2);
         const stamp = payload.updated_at ? new Date(payload.updated_at * 1000) : new Date();
         const updated = `updated ${{stamp.toLocaleTimeString()}}`;

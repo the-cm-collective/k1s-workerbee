@@ -9,6 +9,7 @@ from workerbee.daemon import (
     DASHBOARD_LOGO_PATH,
     WorkerBeeDaemon,
     _caddy_exposed_routes,
+    _dashboard_summary,
     _dashboard_static_asset,
     _handle_dashboard_action,
     _profile_control_plane_checks,
@@ -159,10 +160,81 @@ def test_global_dashboard_uses_k1s_visual_style() -> None:
     assert "refreshProjects" in html
     assert 'id="summary-grid"' in html
     assert 'id="jobs-grid"' in html
+    assert 'id="global-ingress-panel"' in html
+    assert "renderGlobalIngressPanel" in html
     assert "/api/action-jobs/" in html
     assert "expandedRouteProjects" in html
     assert "refresh paused: route details open" in html
     assert "window.location.reload()" not in html
+
+
+def test_global_dashboard_renders_dns_enabled_state() -> None:
+    html = _render_dashboard(
+        {
+            "projects": [],
+            "global_dashboard": {
+                "enabled": True,
+                "running": True,
+                "runtime": "podman",
+                "exposure": "lan",
+                "base_domain": "workerbee.home.arpa",
+                "bind_host": "0.0.0.0",
+                "https_port": 19443,
+                "dashboard_url": "https://dashboard.workerbee.home.arpa:19443/",
+                "ca_download_url": "http://ca.workerbee.home.arpa:19080/workerbee-ca.crt",
+                "ca_sha256": "abc123",
+                "dns": {
+                    "enabled": True,
+                    "running": True,
+                    "mode": "forwarding",
+                    "bind_host": "0.0.0.0",
+                    "port": 53,
+                    "answer": "192.168.1.23",
+                    "base_domain": "workerbee.home.arpa",
+                    "upstreams": ["127.0.0.1:5300"],
+                    "ttl": 30,
+                },
+            },
+        }
+    )
+
+    assert "Ingress & DNS" in html
+    assert '<span class="pill ok">DNS forwarding</span>' in html
+    assert "workerbee.home.arpa" in html
+    assert "192.168.1.23:53" in html
+    assert "127.0.0.1:5300" in html
+    assert "http://ca.workerbee.home.arpa:19080/workerbee-ca.crt" in html
+
+
+def test_global_dashboard_renders_dns_disabled_state() -> None:
+    html = _render_dashboard(
+        {
+            "projects": [],
+            "global_dashboard": {
+                "enabled": True,
+                "running": True,
+                "base_domain": "workerbee.localhost",
+                "dns": {"enabled": False, "mode": "off"},
+            },
+        }
+    )
+
+    assert '<span class="pill idle">DNS off</span>' in html
+
+
+def test_dashboard_summary_reports_dns_state() -> None:
+    summary = _dashboard_summary(
+        [],
+        global_dashboard={
+            "running": True,
+            "health_probe": {"ok": True},
+            "dns": {"enabled": True, "running": True, "mode": "forwarding"},
+        },
+    )
+
+    assert summary["dns_enabled"] is True
+    assert summary["dns_running"] is True
+    assert summary["dns_mode"] == "forwarding"
 
 
 def test_dashboard_dynamic_responses_use_no_store_security_headers() -> None:
