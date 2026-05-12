@@ -38,7 +38,13 @@ WorkerBee now has the planned shared MCP shape:
 - Per-project mode is persisted as `lazy`, `start`, or `stop`. `lazy` is the default, `start` launches the stack during bootstrap, and `stop` provides a persistent user-controlled off switch that returns `PROJECT_STOPPED` for runtime operations.
 - `workerbee mcp start` starts the background daemon, `workerbee mcp stop` stops the daemon plus global dashboard/Caddy ingress, and `workerbee mcp serve` remains the foreground/debug path. MCP port conflicts fail fast instead of silently selecting another port.
 - The MCP daemon starts a global dashboard immediately and prints the URL before serving MCP traffic. The dashboard lists all known project-scoped stacks under the daemon state root, including branch metadata when available.
-- A global Caddy edge is started for local HTTPS. Project app hosts are scoped as `app.<project>.workerbee.localhost` and `api.<project>.workerbee.localhost`, with Caddy using its internal local CA.
+- A global Caddy edge is started for local HTTPS. Project app hosts default to
+  loopback-only names such as `app.<project>.workerbee.localhost` and
+  `api.<project>.workerbee.localhost`, with Caddy using its internal local CA.
+- Explicit LAN dev ingress can bind the global Caddy edge on the host LAN IP,
+  publish a CA download URL for local devices, and optionally run a WorkerBee
+  DNS forwarder for project-scoped names under a private base domain such as
+  `workerbee.home.arpa`.
 - Native k1s manifest deploys and the default app stack return browser-ready
   ingress URLs when the MCP daemon provides ingress configuration.
 - Direct containerd k1s profiles publish controller and API ingress under the
@@ -55,8 +61,13 @@ WorkerBee now has the planned shared MCP shape:
   frontend/backend/db stack, deploys it into the selected k1s profile, validates
   dashboard/docs/API health, probes HTTPS ingress, verifies a WebSocket round
   trip, and exports k1s/Kubernetes/Helm artifacts.
-- `workerbee_v1_ingress_probe` gives agents a Caddy-CA-aware HTTPS probe restricted to WorkerBee-managed localhost hosts, so TLS trust setup is not required for automated smoke checks.
-- CA trust remains explicit. `workerbee trust status` reports the generated Caddy CA path, and `workerbee trust install` performs the OS/user trust-store install only when requested.
+- `workerbee_v1_ingress_probe` gives agents a Caddy-CA-aware HTTPS probe
+  restricted to WorkerBee-managed ingress hosts, so TLS trust setup is not
+  required for automated smoke checks.
+- CA trust remains explicit. `workerbee trust status` reports the generated
+  Caddy CA path, `workerbee trust install` performs the OS/user trust-store
+  install only when requested, and explicit LAN mode serves the public CA
+  certificate for other local devices without changing host trust stores.
 - The wheelhouse flow can package `k1s-workerbee` plus `k1s-workerbee-runtime`, so users only need the WorkerBee wheelhouse and a supported container runtime.
 
 ## v0.1 Capability Baseline
@@ -67,12 +78,12 @@ capabilities:
 - MCP contract: register v1-only `workerbee_v1_*` tool names, stable result envelopes, stable errors, version/capabilities reporting, and dashboard URL notification semantics.
 - Runtime support: harden Podman rootless, Podman rootful, Docker Linux, Docker Desktop, and explicit direct containerd behavior, especially Caddy host reachability and port cleanup.
 - Direct containerd safety: use WorkerBee state-hash namespaces, state-local CNI config paths, state-derived CNI bridges instead of `nerdctl0`, explicit `--runtime containerd` privilege handling, a state-scoped sudo root helper when unprivileged `nerdctl` cannot reach system containerd, MicroK8s socket/CNI conflict guards, and cleanup boundaries that never target reserved namespaces such as `ae`, `k8s.io`, `moby`, or `default`.
-- Lifecycle safety: prevent two independent MCP daemons from mutating the same state root, clean stale processes, avoid port drift, support purge/reset, keep token-bearing local state files owner-only, refuse non-loopback MCP binds without an explicit opt-in, and never expose bearer tokens in tool results.
+- Lifecycle safety: prevent two independent MCP daemons from mutating the same state root, clean stale processes, avoid port drift, support purge/reset, keep token-bearing local state files owner-only, refuse non-loopback MCP binds without an explicit opt-in, keep LAN ingress/DNS behind explicit dev flags, and never expose bearer tokens in tool results.
 - Deployment inputs: support staged native k1s manifests as the primary path, practical Kubernetes YAML apply through `ae apply --k8s`, image build contexts, and simple generated app templates. Kubernetes input is intentionally limited to one workload plus optional Service/Ingress per file for v0.1; native k1s input is required for native k1s bundle export.
 - Secret handling: keep generated local-stack secrets SOPS/age-encrypted by default, expose read-only secret policy status for agents, require an explicit plaintext escape hatch for local runs, block unsafe remote native `secretRefs` unless explicitly allowed, and avoid emitting Secret values in Kubernetes/Helm exports.
 - Remote deploy validation: include an opt-in live scenario that starts a standalone local k1s target, deploys the bundled realtime frontend/backend/db app through the remote k1s deploy path, and can pause on dashboard/app URLs before automated cleanup.
 - Observability: defer richer resource summaries/events/ingress health to k1s-side work and track it through `docs/rfcs/k1s-workerbee-observability.md`.
-- TLS/dev CA: complete guided trust-store handling across NixOS, Debian/Fedora, macOS, Windows, Firefox/NSS, and containerized browser cases.
+- TLS/dev CA and DNS: complete guided trust-store handling across NixOS, Debian/Fedora, macOS, Windows, Firefox/NSS, and containerized browser cases; document explicit LAN CA download and optional WorkerBee DNS forwarding for local-device testing.
 - Artifact handoff: export native k1s bundles, Kubernetes YAML, Helm chart skeletons, and image metadata suitable for registry handoff.
 - Packaging: publish repeatable wheels/wheelhouses, ship a one-line installer, document active-venv versus standalone install behavior, provide source-development fallbacks without requiring k1s project edits, and include best-effort macOS install/trust guidance until macOS validation is complete.
 
@@ -91,7 +102,8 @@ After v0.1, the larger product scope is to make WorkerBee an agent-native cloud-
 - Multi-stack test scenarios with seeded databases, queues, object stores, and failure injection.
 - Reproducible ephemeral environments per agent task, branch, or namespace.
 - Policy/safety controls for image builds, host mounts, network egress, and command execution.
-- Richer DNS options beyond opt-in LAN dev domains, including team-shared smoke-test tunnels where explicitly enabled.
+- Richer DNS options beyond the current opt-in LAN dev domain forwarding,
+  including team-shared smoke-test tunnels where explicitly enabled.
 - Stronger global dashboard UX with resource graphs, logs, events, app links, and per-project cleanup controls.
 - MCP server auth and explicit network exposure modes for cases where the server is not bound only to loopback.
 - CI mode for headless validation and artifact export.

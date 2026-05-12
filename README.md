@@ -20,8 +20,9 @@ containerized and scoped under WorkerBee-owned namespaces.
   runtime resources, dashboards, and ingress.
 - Immediate global dashboard at `https://dashboard.workerbee.localhost:19443/`
   with project lifecycle controls and self-healing k1s profile ingress links.
-- Local HTTPS ingress through Caddy under `*.workerbee.localhost`; CA trust is
-  explicit and optional through `workerbee trust`.
+- Local HTTPS ingress through Caddy under `*.workerbee.localhost`, with
+  explicit LAN dev exposure, optional WorkerBee DNS forwarding, and explicit CA
+  trust/download handling when enabled.
 - Agent workflow for image builds, native k1s manifest staging/deploy,
   status/log inspection, bounded exec, HTTPS probes, cleanup, and iteration.
 - Advisory security assessment for staged manifests, existing exports, and
@@ -285,10 +286,11 @@ LAN mode binds WorkerBee Caddy on `0.0.0.0`, derives an `sslip.io` base domain
 from the host LAN IP when `--ingress-domain` is omitted, and prints a plain HTTP
 CA download URL such as
 `http://ca.192-168-1-23.sslip.io:19080/workerbee-ca.crt`. The CA certificate is
-public material and is served without auth only in LAN mode; install or trust it
-on the other device before using the LAN HTTPS app URLs. Use
+public material and is served without auth only in explicit LAN mode; install or
+trust it on the other device before using the LAN HTTPS app URLs. Use
 `--ingress-domain workerbee.home.arpa`, `--ingress-bind`, or
-`--ingress-ca-port` when your LAN DNS or firewall needs explicit values.
+`--ingress-ca-port` when your LAN DNS, host firewall, or port policy needs
+explicit values.
 
 For devices where editing the router DNS is not desirable, WorkerBee can also
 run an explicit LAN dev DNS forwarder. Start MCP with DNS enabled, then set the
@@ -302,9 +304,19 @@ DNS-enabled LAN ingress defaults to `workerbee.home.arpa` when no
 `--ingress-domain` is supplied. WorkerBee answers that domain and all
 subdomains with the WorkerBee LAN IP, and forwards other DNS names to the host's
 configured resolvers. Real phones and tablets usually require DNS port `53`;
-if binding it fails, retry with `--ingress-dns-bind <lan-ip>` or grant the
-daemon permission to bind privileged ports. `--ingress-dns-port` is available
-for clients that support a custom DNS resolver port.
+if binding it fails, retry with `--ingress-dns-bind <lan-ip>`, free that port,
+or grant the daemon permission to bind privileged ports. `--ingress-dns-port` is
+available for clients that support a custom DNS resolver port. WorkerBee DNS
+only answers private/LAN clients for the selected WorkerBee domain; all other
+queries are forwarded to the configured host resolvers.
+
+With DNS forwarding enabled, a LAN device can normally install the CA from
+`http://ca.workerbee.home.arpa:19080/workerbee-ca.crt`, set its DNS server to
+the WorkerBee host IP, and browse project URLs such as
+`https://app.<project>.workerbee.home.arpa:19443/` without editing router DNS.
+`workerbee mcp status` prints the dashboard URL, LAN CA download URL, and DNS
+listen value. `workerbee ingress status --json` and the global dashboard include
+the full ingress/DNS state, including the base domain and upstream resolvers.
 
 The global dashboard also provides token-protected local controls to start, stop,
 or delete one project, selected projects, or all known projects. Start can bring
@@ -398,10 +410,22 @@ WorkerBee prefers an installed `k1s-workerbee-runtime` package. For source devel
 falls back to a sibling k1s checkout at `../k1s`. Override with
 `WORKERBEE_K1S_ROOT=/path/to/k1s`.
 
-`workerbee start` prints the project k1s dashboard URL immediately. The default local URL is
-`http://127.0.0.1:19108/dashboard` when that port is free. `workerbee mcp start` additionally prints the global dashboard URL, normally `https://dashboard.workerbee.localhost:19443/`.
+`workerbee start` prints the project k1s dashboard URL immediately. The default
+local URL is `http://127.0.0.1:19108/dashboard` when that port is free.
+`workerbee mcp start` additionally prints the global dashboard URL, normally
+`https://dashboard.workerbee.localhost:19443/`.
 
-When a project deploys app ingress through the MCP daemon, WorkerBee scopes hosts under the project name, for example `https://app.default.workerbee.localhost:19443/` and `https://api.default.workerbee.localhost:19443/` in loopback mode, or under the selected LAN base domain in LAN mode. Caddy terminates TLS with its local internal CA. WorkerBee never installs that CA implicitly; run `workerbee trust install` only when you explicitly want the local CA added to system/user trust stores.
+When a project deploys app ingress through the MCP daemon, WorkerBee scopes
+hosts under the project name, for example
+`https://app.default.workerbee.localhost:19443/` and
+`https://api.default.workerbee.localhost:19443/` in loopback mode, or under the
+selected LAN base domain in LAN mode. Caddy terminates TLS with its local
+internal CA. WorkerBee never installs that CA implicitly; run
+`workerbee trust install` only when you explicitly want the local CA added to
+system/user trust stores. In explicit LAN mode, WorkerBee also publishes a CA
+download URL for other local devices; when WorkerBee DNS forwarding is enabled,
+the global dashboard and status output include the DNS server address and domain
+to configure on those devices.
 
 The MCP SDK is installed by the package dependency. In a source checkout, build the
 wheelhouse first or provide equivalent dependency links before running `workerbee mcp start`.
