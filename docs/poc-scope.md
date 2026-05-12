@@ -91,7 +91,7 @@ After v0.1, the larger product scope is to make WorkerBee an agent-native cloud-
 - Multi-stack test scenarios with seeded databases, queues, object stores, and failure injection.
 - Reproducible ephemeral environments per agent task, branch, or namespace.
 - Policy/safety controls for image builds, host mounts, network egress, and command execution.
-- DNS options beyond `*.localhost`, including private dev domains, wildcard local DNS, and team-shared smoke-test tunnels where explicitly enabled.
+- Richer DNS options beyond opt-in LAN dev domains, including team-shared smoke-test tunnels where explicitly enabled.
 - Stronger global dashboard UX with resource graphs, logs, events, app links, and per-project cleanup controls.
 - MCP server auth and explicit network exposure modes for cases where the server is not bound only to loopback.
 - CI mode for headless validation and artifact export.

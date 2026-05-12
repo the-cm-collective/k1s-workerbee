@@ -49,7 +49,7 @@ def build_probe_url(
     dashboard = str(ingress_info.get("dashboard_url") or "")
     if dashboard:
         return dashboard
-    return f"https://dashboard.workerbee.localhost:{https_port}/"
+    return f"https://dashboard.{_base_domain(ingress_info)}:{https_port}/"
 
 
 def probe_workerbee_url(
@@ -222,16 +222,18 @@ def _validate_workerbee_url(
             details={"url": url, "https_port": _https_port(ingress_info)},
         )
     project = project_slug(project)
-    project_suffix = f".{project}.workerbee.localhost"
+    base_domain = _base_domain(ingress_info)
+    project_domain = f"{project}.{base_domain}"
+    project_suffix = f".{project_domain}"
     allowed = (
-        host == "dashboard.workerbee.localhost"
-        or host == f"{project}.workerbee.localhost"
+        host == f"dashboard.{base_domain}"
+        or host == project_domain
         or host.endswith(project_suffix)
     )
     if not allowed:
         raise WorkerBeeError(
             code="UNSUPPORTED_PROBE_URL",
-            message="WorkerBee ingress probe is restricted to WorkerBee-managed localhost hosts",
+            message="WorkerBee ingress probe is restricted to WorkerBee-managed hosts",
             details={"url": url, "project": project},
         )
     return parsed
@@ -263,6 +265,10 @@ def _https_port(ingress_info: dict[str, Any]) -> int:
             retryable=True,
         )
     return port
+
+
+def _base_domain(ingress_info: dict[str, Any]) -> str:
+    return str(ingress_info.get("base_domain") or "workerbee.localhost").strip().lower()
 
 
 def _selected_headers(headers: dict[str, str]) -> dict[str, str]:

@@ -25,8 +25,14 @@ from workerbee.containerd_helper import (
     temporary_containerd_privilege_env,
 )
 from workerbee.contract import WorkerBeeError
+from workerbee.dns import DNSSettings, dns_port_available
 from workerbee.http import request, request_https_via_loopback
-from workerbee.ingress import global_ingress_status, load_global_ingress_info
+from workerbee.ingress import (
+    IngressSettings,
+    global_ingress_status,
+    load_global_ingress_info,
+    resolve_ingress_settings,
+)
 from workerbee.paths import default_state_root
 from workerbee.runtime_support import CONTAINERD_RUNTIME
 
@@ -44,10 +50,37 @@ class MCPDaemonConfig:
     port: int = 8765
     containerd_privilege: str = "auto"
     allow_remote_mcp: bool = False
+    ingress_exposure: str | None = None
+    ingress_domain: str | None = None
+    ingress_bind: str | None = None
+    ingress_ca_port: int | None = None
+    ingress_dns: str | None = None
+    ingress_dns_port: int | None = None
+    ingress_dns_bind: str | None = None
+    ingress_dns_answer: str | None = None
+    ingress_dns_upstreams: tuple[str, ...] = ()
 
     @property
     def mcp_url(self) -> str:
         return f"http://{self.host}:{self.port}/mcp"
+
+    @property
+    def ingress_settings(self) -> IngressSettings:
+        return resolve_ingress_settings(
+            exposure=self.ingress_exposure,
+            base_domain=self.ingress_domain,
+            bind_host=self.ingress_bind,
+            ca_http_port=self.ingress_ca_port,
+            dns_mode=self.ingress_dns,
+            dns_port=self.ingress_dns_port,
+            dns_bind=self.ingress_dns_bind,
+            dns_answer=self.ingress_dns_answer,
+            dns_upstreams=self.ingress_dns_upstreams,
+        )
+
+    @property
+    def dns_settings(self) -> DNSSettings:
+        return self.ingress_settings.dns
 
     @property
     def global_dir(self) -> Path:
@@ -71,6 +104,15 @@ def config_from_args(
     port: int,
     containerd_privilege: str = "auto",
     allow_remote_mcp: bool = False,
+    ingress_exposure: str | None = None,
+    ingress_domain: str | None = None,
+    ingress_bind: str | None = None,
+    ingress_ca_port: int | None = None,
+    ingress_dns: str | None = None,
+    ingress_dns_port: int | None = None,
+    ingress_dns_bind: str | None = None,
+    ingress_dns_answer: str | None = None,
+    ingress_dns_upstreams: list[str] | tuple[str, ...] | str | None = None,
 ) -> MCPDaemonConfig:
     return MCPDaemonConfig(
         state_root=(state_root or default_state_root()).resolve(),
@@ -80,7 +122,32 @@ def config_from_args(
         port=port,
         containerd_privilege=containerd_privilege,
         allow_remote_mcp=allow_remote_mcp,
+        ingress_exposure=ingress_exposure,
+        ingress_domain=ingress_domain,
+        ingress_bind=ingress_bind,
+        ingress_ca_port=ingress_ca_port,
+        ingress_dns=ingress_dns,
+        ingress_dns_port=ingress_dns_port,
+        ingress_dns_bind=ingress_dns_bind,
+        ingress_dns_answer=ingress_dns_answer,
+        ingress_dns_upstreams=_normalize_dns_upstreams(ingress_dns_upstreams),
     )
+
+
+def _normalize_dns_upstreams(
+    upstreams: list[str] | tuple[str, ...] | str | None,
+) -> tuple[str, ...]:
+    if upstreams is None:
+        return ()
+    if isinstance(upstreams, str):
+        values = upstreams.replace(",", " ").split()
+    else:
+        values = [
+            item
+            for value in upstreams
+            for item in str(value).replace(",", " ").split()
+        ]
+    return tuple(value.strip() for value in values if value.strip())
 
 
 def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[str, Any]:
@@ -91,6 +158,10 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
         )
     except WorkerBeeError as exc:
         return _start_error(config, exc)
+    try:
+        ingress_settings = config.ingress_settings
+    except Exception as exc:  # noqa: BLE001
+        return _start_error(config, exc, code="INGRESS_CONFIG_INVALID")
     status = mcp_daemon_status(config)
     if status["running"]:
         if config.runtime == CONTAINERD_RUNTIME:
@@ -126,6 +197,16 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
             "started": False,
             "running": False,
             "error": port_check["error"],
+            "orphan_cleanup": orphan_cleanup,
+        }
+    dns_port_check = dns_port_available(ingress_settings.dns)
+    if not dns_port_check["ok"]:
+        return {
+            **_base_status(config),
+            "ok": False,
+            "started": False,
+            "running": False,
+            "error": dns_port_check["error"],
             "orphan_cleanup": orphan_cleanup,
         }
     config.global_dir.mkdir(parents=True, exist_ok=True)
@@ -178,7 +259,30 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
         config.host,
         "--port",
         str(config.port),
+        "--ingress-exposure",
+        ingress_settings.exposure,
+        "--ingress-domain",
+        ingress_settings.base_domain,
+        "--ingress-bind",
+        ingress_settings.bind_host,
+        "--ingress-ca-port",
+        str(ingress_settings.ca_http_port),
     ]
+    if ingress_settings.dns.enabled:
+        argv.extend(
+            [
+                "--ingress-dns",
+                ingress_settings.dns.mode,
+                "--ingress-dns-port",
+                str(ingress_settings.dns.port),
+                "--ingress-dns-bind",
+                str(ingress_settings.dns.bind_host or ""),
+                "--ingress-dns-answer",
+                str(ingress_settings.dns.answer or ""),
+            ]
+        )
+        for upstream in ingress_settings.dns.upstreams:
+            argv.extend(["--ingress-dns-upstream", upstream])
     if allow_remote_mcp:
         argv.append("--allow-remote-mcp")
     try:
@@ -208,6 +312,11 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
         "port": config.port,
         "containerd_privilege_mode": config.containerd_privilege,
         "allow_remote_mcp": allow_remote_mcp,
+        "ingress_exposure": ingress_settings.exposure,
+        "ingress_domain": ingress_settings.base_domain,
+        "ingress_bind": ingress_settings.bind_host,
+        "ingress_ca_port": ingress_settings.ca_http_port,
+        "ingress_dns": ingress_settings.dns.public_dict(),
         "containerd_privilege": privilege,
         "mcp_url": config.mcp_url,
         "log_file": str(config.log_file),
@@ -301,6 +410,11 @@ def restart_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dic
     except WorkerBeeError as exc:
         start = _start_error(config, exc)
         return {"ok": False, "stop": None, "start": start, "port_release": None}
+    try:
+        config.ingress_settings
+    except Exception as exc:  # noqa: BLE001
+        start = _start_error(config, exc, code="INGRESS_CONFIG_INVALID")
+        return {"ok": False, "stop": None, "start": start, "port_release": None}
     stop = stop_mcp_daemon(config)
     port_release = _wait_for_port_release(config, timeout=min(max(timeout, 1.0), 10.0))
     if not port_release["ok"]:
@@ -345,6 +459,8 @@ def mcp_daemon_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "running": running,
         "stale": stale,
         "dashboard_url": ingress.get("dashboard_url") or metadata.get("dashboard_url"),
+        "ca_download_url": ingress.get("ca_download_url") or metadata.get("ca_download_url"),
+        "dns": ingress.get("dns") or metadata.get("ingress_dns"),
         "global_dashboard": ingress,
         "containerd_privilege": containerd_privilege_summary(
             containerd_privilege_status(
@@ -367,6 +483,7 @@ def _wait_ready(config: MCPDaemonConfig, *, timeout: float) -> dict[str, Any]:
                 _raise_if_dead(config)
                 return {
                     "dashboard_url": dashboard_url,
+                    "ca_download_url": ingress.get("ca_download_url"),
                     "global_dashboard": ingress,
                     "ready_at": time.time(),
                 }
@@ -553,6 +670,7 @@ def _port_owner_details(host: str, port: int) -> dict[str, Any]:
 
 
 def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
+    ingress = _base_ingress_status(config)
     return {
         "state_root": str(config.state_root),
         "runtime": config.runtime,
@@ -566,6 +684,32 @@ def _base_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "agent_instructions": "workerbee agent instructions",
         "metadata_file": str(config.metadata_file),
         "log_file": str(config.log_file),
+        **ingress,
+    }
+
+
+def _base_ingress_status(config: MCPDaemonConfig) -> dict[str, Any]:
+    try:
+        settings = config.ingress_settings
+    except Exception as exc:  # noqa: BLE001 - status should report invalid config
+        return {
+            "ingress_exposure": config.ingress_exposure,
+            "ingress_domain": config.ingress_domain,
+            "ingress_bind": config.ingress_bind,
+            "ingress_ca_port": config.ingress_ca_port,
+            "ingress_dns": config.ingress_dns,
+            "ingress_dns_port": config.ingress_dns_port,
+            "ingress_dns_bind": config.ingress_dns_bind,
+            "ingress_dns_answer": config.ingress_dns_answer,
+            "ingress_dns_upstreams": list(config.ingress_dns_upstreams),
+            "ingress_config_error": str(exc),
+        }
+    return {
+        "ingress_exposure": settings.exposure,
+        "ingress_domain": settings.base_domain,
+        "ingress_bind": settings.bind_host,
+        "ingress_ca_port": settings.ca_http_port,
+        "ingress_dns": settings.dns.public_dict(),
     }
 
 

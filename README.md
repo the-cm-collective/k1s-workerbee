@@ -274,6 +274,38 @@ WorkerBee does not implement remote MCP authorization yet; future remote mode
 should follow the MCP OAuth 2.1 Resource Server model with OAuth Protected
 Resource Metadata rather than a custom bearer-token scheme.
 
+App ingress is also loopback-only by default. For an explicit local-network dev
+session, start or restart MCP with LAN ingress:
+
+```bash
+workerbee mcp restart --ingress-exposure lan
+```
+
+LAN mode binds WorkerBee Caddy on `0.0.0.0`, derives an `sslip.io` base domain
+from the host LAN IP when `--ingress-domain` is omitted, and prints a plain HTTP
+CA download URL such as
+`http://ca.192-168-1-23.sslip.io:19080/workerbee-ca.crt`. The CA certificate is
+public material and is served without auth only in LAN mode; install or trust it
+on the other device before using the LAN HTTPS app URLs. Use
+`--ingress-domain workerbee.home.arpa`, `--ingress-bind`, or
+`--ingress-ca-port` when your LAN DNS or firewall needs explicit values.
+
+For devices where editing the router DNS is not desirable, WorkerBee can also
+run an explicit LAN dev DNS forwarder. Start MCP with DNS enabled, then set the
+other device's DNS server to the WorkerBee host IP:
+
+```bash
+workerbee mcp restart --ingress-exposure lan --ingress-dns forwarding
+```
+
+DNS-enabled LAN ingress defaults to `workerbee.home.arpa` when no
+`--ingress-domain` is supplied. WorkerBee answers that domain and all
+subdomains with the WorkerBee LAN IP, and forwards other DNS names to the host's
+configured resolvers. Real phones and tablets usually require DNS port `53`;
+if binding it fails, retry with `--ingress-dns-bind <lan-ip>` or grant the
+daemon permission to bind privileged ports. `--ingress-dns-port` is available
+for clients that support a custom DNS resolver port.
+
 The global dashboard also provides token-protected local controls to start, stop,
 or delete one project, selected projects, or all known projects. Start can bring
 a saved project stack back up outside the original agent session. Delete means
@@ -369,7 +401,7 @@ falls back to a sibling k1s checkout at `../k1s`. Override with
 `workerbee start` prints the project k1s dashboard URL immediately. The default local URL is
 `http://127.0.0.1:19108/dashboard` when that port is free. `workerbee mcp start` additionally prints the global dashboard URL, normally `https://dashboard.workerbee.localhost:19443/`.
 
-When a project deploys app ingress through the MCP daemon, WorkerBee scopes hosts under the project name, for example `https://app.default.workerbee.localhost:19443/` and `https://api.default.workerbee.localhost:19443/`. Caddy terminates TLS with its local internal CA. WorkerBee never installs that CA implicitly; run `workerbee trust install` only when you explicitly want the local CA added to system/user trust stores.
+When a project deploys app ingress through the MCP daemon, WorkerBee scopes hosts under the project name, for example `https://app.default.workerbee.localhost:19443/` and `https://api.default.workerbee.localhost:19443/` in loopback mode, or under the selected LAN base domain in LAN mode. Caddy terminates TLS with its local internal CA. WorkerBee never installs that CA implicitly; run `workerbee trust install` only when you explicitly want the local CA added to system/user trust stores.
 
 The MCP SDK is installed by the package dependency. In a source checkout, build the
 wheelhouse first or provide equivalent dependency links before running `workerbee mcp start`.
@@ -405,7 +437,9 @@ scripts/dev/microk8s-nvidia-guard rollback
 
 Containerized k1s profiles are only available in direct containerd mode. They
 are intended for advanced k1s development, not ordinary app-stack use. WorkerBee
-currently ships these built-in profiles:
+currently ships these built-in profiles. For the recommended tandem workflow
+with this repo plus a sibling `../k1s` checkout, see
+[`docs/k1s-dev-workflow.md`](docs/k1s-dev-workflow.md).
 
 ```text
 k1s-dev-min-sqlite          1 controller + API shim/dashboard + sqlite
@@ -453,7 +487,8 @@ workerbee --runtime containerd --project k1s-dev manifest prepare --name realtim
 workerbee --runtime containerd --project k1s-dev manifest deploy-local \
   --target profile \
   --profile k1s-ha-min \
-  --stage .workerbee/k1s-dev/artifacts/staged/realtime
+  --stage realtime \
+  --k1s-root ../k1s
 workerbee --runtime containerd --project k1s-dev profile status
 ```
 

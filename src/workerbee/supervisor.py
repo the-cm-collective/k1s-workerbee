@@ -812,9 +812,9 @@ class WorkerBeeSupervisor:
             controller_port=controller_port,
             apishim_port=apishim_port,
         )
-        controller_host = f"k1s.{self.project}.workerbee.localhost"
-        legacy_dash_host = f"k1s-dash.{self.project}.workerbee.localhost"
-        api_host = f"k1s-api.{self.project}.workerbee.localhost"
+        controller_host = self.ingress.host("k1s")
+        legacy_dash_host = self.ingress.host("k1s-dash")
+        api_host = self.ingress.host("k1s-api")
         site = self.ingress.sites_dir / "k1s-stack.caddy"
         site.parent.mkdir(parents=True, exist_ok=True)
         asset_proxy = ""
@@ -857,9 +857,9 @@ https://{api_host} {{
         _ = (controller_port, apishim_port)
         if not self.ingress:
             return {}
-        controller_host = f"k1s.{self.project}.workerbee.localhost"
-        legacy_dash_host = f"k1s-dash.{self.project}.workerbee.localhost"
-        api_host = f"k1s-api.{self.project}.workerbee.localhost"
+        controller_host = self.ingress.host("k1s")
+        legacy_dash_host = self.ingress.host("k1s-dash")
+        api_host = self.ingress.host("k1s-api")
         return {
             "controller": self.ingress.url(controller_host, "/"),
             "dashboard": self.ingress.url(controller_host, "/dashboard"),

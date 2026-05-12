@@ -71,6 +71,7 @@ def prepare_stage(
             template=template,
             project=project,
             ingress_port=ingress_port,
+            ingress_domain=supervisor.ingress.domain if supervisor.ingress else None,
             service_ports=service_ports,
             peer_hosts=peer_hosts,
         )
@@ -894,6 +895,7 @@ def _write_template(
     template: str,
     project: str,
     ingress_port: int = 19443,
+    ingress_domain: str | None = None,
     service_ports: dict[str, int] | None = None,
     peer_hosts: list[str] | None = None,
 ) -> list[Path]:
@@ -909,6 +911,7 @@ def _write_template(
                     app=app,
                     project=project,
                     ingress_port=ingress_port,
+                    ingress_domain=ingress_domain,
                     service_ports=service_ports or _realtime_service_ports(project),
                     peer_hosts=peer_hosts or ["host.containers.internal", "host.docker.internal"],
                 ),
@@ -966,11 +969,12 @@ def _realtime_template_manifest(
     app: str,
     project: str,
     ingress_port: int,
+    ingress_domain: str | None,
     service_ports: dict[str, int],
     peer_hosts: list[str],
 ) -> str:
     project_name = project_slug(project)
-    domain = f"{project_name}.workerbee.localhost"
+    domain = ingress_domain or f"{project_name}.workerbee.localhost"
     db_urls = ",".join(_peer_urls("db", project_name, service_ports, peer_hosts))
     backend_urls = ",".join(_peer_urls("backend", project_name, service_ports, peer_hosts))
     if app == "db":

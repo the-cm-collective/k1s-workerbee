@@ -15,6 +15,8 @@ from workerbee.agent import (
     derive_session_project,
     derive_session_project_info,
     install_agent_instructions,
+    runbook_markdown,
+    runbook_payload,
 )
 from workerbee.contract import AGENT_FEEDBACK_SCHEMA, WorkerBeeError
 from workerbee.daemon import WorkerBeeDaemon
@@ -94,6 +96,18 @@ def test_agent_instructions_include_first_run_security_review_guidance() -> None
     assert "security review" in instructions
     assert "first time WorkerBee is coming up" in instructions
     assert "temporary native k1s" in instructions
+
+
+def test_runbook_includes_tandem_k1s_dev_workflow() -> None:
+    markdown = runbook_markdown()
+    payload = runbook_payload()
+    profile_loop = "\n".join(payload["k1s_profile_loop"])
+
+    assert "sibling `../k1s` checkout" in markdown
+    assert "distinct `project` values" in markdown
+    assert "../k1s checkout as k1s_root" in profile_loop
+    assert "stable explicit project such as k1s-dev" in profile_loop
+    assert "docs/k1s-dev-workflow.md" in profile_loop
 
 
 def test_agent_instruction_install_check_and_append(tmp_path: Path) -> None:
@@ -189,6 +203,44 @@ def test_probe_restricts_to_workerbee_hosts(tmp_path: Path) -> None:
             url="https://example.com:19443/",
         )
     assert exc.value.code == "UNSUPPORTED_PROBE_URL"
+
+
+def test_probe_accepts_configured_lan_base_domain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ca = tmp_path / "root.crt"
+    ca.write_text("fake", encoding="utf-8")
+    ingress = {
+        "https_port": 19443,
+        "ca_bundle": str(ca),
+        "base_domain": "workerbee.home.arpa",
+    }
+
+    class FakeResponse:
+        status = 200
+        headers = {"Content-Type": "text/plain"}
+
+        def __enter__(self) -> FakeResponse:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def read(self) -> bytes:
+            return b"ok"
+
+    monkeypatch.setattr(ssl, "create_default_context", lambda **_kwargs: object())
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *_args, **_kwargs: FakeResponse())
+
+    result = probe_workerbee_url(
+        project="demo",
+        ingress_info=ingress,
+        url="https://app.demo.workerbee.home.arpa:19443/",
+        expected_status=200,
+    )
+
+    assert result["ok"] is True
 
 
 def test_probe_reports_status_and_body_match(

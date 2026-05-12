@@ -18,6 +18,7 @@ from workerbee.containerd_helper import (
 )
 from workerbee.contract import protect
 from workerbee.daemon import WorkerBeeDaemon
+from workerbee.ingress import resolve_ingress_settings
 from workerbee.manifests import (
     deploy_remote_k1s_stage,
     export_bundle,
@@ -89,6 +90,15 @@ def serve_mcp(
     state_root: Path | None = None,
     containerd_privilege: str = "auto",
     allow_remote_mcp: bool = False,
+    ingress_exposure: str | None = None,
+    ingress_domain: str | None = None,
+    ingress_bind: str | None = None,
+    ingress_ca_port: int | None = None,
+    ingress_dns: str | None = None,
+    ingress_dns_port: int | None = None,
+    ingress_dns_bind: str | None = None,
+    ingress_dns_answer: str | None = None,
+    ingress_dns_upstreams: list[str] | tuple[str, ...] | str | None = None,
 ) -> None:
     require_mcp_loopback_or_opt_in(host, allow_remote_mcp=allow_remote_mcp)
     try:
@@ -107,10 +117,22 @@ def serve_mcp(
     )
     privilege_env = containerd_privilege_env(privilege)
     os.environ.update(privilege_env)
+    ingress_settings = resolve_ingress_settings(
+        exposure=ingress_exposure,
+        base_domain=ingress_domain,
+        bind_host=ingress_bind,
+        ca_http_port=ingress_ca_port,
+        dns_mode=ingress_dns,
+        dns_port=ingress_dns_port,
+        dns_bind=ingress_dns_bind,
+        dns_answer=ingress_dns_answer,
+        dns_upstreams=ingress_dns_upstreams,
+    )
     daemon = WorkerBeeDaemon(
         state_root=state_root or state_dir,
         runtime=runtime,
         default_project=project,
+        ingress_settings=ingress_settings,
     )
     metadata_file = (state_root or state_dir or default_state_root()).resolve() / (
         "global/mcp-daemon.json"
@@ -126,6 +148,15 @@ def serve_mcp(
                 state_dir=state_dir,
                 state_root=state_root,
                 containerd_privilege=containerd_privilege,
+                ingress_exposure=ingress_settings.exposure,
+                ingress_domain=ingress_settings.base_domain,
+                ingress_bind=ingress_settings.bind_host,
+                ingress_ca_port=ingress_settings.ca_http_port,
+                ingress_dns=ingress_settings.dns.mode,
+                ingress_dns_port=ingress_settings.dns.port,
+                ingress_dns_bind=ingress_settings.dns.bind_host,
+                ingress_dns_answer=ingress_settings.dns.answer,
+                ingress_dns_upstreams=ingress_settings.dns.upstreams,
             )
         ),
     )
@@ -141,9 +172,23 @@ def serve_mcp(
         )
         raise
     print(f"WorkerBee global dashboard: {ingress.dashboard_url}", flush=True)
+    ca_download_url = getattr(ingress, "ca_download_url", None)
+    if ca_download_url:
+        print(f"WorkerBee CA download: {ca_download_url}", flush=True)
+    dns = getattr(ingress, "dns", None)
+    if isinstance(dns, dict) and dns.get("enabled"):
+        print(
+            f"WorkerBee DNS: {dns.get('bind_host')}:{dns.get('port')} "
+            f"for {dns.get('base_domain')}",
+            flush=True,
+        )
     print(f"WorkerBee state root: {ingress.state_root}", flush=True)
-    if not ingress.localhost_dns_ok:
-        print("WorkerBee warning: *.localhost DNS did not resolve on this host", flush=True)
+    dns_ok = getattr(ingress, "dashboard_dns_ok", getattr(ingress, "localhost_dns_ok", True))
+    if not dns_ok:
+        print(
+            f"WorkerBee warning: {ingress.dashboard_url} DNS did not resolve on this host",
+            flush=True,
+        )
 
     mcp = FastMCP("K1S WorkerBee", host=host, port=port, json_response=True)
 
@@ -731,6 +776,15 @@ def _serve_exec_argv(
     state_dir: Path | None,
     state_root: Path | None,
     containerd_privilege: str,
+    ingress_exposure: str | None,
+    ingress_domain: str | None,
+    ingress_bind: str | None,
+    ingress_ca_port: int | None,
+    ingress_dns: str | None,
+    ingress_dns_port: int | None,
+    ingress_dns_bind: str | None,
+    ingress_dns_answer: str | None,
+    ingress_dns_upstreams: list[str] | tuple[str, ...] | str | None,
 ) -> list[str]:
     argv = [sys.executable, "-m", "workerbee"]
     if state_root is not None:
@@ -753,6 +807,44 @@ def _serve_exec_argv(
             str(port),
         ]
     )
+    settings = resolve_ingress_settings(
+        exposure=ingress_exposure,
+        base_domain=ingress_domain,
+        bind_host=ingress_bind,
+        ca_http_port=ingress_ca_port,
+        dns_mode=ingress_dns,
+        dns_port=ingress_dns_port,
+        dns_bind=ingress_dns_bind,
+        dns_answer=ingress_dns_answer,
+        dns_upstreams=ingress_dns_upstreams,
+    )
+    argv.extend(
+        [
+            "--ingress-exposure",
+            settings.exposure,
+            "--ingress-domain",
+            settings.base_domain,
+            "--ingress-bind",
+            settings.bind_host,
+            "--ingress-ca-port",
+            str(settings.ca_http_port),
+        ]
+    )
+    if settings.dns.enabled:
+        argv.extend(
+            [
+                "--ingress-dns",
+                settings.dns.mode,
+                "--ingress-dns-port",
+                str(settings.dns.port),
+                "--ingress-dns-bind",
+                str(settings.dns.bind_host or ""),
+                "--ingress-dns-answer",
+                str(settings.dns.answer or ""),
+            ]
+        )
+        for upstream in settings.dns.upstreams:
+            argv.extend(["--ingress-dns-upstream", upstream])
     return argv
 
 

@@ -14,13 +14,19 @@ from workerbee.daemon import (
     _profile_control_plane_checks,
     _render_dashboard,
     _send_bytes,
+    _send_ca_download,
     _send_html,
     _send_json,
     _send_not_found,
     _websocket_probe_once,
 )
 from workerbee.http import request
-from workerbee.ingress import GlobalIngress, GlobalIngressInfo, global_ingress_status
+from workerbee.ingress import (
+    GlobalIngress,
+    GlobalIngressInfo,
+    IngressSettings,
+    global_ingress_status,
+)
 from workerbee.k1s_runtime import K1sRuntime
 
 
@@ -193,6 +199,41 @@ def test_dashboard_static_assets_are_cacheable_but_nosniff() -> None:
 
     assert handler.headers["Cache-Control"] == "public, max-age=3600"
     assert handler.headers["X-Content-Type-Options"] == "nosniff"
+
+
+def test_lan_ca_download_serves_cert_and_fingerprint(tmp_path: Path) -> None:
+    settings = IngressSettings(
+        exposure="lan",
+        base_domain="workerbee.home.arpa",
+        bind_host="0.0.0.0",
+        ca_http_port=19080,
+    )
+    daemon = WorkerBeeDaemon(state_root=tmp_path, ingress_settings=settings)
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+        ingress_settings=settings,
+    )
+    ingress.global_dir.mkdir(parents=True)
+    ingress.ca_bundle.write_text("-----BEGIN CERTIFICATE-----\ncert\n", encoding="utf-8")
+    daemon.ingress = ingress
+
+    handler = _FakeDashboardHandler()
+    _send_ca_download(handler, daemon=daemon, path="/workerbee-ca.crt")
+
+    assert handler.status == 200
+    assert handler.headers["Content-Type"] == "application/x-x509-ca-cert"
+    assert handler.headers["Content-Disposition"] == 'attachment; filename="workerbee-ca.crt"'
+    assert handler.headers["Cache-Control"] == "no-store"
+    assert handler.wfile.data.startswith(b"-----BEGIN CERTIFICATE-----")
+
+    handler = _FakeDashboardHandler()
+    _send_ca_download(handler, daemon=daemon, path="/workerbee-ca.sha256")
+
+    assert handler.status == 200
+    assert len(handler.wfile.data.decode().strip()) == 64
 
 
 def test_profile_control_plane_checks_use_loopback_with_public_host(
@@ -936,6 +977,23 @@ def test_global_dashboard_status_alias_returns_project_json(tmp_path: Path) -> N
     assert "updated_at" in payload
 
 
+def test_global_dashboard_rejects_unexpected_host(tmp_path: Path) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
+    port = daemon._start_dashboard_server()  # noqa: SLF001
+    try:
+        result = request(
+            f"http://127.0.0.1:{port}/api/status",
+            headers={"Host": "evil.example"},
+            timeout=2.0,
+        )
+    finally:
+        assert daemon._dashboard is not None  # noqa: SLF001
+        daemon._dashboard.shutdown()  # noqa: SLF001
+        daemon._dashboard.server_close()  # noqa: SLF001
+
+    assert result.status == 403
+
+
 def test_global_dashboard_action_job_endpoint(tmp_path: Path) -> None:
     daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
     scheduled: list[object] = []
@@ -1033,6 +1091,102 @@ def test_global_ingress_containerd_writes_host_network_https_port(tmp_path: Path
 
     assert "https_port 19443" in text
     assert "default_bind 127.0.0.1" in text
+
+
+def test_global_ingress_lan_writes_ca_bootstrap_route(tmp_path: Path) -> None:
+    settings = IngressSettings(
+        exposure="lan",
+        base_domain="192-168-1-23.sslip.io",
+        bind_host="0.0.0.0",
+        ca_http_port=19080,
+    )
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="containerd",
+        https_port=19443,
+        dashboard_port=18090,
+        ingress_settings=settings,
+    )
+    ingress.global_dir.mkdir(parents=True)
+
+    ingress._write_caddyfile(["alpha"])  # noqa: SLF001
+    text = ingress.caddy_file.read_text(encoding="utf-8")
+    config = ingress.project_config("alpha")
+
+    assert "default_bind 0.0.0.0" in text
+    assert "https://dashboard.192-168-1-23.sslip.io" in text
+    assert "http://ca.192-168-1-23.sslip.io:19080" in text
+    assert "/workerbee-ca.crt /workerbee-ca.sha256" in text
+    assert config.domain == "alpha.192-168-1-23.sslip.io"
+    assert config.host("api") == "api.alpha.192-168-1-23.sslip.io"
+    assert config.ca_download_url == "http://ca.192-168-1-23.sslip.io:19080/workerbee-ca.crt"
+
+
+def test_global_ingress_lan_publishes_https_and_ca_ports(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    settings = IngressSettings(
+        exposure="lan",
+        base_domain="workerbee.home.arpa",
+        bind_host="0.0.0.0",
+        ca_http_port=19080,
+    )
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+        ingress_settings=settings,
+    )
+    ingress.global_dir.mkdir(parents=True)
+    ingress.projects_dir.mkdir(parents=True)
+    ingress.caddy_data.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs):
+        calls.append(cmd)
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr("workerbee.ingress._podman_is_rootless", lambda: False)
+    monkeypatch.setattr("workerbee.ingress.subprocess.run", fake_run)
+
+    ingress._ensure_caddy_container()  # noqa: SLF001
+
+    run_cmd = next(cmd for cmd in calls if "run" in cmd)
+    assert "0.0.0.0:19443:443" in run_cmd
+    assert "0.0.0.0:19080:19080" in run_cmd
+
+
+def test_global_ingress_public_info_includes_dns_status(tmp_path: Path) -> None:
+    settings = IngressSettings(
+        exposure="lan",
+        base_domain="workerbee.home.arpa",
+        bind_host="0.0.0.0",
+        ca_http_port=19080,
+    )
+    dns_status = {
+        "enabled": True,
+        "running": True,
+        "mode": "forwarding",
+        "bind_host": "127.0.0.1",
+        "port": 1053,
+        "answer": "192.168.1.23",
+        "base_domain": "workerbee.home.arpa",
+        "upstreams": ["127.0.0.1:5300"],
+    }
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+        ingress_settings=settings,
+        dns_status=dns_status,
+    )
+
+    public = ingress.info().public_dict()
+
+    assert public["dns"] == dns_status
 
 
 def test_global_ingress_rootless_podman_allows_host_loopback(

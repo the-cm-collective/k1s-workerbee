@@ -45,6 +45,24 @@ def test_mcp_start_accepts_background_bind_flags(tmp_path: Path) -> None:
             "--timeout",
             "1",
             "--allow-remote-mcp",
+            "--ingress-exposure",
+            "lan",
+            "--ingress-domain",
+            "workerbee.home.arpa",
+            "--ingress-bind",
+            "0.0.0.0",
+            "--ingress-ca-port",
+            "19080",
+            "--ingress-dns",
+            "forwarding",
+            "--ingress-dns-port",
+            "1053",
+            "--ingress-dns-bind",
+            "127.0.0.1",
+            "--ingress-dns-answer",
+            "192.168.1.23",
+            "--ingress-dns-upstream",
+            "127.0.0.1:5300",
         ]
     )
 
@@ -57,6 +75,15 @@ def test_mcp_start_accepts_background_bind_flags(tmp_path: Path) -> None:
     assert args.port == 9999
     assert args.timeout == 1
     assert args.allow_remote_mcp is True
+    assert args.ingress_exposure == "lan"
+    assert args.ingress_domain == "workerbee.home.arpa"
+    assert args.ingress_bind == "0.0.0.0"
+    assert args.ingress_ca_port == 19080
+    assert args.ingress_dns == "forwarding"
+    assert args.ingress_dns_port == 1053
+    assert args.ingress_dns_bind == "127.0.0.1"
+    assert args.ingress_dns_answer == "192.168.1.23"
+    assert args.ingress_dns_upstream == ["127.0.0.1:5300"]
 
 
 def test_config_set_parses_user_level_defaults(tmp_path: Path) -> None:
@@ -76,6 +103,24 @@ def test_config_set_parses_user_level_defaults(tmp_path: Path) -> None:
             "8765",
             "--mcp-timeout",
             "90",
+            "--ingress-exposure",
+            "lan",
+            "--ingress-domain",
+            "workerbee.home.arpa",
+            "--ingress-bind",
+            "0.0.0.0",
+            "--ingress-ca-port",
+            "19080",
+            "--ingress-dns",
+            "forwarding",
+            "--ingress-dns-port",
+            "1053",
+            "--ingress-dns-bind",
+            "127.0.0.1",
+            "--ingress-dns-answer",
+            "192.168.1.23",
+            "--ingress-dns-upstream",
+            "127.0.0.1:5300",
         ]
     )
 
@@ -87,6 +132,15 @@ def test_config_set_parses_user_level_defaults(tmp_path: Path) -> None:
     assert args.mcp_host == "127.0.0.1"
     assert args.mcp_port == 8765
     assert args.mcp_timeout == 90
+    assert args.ingress_exposure == "lan"
+    assert args.ingress_domain == "workerbee.home.arpa"
+    assert args.ingress_bind == "0.0.0.0"
+    assert args.ingress_ca_port == 19080
+    assert args.ingress_dns == "forwarding"
+    assert args.ingress_dns_port == 1053
+    assert args.ingress_dns_bind == "127.0.0.1"
+    assert args.ingress_dns_answer == "192.168.1.23"
+    assert args.ingress_dns_upstream == "127.0.0.1:5300"
 
 
 def test_agent_install_parser_accepts_explicit_append(tmp_path: Path) -> None:
@@ -133,7 +187,12 @@ def test_cli_defaults_apply_to_mcp_commands(tmp_path: Path, monkeypatch) -> None
         (
             '{"runtime":"containerd","containerd_privilege":"sudo-helper",'
             f'"state_root":"{tmp_path / "state"}","mcp_host":"127.0.0.2",'
-            '"mcp_port":9999,"mcp_timeout":90}'
+            '"mcp_port":9999,"mcp_timeout":90,'
+            '"ingress_exposure":"lan","ingress_domain":"workerbee.home.arpa",'
+            '"ingress_bind":"0.0.0.0","ingress_ca_port":19080,'
+            '"ingress_dns":"forwarding","ingress_dns_port":1053,'
+            '"ingress_dns_bind":"127.0.0.1","ingress_dns_answer":"192.168.1.23",'
+            '"ingress_dns_upstream":"127.0.0.1:5300"}'
         ),
         encoding="utf-8",
     )
@@ -155,6 +214,15 @@ def test_cli_defaults_apply_to_mcp_commands(tmp_path: Path, monkeypatch) -> None
     assert config.state_root == tmp_path / "state"
     assert config.host == "127.0.0.2"
     assert config.port == 9999
+    assert config.ingress_exposure == "lan"
+    assert config.ingress_domain == "workerbee.home.arpa"
+    assert config.ingress_bind == "0.0.0.0"
+    assert config.ingress_ca_port == 19080
+    assert config.ingress_dns == "forwarding"
+    assert config.ingress_dns_port == 1053
+    assert config.ingress_dns_bind == "127.0.0.1"
+    assert config.ingress_dns_answer == "192.168.1.23"
+    assert config.ingress_dns_upstreams == ("127.0.0.1:5300",)
     assert captured["timeout"] == 90
 
 

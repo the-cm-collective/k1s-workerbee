@@ -107,6 +107,15 @@ def build_parser() -> argparse.ArgumentParser:
     config_set.add_argument("--mcp-host")
     config_set.add_argument("--mcp-port", type=int)
     config_set.add_argument("--mcp-timeout", type=float)
+    config_set.add_argument("--ingress-exposure", choices=["loopback", "lan"])
+    config_set.add_argument("--ingress-domain")
+    config_set.add_argument("--ingress-bind")
+    config_set.add_argument("--ingress-ca-port", type=int)
+    config_set.add_argument("--ingress-dns", choices=["off", "forwarding"])
+    config_set.add_argument("--ingress-dns-port", type=int)
+    config_set.add_argument("--ingress-dns-bind")
+    config_set.add_argument("--ingress-dns-answer")
+    config_set.add_argument("--ingress-dns-upstream")
     config_sub.add_parser("clear", help="Remove local WorkerBee CLI defaults")
 
     agent = sub.add_parser("agent", help="Print or install agent instructions")
@@ -316,19 +325,74 @@ def build_parser() -> argparse.ArgumentParser:
                 ),
             )
 
+    def add_mcp_ingress_flags(command: argparse.ArgumentParser) -> None:
+        command.add_argument(
+            "--ingress-exposure",
+            choices=["loopback", "lan"],
+            default=None,
+            help="Expose WorkerBee app ingress on loopback or the local LAN",
+        )
+        command.add_argument(
+            "--ingress-domain",
+            default=None,
+            help="Base domain for generated ingress hosts",
+        )
+        command.add_argument(
+            "--ingress-bind",
+            default=None,
+            help="Address for Caddy ingress to bind",
+        )
+        command.add_argument(
+            "--ingress-ca-port",
+            type=int,
+            default=None,
+            help="HTTP port for LAN-mode WorkerBee CA download",
+        )
+        command.add_argument(
+            "--ingress-dns",
+            choices=["off", "forwarding"],
+            default=None,
+            help="Run WorkerBee LAN dev DNS forwarding for ingress names",
+        )
+        command.add_argument(
+            "--ingress-dns-port",
+            type=int,
+            default=None,
+            help="Port for WorkerBee LAN dev DNS",
+        )
+        command.add_argument(
+            "--ingress-dns-bind",
+            default=None,
+            help="Address for WorkerBee LAN dev DNS to bind",
+        )
+        command.add_argument(
+            "--ingress-dns-answer",
+            default=None,
+            help="LAN IP returned for WorkerBee ingress DNS names",
+        )
+        command.add_argument(
+            "--ingress-dns-upstream",
+            action="append",
+            default=None,
+            help="Upstream DNS resolver for non-WorkerBee names; repeatable",
+        )
+
     start_mcp = mcp_sub.add_parser("start", help="Start WorkerBee MCP in the background")
     add_mcp_bind_flags(start_mcp, allow_remote=True)
+    add_mcp_ingress_flags(start_mcp)
     start_mcp.add_argument("--timeout", type=float, default=45.0)
     stop_mcp = mcp_sub.add_parser("stop", help="Stop the background WorkerBee MCP daemon")
     add_mcp_bind_flags(stop_mcp)
     stop_mcp.add_argument("--timeout", type=float, default=10.0)
     restart_mcp = mcp_sub.add_parser("restart", help="Restart WorkerBee MCP in the background")
     add_mcp_bind_flags(restart_mcp, allow_remote=True)
+    add_mcp_ingress_flags(restart_mcp)
     restart_mcp.add_argument("--timeout", type=float, default=45.0)
     status_mcp = mcp_sub.add_parser("status", help="Show background WorkerBee MCP status")
     add_mcp_bind_flags(status_mcp)
     serve = mcp_sub.add_parser("serve", help="Serve WorkerBee over Streamable HTTP MCP")
     add_mcp_bind_flags(serve, allow_remote=True)
+    add_mcp_ingress_flags(serve)
     return parser
 
 
@@ -375,6 +439,15 @@ def main(argv: list[str] | None = None) -> int:
                     state_root=args.state_root,
                     containerd_privilege=containerd_privilege,
                     allow_remote_mcp=args.allow_remote_mcp,
+                    ingress_exposure=args.ingress_exposure,
+                    ingress_domain=args.ingress_domain,
+                    ingress_bind=args.ingress_bind,
+                    ingress_ca_port=args.ingress_ca_port,
+                    ingress_dns=args.ingress_dns,
+                    ingress_dns_port=args.ingress_dns_port,
+                    ingress_dns_bind=args.ingress_dns_bind,
+                    ingress_dns_answer=args.ingress_dns_answer,
+                    ingress_dns_upstreams=args.ingress_dns_upstream,
                 )
                 return 0
             if args.state_dir is not None and args.state_root is not None:
@@ -387,6 +460,15 @@ def main(argv: list[str] | None = None) -> int:
                 port=args.port,
                 containerd_privilege=containerd_privilege,
                 allow_remote_mcp=bool(getattr(args, "allow_remote_mcp", False)),
+                ingress_exposure=getattr(args, "ingress_exposure", None),
+                ingress_domain=getattr(args, "ingress_domain", None),
+                ingress_bind=getattr(args, "ingress_bind", None),
+                ingress_ca_port=getattr(args, "ingress_ca_port", None),
+                ingress_dns=getattr(args, "ingress_dns", None),
+                ingress_dns_port=getattr(args, "ingress_dns_port", None),
+                ingress_dns_bind=getattr(args, "ingress_dns_bind", None),
+                ingress_dns_answer=getattr(args, "ingress_dns_answer", None),
+                ingress_dns_upstreams=getattr(args, "ingress_dns_upstream", None),
             )
             if args.mcp_cmd == "start":
                 return _print(start_mcp_daemon(config, timeout=args.timeout), json_out=args.json)
@@ -849,6 +931,14 @@ def _print(payload: dict[str, Any], *, json_out: bool) -> int:
         print(f"mcp: {payload['mcp_url']}")
         if payload.get("dashboard_url"):
             print(f"dashboard: {payload['dashboard_url']}")
+        if payload.get("ca_download_url"):
+            print(f"ca: {payload['ca_download_url']}")
+        dns = payload.get("dns")
+        if isinstance(dns, dict) and dns.get("enabled"):
+            print(
+                f"dns: {dns.get('bind_host')}:{dns.get('port')} "
+                f"({dns.get('base_domain') or payload.get('ingress_domain')})"
+            )
         if payload.get("codex_mcp_add"):
             print(f"codex: {payload['codex_mcp_add']}")
         if payload.get("agent_instructions"):
@@ -892,6 +982,15 @@ def _handle_config(args: argparse.Namespace) -> int:
             "mcp_host": args.mcp_host,
             "mcp_port": args.mcp_port,
             "mcp_timeout": args.mcp_timeout,
+            "ingress_exposure": args.ingress_exposure,
+            "ingress_domain": args.ingress_domain,
+            "ingress_bind": args.ingress_bind,
+            "ingress_ca_port": args.ingress_ca_port,
+            "ingress_dns": args.ingress_dns,
+            "ingress_dns_port": args.ingress_dns_port,
+            "ingress_dns_bind": args.ingress_dns_bind,
+            "ingress_dns_answer": args.ingress_dns_answer,
+            "ingress_dns_upstream": args.ingress_dns_upstream,
         }
         updates = {key: value for key, value in updates.items() if value not in (None, "")}
         if not updates:
@@ -930,6 +1029,33 @@ def _apply_cli_defaults(args: argparse.Namespace, argv: list[str]) -> None:
             and defaults.get("mcp_timeout")
         ):
             args.timeout = float(defaults["mcp_timeout"])
+        if hasattr(args, "ingress_exposure"):
+            if not _arg_present(argv, "--ingress-exposure") and defaults.get("ingress_exposure"):
+                args.ingress_exposure = str(defaults["ingress_exposure"])
+            if not _arg_present(argv, "--ingress-domain") and defaults.get("ingress_domain"):
+                args.ingress_domain = str(defaults["ingress_domain"])
+            if not _arg_present(argv, "--ingress-bind") and defaults.get("ingress_bind"):
+                args.ingress_bind = str(defaults["ingress_bind"])
+            if not _arg_present(argv, "--ingress-ca-port") and defaults.get("ingress_ca_port"):
+                args.ingress_ca_port = int(defaults["ingress_ca_port"])
+            if not _arg_present(argv, "--ingress-dns") and defaults.get("ingress_dns"):
+                args.ingress_dns = str(defaults["ingress_dns"])
+            if not _arg_present(argv, "--ingress-dns-port") and defaults.get(
+                "ingress_dns_port"
+            ):
+                args.ingress_dns_port = int(defaults["ingress_dns_port"])
+            if not _arg_present(argv, "--ingress-dns-bind") and defaults.get(
+                "ingress_dns_bind"
+            ):
+                args.ingress_dns_bind = str(defaults["ingress_dns_bind"])
+            if not _arg_present(argv, "--ingress-dns-answer") and defaults.get(
+                "ingress_dns_answer"
+            ):
+                args.ingress_dns_answer = str(defaults["ingress_dns_answer"])
+            if not _arg_present(argv, "--ingress-dns-upstream") and defaults.get(
+                "ingress_dns_upstream"
+            ):
+                args.ingress_dns_upstream = str(defaults["ingress_dns_upstream"]).split()
 
 
 def _arg_present(argv: list[str], option: str) -> bool:

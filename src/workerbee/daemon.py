@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import secrets
@@ -31,12 +32,16 @@ from workerbee.agent import (
 )
 from workerbee.containerd_helper import containerd_privilege_status, containerd_privilege_summary
 from workerbee.contract import WorkerBeeError
+from workerbee.dns import WorkerBeeDNSServer
 from workerbee.http import request, request_https_via_loopback
 from workerbee.ingress import (
+    INGRESS_EXPOSURE_LAN,
     GlobalIngress,
     GlobalIngressInfo,
+    IngressSettings,
     ProjectIngressConfig,
     global_ingress_status,
+    resolve_ingress_settings,
 )
 from workerbee.locks import FileLock, project_lock_path, state_root_lock_path
 from workerbee.manifests import deploy_profile_stage, export_bundle, prepare_stage
@@ -118,10 +123,12 @@ class WorkerBeeDaemon:
         runtime: str = "auto",
         default_project: str = "default",
         cwd: Path | None = None,
+        ingress_settings: IngressSettings | None = None,
     ) -> None:
         self.state_root = (state_root or default_state_root()).resolve()
         self.runtime_requested = runtime
         self.default_project = project_slug(default_project)
+        self.ingress_settings = ingress_settings or resolve_ingress_settings()
         self.cwd = (cwd or Path.cwd()).resolve()
         self.projects_dir = self.state_root / "projects"
         self.registry_file = self.state_root / "registry.json"
@@ -137,6 +144,8 @@ class WorkerBeeDaemon:
         self._dashboard_jobs_order: list[str] = []
         self._dashboard_jobs_lock = threading.Lock()
         self.ingress: GlobalIngress | None = None
+        self._dns_server: WorkerBeeDNSServer | None = None
+        self._dns_status: dict[str, Any] | None = None
         self._state_lock: FileLock | None = None
 
     def configure_dashboard_lifecycle(
@@ -157,13 +166,20 @@ class WorkerBeeDaemon:
             self._state_lock = FileLock(state_root_lock_path(self.state_root), label="state root")
             self._state_lock.acquire(metadata={"mcp_bind_url": mcp_bind_url})
         dashboard_port = self._start_dashboard_server()
+        dns_status = self._start_dns_server()
         self._register_project(self.default_project, cwd_hint=str(self.cwd))
         self.ingress = GlobalIngress(
             state_root=self.state_root,
             runtime=self._resolve_runtime(),
             dashboard_port=dashboard_port,
+            ingress_settings=self.ingress_settings,
+            dns_status=dns_status,
         )
-        return self.ingress.start(projects=self._known_projects())
+        try:
+            return self.ingress.start(projects=self._known_projects())
+        except Exception:
+            self._stop_dns_server()
+            raise
 
     def supervisor(self, project: str | None = None) -> WorkerBeeSupervisor:
         name = project_slug(project or self.default_project)
@@ -673,11 +689,22 @@ class WorkerBeeDaemon:
                 status = runner.workload_status(profile=profile, namespace=name)
                 connection = runner.connection(profile=profile)
                 url_checks = _profile_control_plane_checks(connection)
+                workload_ingress = self._project_ingress(name)
+                api_host = (
+                    workload_ingress.host("api")
+                    if workload_ingress
+                    else f"api.{name}.workerbee.localhost"
+                )
+                app_host = (
+                    workload_ingress.host("app")
+                    if workload_ingress
+                    else f"app.{name}.workerbee.localhost"
+                )
                 probes = [
                     _probe_with_retry(
                         self,
                         project=name,
-                        host=f"api.{name}.workerbee.localhost",
+                        host=api_host,
                         path="/healthz",
                         expected_status=200,
                         timeout=timeout,
@@ -685,7 +712,7 @@ class WorkerBeeDaemon:
                     _probe_with_retry(
                         self,
                         project=name,
-                        host=f"api.{name}.workerbee.localhost",
+                        host=api_host,
                         path="/api/seed",
                         expected_status=200,
                         body_contains="workerbee",
@@ -694,15 +721,22 @@ class WorkerBeeDaemon:
                     _probe_with_retry(
                         self,
                         project=name,
-                        host=f"app.{name}.workerbee.localhost",
+                        host=app_host,
                         path="/healthz",
                         expected_status=200,
                         timeout=timeout,
                     ),
                 ]
+                websocket_url = (
+                    workload_ingress.url(api_host, "/ws").replace("https://", "wss://", 1)
+                    if workload_ingress
+                    else (
+                        f"wss://api.{name}.workerbee.localhost:"
+                        f"{self.global_dashboard().get('https_port', 19443)}/ws"
+                    )
+                )
                 websocket = _websocket_probe(
-                    f"wss://api.{name}.workerbee.localhost:"
-                    f"{self.global_dashboard().get('https_port', 19443)}/ws",
+                    websocket_url,
                     ca_bundle=str(connection["ca_bundle"]),
                     expected="echo:workerbee",
                 )
@@ -1099,7 +1133,7 @@ class WorkerBeeDaemon:
                 "project_identity": (
                     "explicit project override, otherwise git repo basename + branch + cwd hash"
                 ),
-                "ingress_probe": "WorkerBee-managed localhost HTTPS hosts only",
+                "ingress_probe": "WorkerBee-managed loopback or explicit LAN HTTPS hosts",
             },
             "agent_feedback": {
                 "schema": AGENT_FEEDBACK_SCHEMA,
@@ -1526,8 +1560,13 @@ class WorkerBeeDaemon:
         }
 
     def stop_global_ingress(self) -> dict[str, Any]:
+        self._stop_dns_server()
         runtime = self._resolve_runtime()
-        ingress = GlobalIngress(state_root=self.state_root, runtime=runtime)
+        ingress = GlobalIngress(
+            state_root=self.state_root,
+            runtime=runtime,
+            ingress_settings=self.ingress_settings,
+        )
         return {"stopped": True, "runtime": runtime, **ingress.stop()}
 
     def global_dashboard(self) -> dict[str, Any]:
@@ -1692,7 +1731,11 @@ class WorkerBeeDaemon:
         if not status.get("running"):
             return None
         runtime = str(status.get("runtime") or self._resolve_runtime())
-        self.ingress = GlobalIngress(state_root=self.state_root, runtime=runtime)
+        self.ingress = GlobalIngress(
+            state_root=self.state_root,
+            runtime=runtime,
+            ingress_settings=_ingress_settings_from_status(status, fallback=self.ingress_settings),
+        )
         return self.ingress
 
     def _schedule_ingress_sync(self) -> dict[str, Any]:
@@ -1810,6 +1853,27 @@ class WorkerBeeDaemon:
     def _resolve_runtime(self) -> str:
         return resolve_runtime(self.runtime_requested)
 
+    def _start_dns_server(self) -> dict[str, Any]:
+        settings = self.ingress_settings.dns
+        if not settings.enabled:
+            self._dns_status = settings.public_dict(running=False)
+            return dict(self._dns_status)
+        server = WorkerBeeDNSServer(
+            settings=settings,
+            base_domain=self.ingress_settings.base_domain,
+        )
+        self._dns_status = server.start()
+        self._dns_server = server
+        return dict(self._dns_status)
+
+    def _stop_dns_server(self) -> None:
+        if self._dns_server is None:
+            return
+        self._dns_server.stop()
+        self._dns_server = None
+        if self._dns_status is not None:
+            self._dns_status = {**self._dns_status, "running": False}
+
     def _start_dashboard_server(self) -> int:
         if self._dashboard is not None:
             return int(self._dashboard.server_address[1])
@@ -1827,6 +1891,15 @@ class WorkerBeeDaemon:
                             "state_root": str(daemon.state_root),
                         },
                     )
+                    return
+                if path in {"/workerbee-ca.crt", "/workerbee-ca.sha256"}:
+                    if not _dashboard_host_allowed(self, daemon=daemon, allow_ca=True):
+                        _send_not_found(self)
+                        return
+                    _send_ca_download(self, daemon=daemon, path=path)
+                    return
+                if not _dashboard_host_allowed(self, daemon=daemon):
+                    _send_forbidden(self, "dashboard requests require a WorkerBee dashboard host")
                     return
                 if path.startswith("/api/action-jobs/"):
                     job_id = path.rsplit("/", 1)[-1]
@@ -1875,7 +1948,7 @@ class WorkerBeeDaemon:
                         status=404,
                     )
                     return
-                if not _dashboard_host_allowed(self):
+                if not _dashboard_host_allowed(self, daemon=daemon):
                     _send_json(
                         self,
                         {
@@ -1940,9 +2013,52 @@ def _send_bytes(handler: BaseHTTPRequestHandler, body: bytes, content_type: str)
     _write_response_body(handler, body)
 
 
+def _send_ca_download(
+    handler: BaseHTTPRequestHandler,
+    *,
+    daemon: WorkerBeeDaemon,
+    path: str,
+) -> None:
+    ingress = daemon.ingress
+    if ingress is None or ingress.exposure != INGRESS_EXPOSURE_LAN:
+        _send_not_found(handler)
+        return
+    ca = ingress.ca_bundle
+    if not ca.is_file():
+        _send_not_found(handler)
+        return
+    if path == "/workerbee-ca.sha256":
+        body = f"{_sha256(ca)}\n".encode()
+        content_type = "text/plain; charset=utf-8"
+        disposition = 'attachment; filename="workerbee-ca.sha256"'
+    else:
+        body = ca.read_bytes()
+        content_type = "application/x-x509-ca-cert"
+        disposition = 'attachment; filename="workerbee-ca.crt"'
+    handler.send_response(200)
+    handler.send_header("Content-Type", content_type)
+    handler.send_header("Content-Length", str(len(body)))
+    handler.send_header("Content-Disposition", disposition)
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("X-Content-Type-Options", "nosniff")
+    handler.send_header("Referrer-Policy", "no-referrer")
+    handler.end_headers()
+    _write_response_body(handler, body)
+
+
 def _send_not_found(handler: BaseHTTPRequestHandler) -> None:
     body = b"not found\n"
     handler.send_response(404)
+    handler.send_header("Content-Type", "text/plain; charset=utf-8")
+    handler.send_header("Content-Length", str(len(body)))
+    _send_dynamic_security_headers(handler)
+    handler.end_headers()
+    _write_response_body(handler, body)
+
+
+def _send_forbidden(handler: BaseHTTPRequestHandler, message: str) -> None:
+    body = f"{message}\n".encode()
+    handler.send_response(403)
     handler.send_header("Content-Type", "text/plain; charset=utf-8")
     handler.send_header("Content-Length", str(len(body)))
     _send_dynamic_security_headers(handler)
@@ -1995,14 +2111,27 @@ def _default_ingress_sync_scheduler(callback: Callable[[], None]) -> None:
     timer.start()
 
 
-def _dashboard_host_allowed(handler: BaseHTTPRequestHandler) -> bool:
+def _dashboard_host_allowed(
+    handler: BaseHTTPRequestHandler,
+    *,
+    daemon: WorkerBeeDaemon,
+    allow_ca: bool = False,
+) -> bool:
     host = _host_name(str(handler.headers.get("Host") or ""))
-    return host in {
+    allowed = {
         "dashboard.workerbee.localhost",
         "localhost",
         "127.0.0.1",
         "::1",
     }
+    ingress = daemon.ingress
+    base_domain = (
+        ingress.base_domain if ingress is not None else daemon.ingress_settings.base_domain
+    )
+    allowed.add(f"dashboard.{base_domain}")
+    if allow_ca:
+        allowed.add(f"ca.{base_domain}")
+    return host in allowed
 
 
 def _host_name(raw: str) -> str:
@@ -2012,6 +2141,10 @@ def _host_name(raw: str) -> str:
     if ":" in host:
         return host.rsplit(":", 1)[0]
     return host
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _read_dashboard_action_payload(handler: BaseHTTPRequestHandler) -> dict[str, Any]:
@@ -2418,6 +2551,19 @@ def _caddy_exposed_routes(path: Path, *, https_port: int) -> list[dict[str, Any]
             hosts = []
             path_stack = []
     return routes
+
+
+def _ingress_settings_from_status(
+    status: dict[str, Any],
+    *,
+    fallback: IngressSettings,
+) -> IngressSettings:
+    return IngressSettings(
+        exposure=str(status.get("exposure") or fallback.exposure),
+        base_domain=str(status.get("base_domain") or fallback.base_domain),
+        bind_host=str(status.get("bind_host") or fallback.bind_host),
+        ca_http_port=int(status.get("ca_http_port") or fallback.ca_http_port),
+    )
 
 
 def _caddy_site_hosts(raw: str) -> list[str]:

@@ -144,11 +144,16 @@ Use `app="namespace/name"` or pass `namespace` only when inspecting a non-defaul
 do not guess generated runtime container names. Manifest validate/deploy/export accepts either the
 absolute `stage_dir` returned by prepare or the named stage under project `artifacts/staged`.
 
-For k1s controller/runtime development only, use explicit direct-containerd WorkerBee profile tools:
-start a profile with `workerbee_v1_profile_start`, deploy staged manifests with
+For k1s controller/runtime development, prefer one agent launched from the WorkerBee repo
+root and work across both checkouts: WorkerBee code in the current repo and k1s code in
+the sibling `../k1s` checkout. Use an explicit direct-containerd WorkerBee project such as
+`k1s-dev`, pass `k1s_root="../k1s"` or set `WORKERBEE_K1S_ROOT`, start a profile with
+`workerbee_v1_profile_start`, deploy staged manifests with
 `workerbee_v1_manifest_deploy_local(target="profile")`, inspect with
 `workerbee_v1_profile_workload_status` and `workerbee_v1_logs(target="profile")`, and use
 `workerbee_v1_profile_workload_validate` for the bundled realtime frontend/backend/db smoke test.
+Use separate agents only for separable k1s/WorkerBee work, and isolate shared WorkerBee runtime
+state with distinct `project` values unless one agent owns the shared profile lifecycle.
 """
 
 
@@ -295,6 +300,12 @@ def runbook_payload() -> dict[str, Any]:
         ],
         "k1s_profile_loop": [
             "Use only with explicit direct-containerd WorkerBee MCP sessions.",
+            (
+                "For tandem k1s development, launch from k1s-workerbee and use the sibling "
+                "../k1s checkout as k1s_root."
+            ),
+            "Prefer one agent for both repos; use separate agents only for separable work.",
+            "Use a stable explicit project such as k1s-dev for nested profile work.",
             "Start a containerized profile with workerbee_v1_profile_start.",
             "Deploy staged manifests with workerbee_v1_manifest_deploy_local(target='profile').",
             (
@@ -305,6 +316,8 @@ def runbook_payload() -> dict[str, Any]:
                 "Run workerbee_v1_profile_workload_validate for the bundled realtime "
                 "WebSocket smoke test."
             ),
+            "Restart profiles after k1s source changes; restart MCP after WorkerBee changes.",
+            "See docs/k1s-dev-workflow.md for the complete tandem workflow.",
         ],
         "temporary_files": (
             "Use /tmp or WorkerBee state for one-off helper scripts unless the user asked for "

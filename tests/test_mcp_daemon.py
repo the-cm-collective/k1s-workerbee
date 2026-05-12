@@ -64,10 +64,66 @@ def test_start_mcp_daemon_writes_detached_workerbee_argv(
     assert result["ok"] is True
     assert result["started"] is True
     assert calls["kwargs"]["start_new_session"] is True
-    assert calls["argv"][-5:] == ["serve", "--host", "127.0.0.1", "--port", "9876"]
+    assert "serve" in calls["argv"]
+    assert calls["argv"][calls["argv"].index("--host") + 1] == "127.0.0.1"
+    assert calls["argv"][calls["argv"].index("--port") + 1] == "9876"
+    assert calls["argv"][calls["argv"].index("--ingress-exposure") + 1] == "loopback"
+    assert calls["argv"][calls["argv"].index("--ingress-domain") + 1] == "workerbee.localhost"
     metadata = json.loads(config.metadata_file.read_text(encoding="utf-8"))
     assert metadata["pid"] == 4321
     assert metadata["project"] == "demo"
+    assert metadata["ingress_exposure"] == "loopback"
+
+
+def test_start_mcp_daemon_writes_dns_argv_and_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    class FakePopen:
+        pid = 4321
+
+        def __init__(self, argv: list[str], **kwargs: Any) -> None:
+            calls["argv"] = argv
+            calls["kwargs"] = kwargs
+
+    config = MCPDaemonConfig(
+        state_root=tmp_path,
+        runtime="podman",
+        port=9876,
+        ingress_exposure="lan",
+        ingress_dns="forwarding",
+        ingress_dns_port=1053,
+        ingress_dns_bind="127.0.0.1",
+        ingress_dns_answer="192.168.1.23",
+        ingress_dns_upstreams=("127.0.0.1:5300",),
+    )
+    monkeypatch.setattr("workerbee.mcp_daemon.subprocess.Popen", FakePopen)
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon._wait_ready",
+        lambda _config, **_kwargs: _ready_payload(),
+    )
+    monkeypatch.setattr("workerbee.mcp_daemon._pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr("workerbee.mcp_daemon._pid_matches_metadata", lambda *_args: True)
+
+    result = start_mcp_daemon(config, timeout=1)
+
+    assert result["ok"] is True
+    assert calls["argv"][calls["argv"].index("--ingress-domain") + 1] == (
+        "workerbee.home.arpa"
+    )
+    assert calls["argv"][calls["argv"].index("--ingress-dns") + 1] == "forwarding"
+    assert calls["argv"][calls["argv"].index("--ingress-dns-port") + 1] == "1053"
+    assert calls["argv"][calls["argv"].index("--ingress-dns-bind") + 1] == "127.0.0.1"
+    assert calls["argv"][calls["argv"].index("--ingress-dns-answer") + 1] == "192.168.1.23"
+    assert calls["argv"][calls["argv"].index("--ingress-dns-upstream") + 1] == (
+        "127.0.0.1:5300"
+    )
+    metadata = json.loads(config.metadata_file.read_text(encoding="utf-8"))
+    assert metadata["ingress_dns"]["enabled"] is True
+    assert metadata["ingress_dns"]["port"] == 1053
+    assert metadata["ingress_dns"]["upstreams"] == ["127.0.0.1:5300"]
 
 
 def test_start_mcp_daemon_fails_fast_when_port_is_in_use(
@@ -116,6 +172,22 @@ def test_start_mcp_daemon_refuses_remote_bind_without_opt_in(
     assert result["ok"] is False
     assert result["started"] is False
     assert result["error"]["code"] == "MCP_REMOTE_BIND_REQUIRES_AUTH"
+
+
+def test_restart_mcp_daemon_refuses_invalid_lan_ingress_before_stop(tmp_path: Path) -> None:
+    config = MCPDaemonConfig(
+        state_root=tmp_path,
+        runtime="podman",
+        port=9876,
+        ingress_exposure="lan",
+        ingress_domain="workerbee.localhost",
+    )
+
+    result = restart_mcp_daemon(config, timeout=1)
+
+    assert result["ok"] is False
+    assert result["stop"] is None
+    assert result["start"]["error"]["code"] == "INGRESS_CONFIG_INVALID"
 
 
 def test_start_mcp_daemon_allows_remote_bind_with_explicit_opt_in(

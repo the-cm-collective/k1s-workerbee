@@ -10,6 +10,8 @@ from typing import Any
 
 VALID_RUNTIMES = {"auto", "podman", "docker", "containerd"}
 VALID_CONTAINERD_PRIVILEGES = {"auto", "sudo-helper", "unprivileged"}
+VALID_INGRESS_EXPOSURES = {"loopback", "lan"}
+VALID_INGRESS_DNS_MODES = {"off", "forwarding"}
 
 CONFIG_ENV = "WORKERBEE_CONFIG"
 CONFIG_FILE_NAME = "config.json"
@@ -22,6 +24,15 @@ DEFAULT_KEYS = {
     "mcp_host",
     "mcp_port",
     "mcp_timeout",
+    "ingress_exposure",
+    "ingress_domain",
+    "ingress_bind",
+    "ingress_ca_port",
+    "ingress_dns",
+    "ingress_dns_port",
+    "ingress_dns_bind",
+    "ingress_dns_answer",
+    "ingress_dns_upstream",
 }
 
 
@@ -78,6 +89,15 @@ def _env_defaults() -> dict[str, Any]:
         "WORKERBEE_MCP_HOST": "mcp_host",
         "WORKERBEE_MCP_PORT": "mcp_port",
         "WORKERBEE_MCP_TIMEOUT": "mcp_timeout",
+        "WORKERBEE_INGRESS_EXPOSURE": "ingress_exposure",
+        "WORKERBEE_INGRESS_DOMAIN": "ingress_domain",
+        "WORKERBEE_INGRESS_BIND": "ingress_bind",
+        "WORKERBEE_INGRESS_CA_PORT": "ingress_ca_port",
+        "WORKERBEE_INGRESS_DNS": "ingress_dns",
+        "WORKERBEE_INGRESS_DNS_PORT": "ingress_dns_port",
+        "WORKERBEE_INGRESS_DNS_BIND": "ingress_dns_bind",
+        "WORKERBEE_INGRESS_DNS_ANSWER": "ingress_dns_answer",
+        "WORKERBEE_INGRESS_DNS_UPSTREAM": "ingress_dns_upstream",
     }
     for env_name, key in mapping.items():
         raw = os.getenv(env_name)
@@ -113,5 +133,29 @@ def _validate_config(raw: dict[str, Any]) -> dict[str, Any]:
             value = float(value)
             if value <= 0:
                 raise ValueError(f"invalid WorkerBee MCP timeout default: {value}")
+        elif key == "ingress_exposure":
+            value = str(value)
+            if value not in VALID_INGRESS_EXPOSURES:
+                raise ValueError(f"invalid WorkerBee ingress exposure default: {value}")
+        elif key in {"ingress_domain", "ingress_bind"}:
+            value = str(value)
+        elif key == "ingress_ca_port":
+            value = int(value)
+            if value < 1 or value > 65535:
+                raise ValueError(f"invalid WorkerBee ingress CA port default: {value}")
+        elif key == "ingress_dns":
+            value = str(value).strip().lower()
+            if value in {"1", "true", "yes", "on", "enable", "enabled"}:
+                value = "forwarding"
+            elif value in {"0", "false", "no", "disable", "disabled"}:
+                value = "off"
+            if value not in VALID_INGRESS_DNS_MODES:
+                raise ValueError(f"invalid WorkerBee ingress DNS default: {value}")
+        elif key == "ingress_dns_port":
+            value = int(value)
+            if value < 1 or value > 65535:
+                raise ValueError(f"invalid WorkerBee ingress DNS port default: {value}")
+        elif key in {"ingress_dns_bind", "ingress_dns_answer", "ingress_dns_upstream"}:
+            value = str(value)
         config[key] = value
     return config

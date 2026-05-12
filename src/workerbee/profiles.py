@@ -997,7 +997,7 @@ class K1sProfileRunner:
 
     def _profile_apishim_public_base(self, apishim_port: int) -> str:
         if self.ingress:
-            return self.ingress.url(f"k1s-api.{self.project}.workerbee.localhost", "/").rstrip("/")
+            return self.ingress.url(self.ingress.host("k1s-api"), "/").rstrip("/")
         return f"http://127.0.0.1:{int(apishim_port)}"
 
     def _run_component(
@@ -1235,9 +1235,9 @@ class K1sProfileRunner:
     ) -> dict[str, str]:
         if not self.ingress:
             return {}
-        controller_host = f"k1s.{self.project}.workerbee.localhost"
-        legacy_dash_host = f"k1s-dash.{self.project}.workerbee.localhost"
-        api_host = f"k1s-api.{self.project}.workerbee.localhost"
+        controller_host = self.ingress.host("k1s")
+        legacy_dash_host = self.ingress.host("k1s-dash")
+        api_host = self.ingress.host("k1s-api")
         site = self.ingress.sites_dir / "k1s-profile.caddy"
         site.parent.mkdir(parents=True, exist_ok=True)
         asset_proxy = ""

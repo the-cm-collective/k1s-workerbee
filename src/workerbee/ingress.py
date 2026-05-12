@@ -9,11 +9,13 @@ import socket
 import subprocess
 import time
 from contextlib import suppress
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
+from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
+from workerbee.dns import DEFAULT_DNS_DOMAIN, DNSSettings, resolve_dns_settings
 from workerbee.http import request, request_https_via_loopback, wait_for_http
 from workerbee.ports import choose_port
 from workerbee.runtime_support import (
@@ -22,6 +24,22 @@ from workerbee.runtime_support import (
     runtime_command_args,
     workerbee_runtime_labels,
 )
+
+
+INGRESS_EXPOSURE_LOOPBACK = "loopback"
+INGRESS_EXPOSURE_LAN = "lan"
+VALID_INGRESS_EXPOSURES = {INGRESS_EXPOSURE_LOOPBACK, INGRESS_EXPOSURE_LAN}
+DEFAULT_INGRESS_DOMAIN = "workerbee.localhost"
+DEFAULT_INGRESS_CA_HTTP_PORT = 19080
+
+
+@dataclass(frozen=True, slots=True)
+class IngressSettings:
+    exposure: str = INGRESS_EXPOSURE_LOOPBACK
+    base_domain: str = DEFAULT_INGRESS_DOMAIN
+    bind_host: str = "127.0.0.1"
+    ca_http_port: int = DEFAULT_INGRESS_CA_HTTP_PORT
+    dns: DNSSettings = field(default_factory=DNSSettings)
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,19 +54,34 @@ class ProjectIngressConfig:
     ca_bundle: Path
     global_dashboard_url: str
     dashboard_port: int = 0
+    exposure: str = INGRESS_EXPOSURE_LOOPBACK
+    base_domain: str = DEFAULT_INGRESS_DOMAIN
+    bind_host: str = "127.0.0.1"
+    ca_download_url: str | None = None
+    ca_http_port: int = DEFAULT_INGRESS_CA_HTTP_PORT
+    dns: dict[str, Any] = field(default_factory=dict)
 
     def url(self, host: str, path: str = "/") -> str:
         normalized = path if path.startswith("/") else f"/{path}"
         return f"https://{host}:{self.https_port}{normalized}"
 
+    def host(self, prefix: str | None = None) -> str:
+        return f"{prefix}.{self.domain}" if prefix else self.domain
+
     def public_dict(self) -> dict[str, Any]:
         return {
             "enabled": True,
+            "exposure": self.exposure,
+            "base_domain": self.base_domain,
             "domain": self.domain,
+            "bind_host": self.bind_host,
             "https_port": self.https_port,
             "caddy_container": self.caddy_container,
             "caddy_sites": str(self.sites_dir),
             "ca_bundle": str(self.ca_bundle),
+            "ca_download_url": self.ca_download_url,
+            "ca_http_port": self.ca_http_port,
+            "dns": dict(self.dns),
             "global_dashboard_url": self.global_dashboard_url,
             "dashboard_port": self.dashboard_port,
         }
@@ -66,11 +99,88 @@ class GlobalIngressInfo:
     ca_bundle: str
     localhost_dns_ok: bool
     runtime: str
+    exposure: str = INGRESS_EXPOSURE_LOOPBACK
+    base_domain: str = DEFAULT_INGRESS_DOMAIN
+    bind_host: str = "127.0.0.1"
+    dashboard_dns_ok: bool = True
+    ca_download_url: str | None = None
+    ca_sha256: str | None = None
+    ca_http_port: int = DEFAULT_INGRESS_CA_HTTP_PORT
+    dns: dict[str, Any] = field(default_factory=dict)
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)
         data["ca_ready"] = _safe_is_file(Path(self.ca_bundle))
         return data
+
+
+def resolve_ingress_settings(
+    *,
+    exposure: str | None = None,
+    base_domain: str | None = None,
+    bind_host: str | None = None,
+    ca_http_port: int | str | None = None,
+    dns_mode: str | None = None,
+    dns_port: int | str | None = None,
+    dns_bind: str | None = None,
+    dns_answer: str | None = None,
+    dns_upstreams: list[str] | tuple[str, ...] | str | None = None,
+) -> IngressSettings:
+    selected_exposure = (
+        exposure or os.getenv("WORKERBEE_INGRESS_EXPOSURE") or INGRESS_EXPOSURE_LOOPBACK
+    )
+    selected_exposure = selected_exposure.strip().lower()
+    if selected_exposure not in VALID_INGRESS_EXPOSURES:
+        expected = ", ".join(sorted(VALID_INGRESS_EXPOSURES))
+        raise ValueError(
+            f"invalid WorkerBee ingress exposure: {selected_exposure}; expected {expected}"
+        )
+    domain_raw = base_domain
+    if domain_raw is None:
+        domain_raw = os.getenv("WORKERBEE_INGRESS_DOMAIN")
+    if domain_raw in (None, ""):
+        domain_raw = (
+            DEFAULT_DNS_DOMAIN
+            if selected_exposure == INGRESS_EXPOSURE_LAN and _dns_enabled(dns_mode)
+            else _default_lan_domain()
+            if selected_exposure == INGRESS_EXPOSURE_LAN
+            else DEFAULT_INGRESS_DOMAIN
+        )
+    selected_domain = _normalize_domain(str(domain_raw))
+    if selected_exposure == INGRESS_EXPOSURE_LAN and (
+        selected_domain == "localhost" or selected_domain.endswith(".localhost")
+    ):
+        raise ValueError("LAN ingress requires a non-.localhost domain")
+    selected_bind = bind_host
+    if selected_bind is None:
+        selected_bind = os.getenv("WORKERBEE_INGRESS_BIND")
+    if selected_bind in (None, ""):
+        selected_bind = "0.0.0.0" if selected_exposure == INGRESS_EXPOSURE_LAN else "127.0.0.1"
+    selected_bind = str(selected_bind).strip()
+    if not selected_bind:
+        raise ValueError("WorkerBee ingress bind address cannot be empty")
+    selected_port = ca_http_port
+    if selected_port is None:
+        selected_port = _env_int("WORKERBEE_INGRESS_CA_PORT")
+    port = int(selected_port or DEFAULT_INGRESS_CA_HTTP_PORT)
+    if port < 1 or port > 65535:
+        raise ValueError(f"invalid WorkerBee ingress CA HTTP port: {port}")
+    dns = resolve_dns_settings(
+        exposure=selected_exposure,
+        bind_host=selected_bind,
+        mode=dns_mode,
+        port=dns_port,
+        dns_bind=dns_bind,
+        answer=dns_answer,
+        upstreams=dns_upstreams,
+    )
+    return IngressSettings(
+        exposure=selected_exposure,
+        base_domain=selected_domain,
+        bind_host=selected_bind,
+        ca_http_port=port,
+        dns=dns,
+    )
 
 
 class GlobalIngress:
@@ -81,9 +191,17 @@ class GlobalIngress:
         runtime: str,
         https_port: int | None = None,
         dashboard_port: int | None = None,
+        ingress_settings: IngressSettings | None = None,
+        dns_status: dict[str, Any] | None = None,
     ) -> None:
         self.state_root = state_root.resolve()
         self.runtime = runtime
+        self.ingress_settings = ingress_settings or resolve_ingress_settings()
+        self.exposure = self.ingress_settings.exposure
+        self.base_domain = self.ingress_settings.base_domain
+        self.bind_host = self.ingress_settings.bind_host
+        self.ca_http_port = self.ingress_settings.ca_http_port
+        self.dns_status = dns_status
         self.global_dir = self.state_root / "global"
         self.projects_dir = self.state_root / "projects"
         self.caddy_data = self.global_dir / "caddy-data"
@@ -99,7 +217,14 @@ class GlobalIngress:
                 end=19543,
             )
         self.dashboard_port = dashboard_port or int(existing.get("dashboard_port") or 0)
-        self.dashboard_url = f"https://dashboard.workerbee.localhost:{self.https_port}/"
+        self.dashboard_host = f"dashboard.{self.base_domain}"
+        self.ca_host = f"ca.{self.base_domain}"
+        self.dashboard_url = f"https://{self.dashboard_host}:{self.https_port}/"
+        self.ca_download_url = (
+            f"http://{self.ca_host}:{self.ca_http_port}/workerbee-ca.crt"
+            if self.exposure == INGRESS_EXPOSURE_LAN
+            else None
+        )
         self.container = existing.get("caddy_container") or _container_name(self.state_root)
         if self.runtime == CONTAINERD_RUNTIME:
             self.host_alias = "127.0.0.1"
@@ -181,7 +306,7 @@ class GlobalIngress:
         }
 
     def project_config(self, project: str) -> ProjectIngressConfig:
-        domain = f"{project}.workerbee.localhost"
+        domain = f"{project}.{self.base_domain}"
         sites_dir = self.projects_dir / project / "caddy"
         sites_dir.mkdir(parents=True, exist_ok=True)
         return ProjectIngressConfig(
@@ -195,6 +320,12 @@ class GlobalIngress:
             ca_bundle=self.ca_bundle,
             global_dashboard_url=self.dashboard_url,
             dashboard_port=self.dashboard_port,
+            exposure=self.exposure,
+            base_domain=self.base_domain,
+            bind_host=self.bind_host,
+            ca_download_url=self.ca_download_url,
+            ca_http_port=self.ca_http_port,
+            dns=self._dns_public_dict(),
         )
 
     @property
@@ -215,9 +346,25 @@ class GlobalIngress:
             caddy_container=self.container,
             caddy_data=str(self.caddy_data),
             ca_bundle=str(self.ca_bundle),
-            localhost_dns_ok=_localhost_dns_ok(),
+            localhost_dns_ok=_dns_ok("dashboard.workerbee.localhost"),
             runtime=self.runtime,
+            exposure=self.exposure,
+            base_domain=self.base_domain,
+            bind_host=self.bind_host,
+            dashboard_dns_ok=_dns_ok(self.dashboard_host),
+            ca_download_url=self.ca_download_url,
+            ca_sha256=_sha256(self.ca_bundle) if self.ca_bundle.is_file() else None,
+            ca_http_port=self.ca_http_port,
+            dns=self._dns_public_dict(),
         )
+
+    def _dns_public_dict(self) -> dict[str, Any]:
+        if self.dns_status is not None:
+            return dict(self.dns_status)
+        data = self.ingress_settings.dns.public_dict()
+        if self.ingress_settings.dns.enabled:
+            data["base_domain"] = self.base_domain
+        return data
 
     def _load_existing(self) -> dict[str, Any]:
         if not self.info_file.is_file():
@@ -233,15 +380,29 @@ class GlobalIngress:
             f"import /etc/caddy/projects/{project}/caddy/*.caddy"
             for project in sorted(set(projects))
         )
+        containerd_bind = (
+            f"default_bind {self.bind_host}" if self.runtime == CONTAINERD_RUNTIME else ""
+        )
+        ca_site = ""
+        if self.exposure == INGRESS_EXPOSURE_LAN:
+            ca_site = f"""
+http://{self.ca_host}:{self.ca_http_port} {{
+    @workerbee_ca path /workerbee-ca.crt /workerbee-ca.sha256
+    handle @workerbee_ca {{
+        reverse_proxy {self.host_alias}:{self.dashboard_port}
+    }}
+    respond "not found\\n" 404
+}}
+"""
         self.caddy_file.write_text(
             f"""# Generated by WorkerBee. Do not edit while WorkerBee MCP is running.
 {{
     auto_https disable_redirects
     {f"https_port {self.https_port}" if self.runtime == CONTAINERD_RUNTIME else ""}
-    {"default_bind 127.0.0.1" if self.runtime == CONTAINERD_RUNTIME else ""}
+    {containerd_bind}
 }}
 
-https://dashboard.workerbee.localhost {{
+https://{self.dashboard_host} {{
     log {{
         output stdout
         format console
@@ -251,6 +412,7 @@ https://dashboard.workerbee.localhost {{
     reverse_proxy {self.host_alias}:{self.dashboard_port}
 }}
 
+{ca_site}
 {imports}
 """,
             encoding="utf-8",
@@ -285,7 +447,9 @@ https://dashboard.workerbee.localhost {{
         else:
             if self.runtime == "podman" and _podman_is_rootless():
                 run_args.extend(["--network", "slirp4netns:allow_host_loopback=true"])
-            run_args.extend(["-p", f"127.0.0.1:{self.https_port}:443"])
+            run_args.extend(["-p", f"{self.bind_host}:{self.https_port}:443"])
+            if self.exposure == INGRESS_EXPOSURE_LAN:
+                run_args.extend(["-p", f"{self.bind_host}:{self.ca_http_port}:{self.ca_http_port}"])
         run_args.extend(
             [
                 "-v",
@@ -337,7 +501,10 @@ https://dashboard.workerbee.localhost {{
                 verify_tls=False,
                 ok_statuses={200},
             )
-        _wait_for_tcp("127.0.0.1", self.https_port, timeout_seconds=20)
+        probe_host = _bind_probe_host(self.bind_host)
+        _wait_for_tcp(probe_host, self.https_port, timeout_seconds=20)
+        if self.exposure == INGRESS_EXPOSURE_LAN:
+            _wait_for_tcp(probe_host, self.ca_http_port, timeout_seconds=20)
 
     def _export_ca_bundle(self) -> None:
         proc = subprocess.run(
@@ -545,7 +712,11 @@ def _global_dashboard_health_probe(info: dict[str, Any]) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - status probe only
         primary_error = str(exc)
         primary_status = None
-    fallback = _loopback_dashboard_health_probe(parsed, ca_ready=ca_ready)
+    fallback = _loopback_dashboard_health_probe(
+        parsed,
+        ca_ready=ca_ready,
+        connect_host=_bind_probe_host(str(info.get("bind_host") or "127.0.0.1")),
+    )
     if fallback is not None:
         fallback["primary_url"] = health_url
         if primary_error is not None:
@@ -565,10 +736,13 @@ def _loopback_dashboard_health_probe(
     parsed: SplitResult,
     *,
     ca_ready: bool,
+    connect_host: str = "127.0.0.1",
 ) -> dict[str, Any] | None:
     if parsed.scheme != "https" or not parsed.port:
         return None
-    health_url = urlunsplit((parsed.scheme, f"127.0.0.1:{parsed.port}", "/healthz", "", ""))
+    health_url = urlunsplit(
+        (parsed.scheme, _host_port(connect_host, parsed.port), "/healthz", "", "")
+    )
     try:
         result = request_https_via_loopback(
             health_url,
@@ -601,9 +775,72 @@ def _container_name(state_root: Path) -> str:
     return f"workerbee-caddy-{digest}"
 
 
-def _localhost_dns_ok() -> bool:
+def _normalize_domain(raw: str) -> str:
+    domain = raw.strip().strip(".").lower()
+    if not domain:
+        raise ValueError("WorkerBee ingress domain cannot be empty")
+    if "://" in domain or "/" in domain or ":" in domain or any(ch.isspace() for ch in domain):
+        raise ValueError(f"invalid WorkerBee ingress domain: {raw}")
+    return domain
+
+
+def _default_lan_domain() -> str:
+    lan_ip = _detect_lan_ip()
+    if not lan_ip:
+        raise ValueError(
+            "could not determine a LAN IP for WorkerBee ingress; pass --ingress-domain"
+        )
+    return f"{lan_ip.replace('.', '-')}.sslip.io"
+
+
+def _dns_enabled(mode: str | None) -> bool:
+    selected = mode
+    if selected is None:
+        selected = os.getenv("WORKERBEE_INGRESS_DNS")
+    selected = str(selected or "").strip().lower()
+    return selected in {"1", "true", "yes", "on", "enable", "enabled", "forwarding"}
+
+
+def _detect_lan_ip() -> str | None:
+    candidates: list[str] = []
+    with suppress(OSError):
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.connect(("8.8.8.8", 80))
+            candidates.append(str(sock.getsockname()[0]))
+    with suppress(OSError):
+        for family, _type, _proto, _canon, address in socket.getaddrinfo(
+            socket.gethostname(),
+            None,
+            family=socket.AF_INET,
+            type=socket.SOCK_DGRAM,
+        ):
+            if family == socket.AF_INET and address:
+                candidates.append(str(address[0]))
+    for candidate in candidates:
+        with suppress(ValueError):
+            parsed = ip_address(candidate)
+            if parsed.version == 4 and not parsed.is_loopback and not parsed.is_unspecified:
+                return candidate
+    return None
+
+
+def _bind_probe_host(bind_host: str) -> str:
+    if bind_host in {"", "0.0.0.0"}:
+        return "127.0.0.1"
+    if bind_host == "::":
+        return "::1"
+    return bind_host
+
+
+def _host_port(host: str, port: int) -> str:
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]:{port}"
+    return f"{host}:{port}"
+
+
+def _dns_ok(host: str) -> bool:
     try:
-        socket.getaddrinfo("dashboard.workerbee.localhost", 443, type=socket.SOCK_STREAM)
+        socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
         return True
     except OSError:
         return False
@@ -636,6 +873,10 @@ def _env_int(name: str) -> int | None:
         return int(raw)
     except ValueError:
         return None
+
+
+def _sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def _safe_is_file(path: Path) -> bool:
