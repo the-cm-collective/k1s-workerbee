@@ -963,16 +963,19 @@ def test_global_dashboard_static_background_asset_is_packaged() -> None:
 
     assert asset is not None
     body, content_type = asset
-    assert content_type == "image/png"
-    assert body.startswith(b"\x89PNG\r\n\x1a\n")
+    assert content_type == "image/webp"
+    assert body.startswith(b"RIFF")
+    assert body[8:12] == b"WEBP"
 
 
 def test_global_dashboard_static_background_aliases_k1s_asset_paths() -> None:
     canonical = _dashboard_static_asset(DASHBOARD_BACKGROUND_PATH)
+    png = _dashboard_static_asset("/static/dash-assets/page-background-1920x1080.png")
     large = _dashboard_static_asset("/static/dash-assets/page-background-3840x2160.png")
     graph = _dashboard_static_asset("/static/dash-assets/system-graph-background-1920x1080.png")
 
     assert canonical is not None
+    assert png == canonical
     assert large == canonical
     assert graph == canonical
 

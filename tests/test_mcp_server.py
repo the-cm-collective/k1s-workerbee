@@ -9,6 +9,8 @@ import pytest
 from workerbee import mcp_server
 from workerbee.contract import WorkerBeeError
 
+REMOTE_BIND_HOST = "0.0.0.0"  # noqa: S104
+
 
 def test_serve_mcp_refuses_remote_bind_without_opt_in(tmp_path) -> None:
     with pytest.raises(WorkerBeeError) as exc:
@@ -16,7 +18,7 @@ def test_serve_mcp_refuses_remote_bind_without_opt_in(tmp_path) -> None:
             project="default",
             runtime="podman",
             state_root=tmp_path,
-            host="0.0.0.0",
+            host=REMOTE_BIND_HOST,
             port=9876,
         )
 
