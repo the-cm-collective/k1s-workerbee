@@ -33,6 +33,59 @@ base=(
   --state-root "$state_root"
 )
 
+maybe_refresh_sudo_for_command() {
+  local arg
+  local -a positional=()
+  local previous_consumes_value=0
+
+  for arg in "$@"; do
+    if (( previous_consumes_value )); then
+      previous_consumes_value=0
+      continue
+    fi
+    case "$arg" in
+      --project|--state-root|--containerd-privilege|--runtime|--config|--mcp-host|--mcp-port|--mcp-timeout)
+        previous_consumes_value=1
+        ;;
+      --project=*|--state-root=*|--containerd-privilege=*|--runtime=*|--config=*|--mcp-host=*|--mcp-port=*|--mcp-timeout=*)
+        ;;
+      --json|-*)
+        ;;
+      *)
+        positional+=("$arg")
+        ;;
+    esac
+  done
+
+  case "${positional[0]:-}" in
+    profile)
+      case "${positional[1]:-}" in
+        start|stop)
+          refresh_sudo
+          ;;
+      esac
+      ;;
+    validate)
+      refresh_sudo
+      ;;
+    manifest)
+      if [[ "${positional[1]:-}" == "deploy-local" ]]; then
+        refresh_sudo
+      fi
+      ;;
+    cleanup)
+      refresh_sudo
+      ;;
+    containerd-privilege)
+      case "${positional[1]:-}" in
+        stop-helper|revoke-acl-leases)
+          refresh_sudo
+          ;;
+      esac
+      ;;
+  esac
+}
+
 case "${1:-}" in
   mcp-start)
     shift
@@ -54,6 +107,7 @@ case "${1:-}" in
     exec "${base[@]}" --json mcp status --host "$host" --port "$port" "$@"
     ;;
   *)
+    maybe_refresh_sudo_for_command "$@"
     exec "${base[@]}" "$@"
     ;;
 esac

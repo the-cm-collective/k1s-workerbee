@@ -21,8 +21,10 @@
         let
           pkgs = import nixpkgs { inherit system; };
           linuxPackages = nixpkgs.lib.optionals pkgs.stdenv.isLinux [
+            pkgs.buildkit
             pkgs.cni-plugins
             pkgs.nerdctl
+            pkgs.slirp4netns
           ];
           runtimeLibs = [
             pkgs.stdenv.cc.cc.lib

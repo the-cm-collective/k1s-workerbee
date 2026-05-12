@@ -178,8 +178,9 @@ workerbee doctor
 ```
 
 The dev shell provides Python, `uv`, `ruff`, `node`, `jq`, `imagemagick`, and on
-Linux, `nerdctl` plus CNI plugins for direct containerd development. Podman or
-Docker daemon setup remains a host prerequisite for the default runtime path.
+Linux, `nerdctl`, `buildctl`, `slirp4netns`, and CNI plugins for direct
+containerd development. Podman or Docker daemon setup remains a host
+prerequisite for the default runtime path.
 If `k1s-workerbee-runtime` is already available from your configured package
 index, the local wheelhouse build and `--find-links` option can be omitted.
 
@@ -198,8 +199,12 @@ The helper defaults to `/tmp/workerbee-containerd-verify`,
 normal WorkerBee arguments after applying the direct containerd defaults:
 
 ```bash
-scripts/dev/wb-containerd --project k1s-dev profile list
+scripts/dev/wb-containerd --project wb014 profile list
 ```
+
+Use a short explicit project for profile validation, such as `wb014` or
+`k1sdev`. Derived Git worktree project names can be too long for profile DNS
+names and container labels.
 
 For an installed/user-level WorkerBee, persist the same defaults once and then
 use the normal `workerbee` command:
@@ -490,22 +495,22 @@ No k1s profile starts a k1s controller, API shim, etcd, NATS, or dashboard as a 
 
 ```bash
 workerbee --runtime containerd profile list
-workerbee --runtime containerd --project k1s-dev profile start --profile k1s-ha-min --k1s-root ../k1s
-workerbee --runtime containerd --project k1s-dev profile status
-workerbee --runtime containerd --project k1s-dev validate --scenario k1s-profile --profile k1s-ha-min --k1s-root ../k1s
-workerbee --runtime containerd --project k1s-dev profile stop --purge
+workerbee --runtime containerd --project wb014 profile start --profile k1s-ha-min --k1s-root ../k1s
+workerbee --runtime containerd --project wb014 profile status
+workerbee --runtime containerd --project wb014 validate --scenario k1s-profile --profile k1s-ha-min --k1s-root ../k1s
+workerbee --runtime containerd --project wb014 profile stop --purge
 ```
 
-When run through the MCP daemon, profile controller/API ingress is published under the project namespace, for example `https://k1s.k1s-dev.workerbee.localhost:19443/dashboard` and `https://k1s-api.k1s-dev.workerbee.localhost:19443/`.
+When run through the MCP daemon, profile controller/API ingress is published under the project namespace, for example `https://k1s.wb014.workerbee.localhost:19443/dashboard` and `https://k1s-api.wb014.workerbee.localhost:19443/`.
 
 The canonical profile controller URL is now `https://k1s.<project>.workerbee.localhost:19443/`.
 It exposes dashboard and docs paths such as:
 
 ```text
-https://k1s.k1s-dev.workerbee.localhost:19443/dashboard
-https://k1s.k1s-dev.workerbee.localhost:19443/docs
-https://k1s.k1s-dev.workerbee.localhost:19443/redoc
-https://k1s-api.k1s-dev.workerbee.localhost:19443/
+https://k1s.wb014.workerbee.localhost:19443/dashboard
+https://k1s.wb014.workerbee.localhost:19443/docs
+https://k1s.wb014.workerbee.localhost:19443/redoc
+https://k1s-api.wb014.workerbee.localhost:19443/
 ```
 
 `k1s-dash.<project>.workerbee.localhost` remains a compatibility alias for the
@@ -520,14 +525,14 @@ bundle, and deploy it into a running profile:
 
 ```bash
 workerbee --runtime containerd --containerd-privilege sudo-helper mcp start
-workerbee --runtime containerd --project k1s-dev profile start --profile k1s-ha-min --k1s-root ../k1s
-workerbee --runtime containerd --project k1s-dev manifest prepare --name realtime --template realtime-web-db
-workerbee --runtime containerd --project k1s-dev manifest deploy-local \
+workerbee --runtime containerd --project wb014 profile start --profile k1s-ha-min --k1s-root ../k1s
+workerbee --runtime containerd --project wb014 manifest prepare --name realtime --template realtime-web-db
+workerbee --runtime containerd --project wb014 manifest deploy-local \
   --target profile \
   --profile k1s-ha-min \
   --stage realtime \
   --k1s-root ../k1s
-workerbee --runtime containerd --project k1s-dev profile status
+workerbee --runtime containerd --project wb014 profile status
 ```
 
 The MCP equivalents are `workerbee_v1_manifest_prepare`,
@@ -536,7 +541,7 @@ The MCP equivalents are `workerbee_v1_manifest_prepare`,
 For a single end-to-end validation, use:
 
 ```bash
-workerbee --runtime containerd --project k1s-dev validate \
+workerbee --runtime containerd --project wb014 validate \
   --scenario profile-workload \
   --profile k1s-ha-min \
   --k1s-root ../k1s

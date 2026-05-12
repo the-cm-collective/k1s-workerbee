@@ -50,10 +50,12 @@ scripts/dev/wb-containerd mcp-restart
 scripts/dev/wb-containerd mcp-status
 ```
 
-For nested k1s profile work, use an explicit stable project and k1s root:
+For nested k1s profile work, use a short explicit stable project and k1s root.
+Keep the project around 12 characters or fewer, such as `wb014` or `k1sdev`,
+so generated profile DNS names and container labels stay valid:
 
 ```bash
-scripts/dev/wb-containerd --project k1s-dev profile start \
+scripts/dev/wb-containerd --project wb014 profile start \
   --profile k1s-dev-min-sqlite \
   --k1s-root ../k1s
 ```
@@ -62,14 +64,14 @@ For installed WorkerBee, the equivalent explicit form is:
 
 ```bash
 workerbee --runtime containerd --containerd-privilege sudo-helper \
-  --project k1s-dev profile start \
+  --project wb014 profile start \
   --profile k1s-dev-min-sqlite \
   --k1s-root ../k1s
 ```
 
 You can set `WORKERBEE_K1S_ROOT=/absolute/path/to/k1s` instead of passing
-`--k1s-root`, but the project value should still be explicit for shared dev
-lanes.
+`--k1s-root`, but the project value should still be short and explicit for
+shared dev lanes.
 
 ## Profile Selection
 
@@ -97,8 +99,8 @@ For k1s behavior work:
 cd ../k1s
 python -m pytest tests/unit -q
 cd ../k1s-workerbee
-scripts/dev/wb-containerd --project k1s-dev profile stop
-scripts/dev/wb-containerd --project k1s-dev profile start \
+scripts/dev/wb-containerd --project wb014 profile stop
+scripts/dev/wb-containerd --project wb014 profile start \
   --profile k1s-dev-min-sqlite \
   --k1s-root ../k1s
 ```
@@ -106,18 +108,18 @@ scripts/dev/wb-containerd --project k1s-dev profile start \
 For staged workload validation through the nested profile:
 
 ```bash
-scripts/dev/wb-containerd --project k1s-dev manifest prepare \
+scripts/dev/wb-containerd --project wb014 manifest prepare \
   --name realtime \
   --template realtime-web-db
 
-scripts/dev/wb-containerd --project k1s-dev manifest deploy-local \
+scripts/dev/wb-containerd --project wb014 manifest deploy-local \
   --target profile \
   --profile k1s-ha-min \
   --k1s-root ../k1s \
   --stage realtime
 
-scripts/dev/wb-containerd --project k1s-dev profile status --k1s-root ../k1s
-scripts/dev/wb-containerd --project k1s-dev logs \
+scripts/dev/wb-containerd --project wb014 profile status --k1s-root ../k1s
+scripts/dev/wb-containerd --project wb014 logs \
   --target profile \
   --profile k1s-ha-min \
   --app frontend
@@ -126,7 +128,7 @@ scripts/dev/wb-containerd --project k1s-dev logs \
 For one-command end-to-end validation:
 
 ```bash
-scripts/dev/wb-containerd --project k1s-dev validate \
+scripts/dev/wb-containerd --project wb014 validate \
   --scenario profile-workload \
   --profile k1s-ha-min \
   --k1s-root ../k1s
@@ -148,7 +150,7 @@ Kubernetes, and Helm artifacts.
   rewritten once created:
 
   ```bash
-  scripts/dev/wb-containerd --project k1s-dev profile stop --purge
+  scripts/dev/wb-containerd --project wb014 profile stop --purge
   ```
 
 - Keep generated stages, helper scripts, profile databases, logs, and exported
