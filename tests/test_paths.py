@@ -230,6 +230,7 @@ def test_supervisor_stack_ingress_publishes_dashboard_and_apishim(
     assert refreshed.ingress_urls["api_healthz"] == (
         "https://k1s-api.demo.workerbee.localhost:19443/healthz"
     )
+    assert env["AE_CADDY_PREFER_HOST_PORT_UPSTREAMS"] == "1"
     assert env["AE_APISHIM_PUBLIC_BASE"] == "https://k1s.demo.workerbee.localhost:19443"
     assert sup._stack_requires_ingress_restart(refreshed) is False  # noqa: SLF001
 

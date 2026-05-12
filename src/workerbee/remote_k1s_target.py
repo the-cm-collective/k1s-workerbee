@@ -295,6 +295,7 @@ class RemoteK1sTarget:
                     "AE_CADDY_CONTAINER": self.ingress.caddy_container,
                     "AE_CADDY_FILE": self.ingress.caddy_file,
                     "AE_CADDY_HOST_ALIAS": self.ingress.host_alias,
+                    "AE_CADDY_PREFER_HOST_PORT_UPSTREAMS": "1",
                     "AE_CADDY_RELOAD_TIMEOUT": "10",
                     "WORKERBEE_CONTAINERD_SYSTEM_CONTAINER": self.ingress.caddy_container,
                 }

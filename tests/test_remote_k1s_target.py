@@ -55,6 +55,7 @@ def test_remote_k1s_target_writes_dashboard_ingress_site(tmp_path: Path) -> None
     assert urls["api_healthz"] == (
         "https://k1s-remote-api.remote-app.workerbee.localhost:19443/healthz"
     )
+    assert target._common_env()["AE_CADDY_PREFER_HOST_PORT_UPSTREAMS"] == "1"  # noqa: SLF001
 
 
 def test_remote_k1s_target_mounts_external_helper_socket(

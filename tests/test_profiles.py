@@ -371,6 +371,7 @@ def test_profile_controller_dashboard_uses_public_apishim_ingress(
     assert env["AE_APISHIM_SERVER"] == f"http://{apishim['name']}:8445"
     assert env["AE_APISHIM_PUBLIC_BASE"] == "https://k1s.demo.workerbee.localhost:19443"
     assert env["AE_DASHBOARD_BOOTSTRAP_TOKEN"] == env["AE_API_ADMIN_TOKEN"]
+    assert env["AE_CADDY_PREFER_HOST_PORT_UPSTREAMS"] == "1"
 
 
 def test_profile_connection_uses_internal_loopback_and_keeps_public_urls(
