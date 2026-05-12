@@ -5,6 +5,8 @@ from pathlib import Path
 
 from workerbee.config import cli_defaults, default_config_file, load_cli_config, save_cli_config
 
+LAN_BIND_HOST = "0.0.0.0"  # noqa: S104 - explicit LAN bind fixture
+
 
 def test_cli_config_uses_xdg_config_home(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "config"))
@@ -25,7 +27,7 @@ def test_cli_config_validates_and_normalizes_values(tmp_path: Path) -> None:
             "mcp_timeout": "90",
             "ingress_exposure": "lan",
             "ingress_domain": "workerbee.home.arpa",
-            "ingress_bind": "0.0.0.0",
+            "ingress_bind": LAN_BIND_HOST,
             "ingress_ca_port": "19080",
             "ingress_dns": "forwarding",
             "ingress_dns_port": "1053",
@@ -46,7 +48,7 @@ def test_cli_config_validates_and_normalizes_values(tmp_path: Path) -> None:
         "mcp_timeout": 90.0,
         "ingress_exposure": "lan",
         "ingress_domain": "workerbee.home.arpa",
-        "ingress_bind": "0.0.0.0",
+        "ingress_bind": LAN_BIND_HOST,
         "ingress_ca_port": 19080,
         "ingress_dns": "forwarding",
         "ingress_dns_port": 1053,

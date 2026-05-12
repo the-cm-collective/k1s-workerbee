@@ -290,10 +290,9 @@ def dns_port_available(settings: DNSSettings) -> dict[str, Any]:
 
 def detect_lan_ip() -> str | None:
     candidates: list[str] = []
-    with suppress(OSError):
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.connect(("8.8.8.8", 80))
-            candidates.append(str(sock.getsockname()[0]))
+    with suppress(OSError), socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+        sock.connect(("8.8.8.8", 80))
+        candidates.append(str(sock.getsockname()[0]))
     with suppress(OSError):
         for family, _type, _proto, _canon, address in socket.getaddrinfo(
             socket.gethostname(),
