@@ -17,6 +17,8 @@ from workerbee.mcp_daemon import (
     stop_mcp_daemon,
 )
 
+REMOTE_BIND_HOST = "0.0.0.0"  # noqa: S104
+
 
 def test_mcp_daemon_status_reports_stale_metadata(
     tmp_path: Path,
@@ -160,7 +162,12 @@ def test_start_mcp_daemon_refuses_remote_bind_without_opt_in(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    config = MCPDaemonConfig(state_root=tmp_path, runtime="podman", host="0.0.0.0", port=9876)
+    config = MCPDaemonConfig(
+        state_root=tmp_path,
+        runtime="podman",
+        host=REMOTE_BIND_HOST,
+        port=9876,
+    )
 
     def fail_popen(*_args, **_kwargs):
         raise AssertionError("daemon should not spawn for remote MCP bind without opt-in")
@@ -206,7 +213,7 @@ def test_start_mcp_daemon_allows_remote_bind_with_explicit_opt_in(
     config = MCPDaemonConfig(
         state_root=tmp_path,
         runtime="podman",
-        host="0.0.0.0",
+        host=REMOTE_BIND_HOST,
         port=9876,
         allow_remote_mcp=True,
     )
@@ -255,7 +262,7 @@ def test_start_mcp_daemon_uses_effective_remote_mcp_opt_in(
     config = MCPDaemonConfig(
         state_root=tmp_path,
         runtime="podman",
-        host="0.0.0.0",
+        host=REMOTE_BIND_HOST,
         port=9876,
     )
     result = start_mcp_daemon(config, timeout=1)
@@ -301,7 +308,12 @@ def test_restart_mcp_daemon_refuses_remote_bind_before_stop(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    config = MCPDaemonConfig(state_root=tmp_path, runtime="podman", host="0.0.0.0", port=9876)
+    config = MCPDaemonConfig(
+        state_root=tmp_path,
+        runtime="podman",
+        host=REMOTE_BIND_HOST,
+        port=9876,
+    )
 
     def fail_stop(*_args, **_kwargs):
         raise AssertionError("restart must not stop an existing daemon before bind guard passes")
@@ -319,7 +331,12 @@ def test_status_and_stop_are_not_blocked_by_remote_bind_guard(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    config = MCPDaemonConfig(state_root=tmp_path, runtime="podman", host="0.0.0.0", port=9876)
+    config = MCPDaemonConfig(
+        state_root=tmp_path,
+        runtime="podman",
+        host=REMOTE_BIND_HOST,
+        port=9876,
+    )
     monkeypatch.setattr("workerbee.mcp_daemon._orphan_mcp_pids", lambda _config: [])
     monkeypatch.setattr("workerbee.mcp_daemon._ensure_stop_privilege", lambda _config: {})
     monkeypatch.setattr(
@@ -332,7 +349,7 @@ def test_status_and_stop_are_not_blocked_by_remote_bind_guard(
     status = mcp_daemon_status(config)
     stopped = stop_mcp_daemon(config)
 
-    assert status["host"] == "0.0.0.0"
+    assert status["host"] == REMOTE_BIND_HOST
     assert status["running"] is False
     assert stopped["running"] is False
 

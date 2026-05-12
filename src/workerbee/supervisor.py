@@ -829,6 +829,13 @@ https://{controller_host}, https://{legacy_dash_host} {{
     header -Strict-Transport-Security
     tls internal
 {asset_proxy.rstrip()}
+    handle /api/v1* {{
+        reverse_proxy https://{self.ingress.host_alias}:{apishim_port} {{
+            transport http {{
+                tls_insecure_skip_verify
+            }}
+        }}
+    }}
     handle {{
         reverse_proxy {self.ingress.host_alias}:{controller_port}
     }}
@@ -1216,7 +1223,7 @@ https://{api_host} {{
                 controller_port=info.controller_port,
                 apishim_port=info.apishim_port,
             )
-            public = urls.get("api") or urls.get("apishim")
+            public = urls.get("controller") or urls.get("dashboard") or urls.get("api")
             if public:
                 return public.rstrip("/")
         return info.apishim_url.rstrip("/")

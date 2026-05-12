@@ -307,6 +307,8 @@ def test_existing_profile_start_refreshes_ingress_routes(
     route_text = route.read_text(encoding="utf-8")
     assert "handle /static/dash-assets/*" in route_text
     assert "reverse_proxy host.docker.internal:18090" in route_text
+    assert "handle /api/v1*" in route_text
+    assert "reverse_proxy host.docker.internal:18645" in route_text
 
 
 def test_profile_controller_dashboard_uses_public_apishim_ingress(
@@ -367,7 +369,7 @@ def test_profile_controller_dashboard_uses_public_apishim_ingress(
         if component["role"] == "apishim"
     )
     assert env["AE_APISHIM_SERVER"] == f"http://{apishim['name']}:8445"
-    assert env["AE_APISHIM_PUBLIC_BASE"] == "https://k1s-api.demo.workerbee.localhost:19443"
+    assert env["AE_APISHIM_PUBLIC_BASE"] == "https://k1s.demo.workerbee.localhost:19443"
     assert env["AE_DASHBOARD_BOOTSTRAP_TOKEN"] == env["AE_API_ADMIN_TOKEN"]
 
 

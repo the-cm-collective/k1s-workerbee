@@ -60,7 +60,7 @@ from workerbee.supervisor import WorkerBeeSupervisor, project_slug
 
 T = TypeVar("T")
 
-DASHBOARD_BACKGROUND_PATH = "/static/dash-assets/page-background-1920x1080.png"
+DASHBOARD_BACKGROUND_PATH = "/static/dash-assets/page-background-1920x1080.webp"
 DASHBOARD_LOGO_PATH = "/static/dash-assets/k1s-logo-32.png"
 _DASHBOARD_ACTIONS = {
     "start_projects",
@@ -3564,21 +3564,24 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
 def _dashboard_static_asset(path: str) -> tuple[bytes, str] | None:
     background_aliases = {
         DASHBOARD_BACKGROUND_PATH,
+        "/static/dash-assets/page-background-1920x1080.png",
         "/static/dash-assets/page-background-3840x2160.png",
         "/static/dash-assets/page-background-tile-1024.png",
         "/static/dash-assets/system-graph-background-1920x1080.png",
     }
     if path in background_aliases:
-        filename = "page-background-1920x1080.png"
+        filename = "page-background-1920x1080.webp"
+        content_type = "image/webp"
     elif path == DASHBOARD_LOGO_PATH:
         filename = "k1s-logo-32.png"
+        content_type = "image/png"
     else:
         return None
     try:
         body = files("workerbee.assets").joinpath("dashboard", filename).read_bytes()
     except FileNotFoundError:
         return None
-    return body, "image/png"
+    return body, content_type
 
 
 def _copy_realtime_contexts(state_root: Path, project: str) -> dict[str, Path]:

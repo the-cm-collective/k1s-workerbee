@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import json
+import socket
 import subprocess
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -390,6 +394,69 @@ def test_validate_helper_argv_allows_version_diagnostic_without_socket_args(
     )
 
     assert result["diagnostic"] is True
+
+
+def test_helper_stream_runs_interactive_exec_on_pty(tmp_path: Path) -> None:
+    fake_nerdctl = tmp_path / "nerdctl"
+    fake_nerdctl.write_text(
+        "#!/usr/bin/env sh\n"
+        "if [ -t 0 ]; then echo tty=true; else echo tty=false; fi\n"
+        "IFS= read -r line\n"
+        "printf 'got:%s\\n' \"$line\"\n",
+        encoding="utf-8",
+    )
+    fake_nerdctl.chmod(0o755)
+    state_hash = _state_hash(tmp_path)
+    argv = [
+        "--address",
+        "unix:///run/containerd/containerd.sock",
+        "--namespace",
+        f"workerbee-{state_hash}-demo",
+        "--data-root",
+        str(tmp_path / "projects" / "demo" / "containerd-data"),
+        "--cni-netconfpath",
+        str(tmp_path / "projects" / "demo" / "containerd-cni-net.d"),
+        "exec",
+        "--interactive",
+        "--tty",
+        "cid",
+        "sh",
+    ]
+    client, server = socket.socketpair()
+    result: list[dict[str, object]] = []
+
+    def run_server() -> None:
+        with server:
+            result.append(
+                containerd_helper._handle_helper_connection(  # noqa: SLF001
+                    server,
+                    state_root=tmp_path,
+                    nerdctl=str(fake_nerdctl),
+                    address="unix:///run/containerd/containerd.sock",
+                )
+            )
+
+    thread = threading.Thread(target=run_server)
+    thread.start()
+    with client:
+        client.settimeout(2)
+        client.sendall(json.dumps({"action": "stream", "argv": argv}).encode("utf-8") + b"\n")
+        client.sendall(b"hello\n")
+        chunks: list[bytes] = []
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline:
+            chunk = client.recv(1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if b"got:hello" in b"".join(chunks):
+                break
+    thread.join(timeout=2)
+    output = b"".join(chunks)
+
+    assert b"tty=true" in output
+    assert b"got:hello" in output
+    assert result == [{"ok": True, "_stream_complete": True}]
 
 
 def _state_hash(path: Path) -> str:

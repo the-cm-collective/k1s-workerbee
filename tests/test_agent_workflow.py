@@ -527,6 +527,7 @@ def test_run_ae_cli_sets_http_timeout_env(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _patch_runtime(monkeypatch)
+    monkeypatch.setattr("workerbee.supervisor.secret_env_for_project", lambda _state: {})
     sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="docker")
     captured: dict[str, Any] = {}
 

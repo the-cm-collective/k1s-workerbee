@@ -221,6 +221,7 @@ def test_supervisor_stack_ingress_publishes_dashboard_and_apishim(
     assert "https://k1s.demo.workerbee.localhost" in route
     assert "https://k1s-api.demo.workerbee.localhost" in route
     assert "handle /static/dash-assets/*" in route
+    assert "handle /api/v1*" in route
     assert "reverse_proxy 127.0.0.1:18090" in route
     assert "reverse_proxy 127.0.0.1:19108" in route
     assert "reverse_proxy https://127.0.0.1:18445" in route
@@ -229,9 +230,7 @@ def test_supervisor_stack_ingress_publishes_dashboard_and_apishim(
     assert refreshed.ingress_urls["api_healthz"] == (
         "https://k1s-api.demo.workerbee.localhost:19443/healthz"
     )
-    assert env["AE_APISHIM_PUBLIC_BASE"] == (
-        "https://k1s-api.demo.workerbee.localhost:19443"
-    )
+    assert env["AE_APISHIM_PUBLIC_BASE"] == "https://k1s.demo.workerbee.localhost:19443"
     assert sup._stack_requires_ingress_restart(refreshed) is False  # noqa: SLF001
 
 

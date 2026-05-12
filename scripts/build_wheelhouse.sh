@@ -48,7 +48,7 @@ done
 K1S_ROOT="$(cd "$K1S_ROOT" && pwd)"
 OUT_PARENT="$(mkdir -p "$(dirname "$OUT_DIR")" && cd "$(dirname "$OUT_DIR")" && pwd)"
 OUT_DIR="${OUT_PARENT}/$(basename "$OUT_DIR")"
-rm -rf "$OUT_DIR" "${OUT_PARENT}/workerbee-wheelhouse.tar.gz"
+rm -rf "$OUT_DIR" "${OUT_PARENT}/workerbee-wheelhouse.tar.gz" "${ROOT_DIR}/build"
 mkdir -p "$OUT_DIR"
 
 "${PYTHON_BIN}" "${K1S_ROOT}/scripts/build_workerbee_runtime_wheel.py" --out "$OUT_DIR"

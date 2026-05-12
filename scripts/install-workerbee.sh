@@ -81,10 +81,10 @@ for candidate in "$wheelhouse"/k1s_workerbee-*.whl; do
 done
 
 "$target_python" -m pip install --upgrade pip >/dev/null
-if ! "$target_python" -m pip install --no-index --find-links "$wheelhouse" "$package_spec"; then
+if ! "$target_python" -m pip install --no-compile --no-index --find-links "$wheelhouse" "$package_spec"; then
   log ""
   log "Bundled wheelhouse install failed; retrying with package index access for platform-specific wheels."
-  "$target_python" -m pip install --find-links "$wheelhouse" "$package_spec"
+  "$target_python" -m pip install --no-compile --find-links "$wheelhouse" "$package_spec"
 fi
 
 if [ "$install_mode" = "standalone" ]; then
