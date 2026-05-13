@@ -165,6 +165,18 @@ def test_global_dashboard_uses_k1s_visual_style() -> None:
     assert "refreshProjects" in html
     assert 'id="summary-grid"' in html
     assert 'id="jobs-grid"' in html
+    assert '<h2>Projects</h2>' in html
+    assert '<h2>Response</h2>' in html
+    assert '<h2>Ingress & DNS</h2>' in html
+    assert html.index("<h2>Projects</h2>") < html.index("<h2>Response</h2>")
+    assert html.index("<h2>Response</h2>") < html.index("<h2>Ingress & DNS</h2>")
+    assert 'id="copy-action-result"' in html
+    assert "Copy JSON" in html
+    assert 'id="response-auto-clear"' in html
+    assert "responseAutoClearKey" in html
+    assert "navigator.clipboard.writeText" in html
+    assert "setResponseText('', {status: 'cleared'});" in html
+    assert "}, 10000);" in html
     assert 'id="global-ingress-panel"' in html
     assert "renderGlobalIngressPanel" in html
     assert "/api/action-jobs/" in html

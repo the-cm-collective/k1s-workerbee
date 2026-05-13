@@ -3189,7 +3189,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         gap: 8px;
         align-items: center;
       }}
-      .refresh-controls {{
+      .refresh-controls, .response-controls {{
         display: inline-flex;
         align-items: center;
         gap: 6px;
@@ -3235,7 +3235,14 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
       .route-toggle {{ white-space: nowrap; }}
       .row-actions {{ white-space: nowrap; }}
       .row-actions-inner {{ display: inline-flex; gap: 6px; align-items: center; }}
-      #action-result {{ margin-top: 10px; white-space: pre-wrap; }}
+      .response-toolbar {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        align-items: center;
+        margin-bottom: 8px;
+      }}
+      #action-result {{ white-space: pre-wrap; }}
       .pill {{
         display: inline-flex;
         align-items: center;
@@ -3297,7 +3304,6 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         </div>
         <div id="summary-grid" class="summary-grid"></div>
         <div id="jobs-grid" class="jobs-grid"></div>
-        <pre id="action-result" hidden></pre>
       </section>
       <section class="card">
         <h2>Projects</h2>
@@ -3315,6 +3321,18 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         </div>
       </section>
       <section class="card">
+        <h2>Response</h2>
+        <div class="response-toolbar">
+          <button id="copy-action-result" disabled>Copy JSON</button>
+          <label class="response-controls">
+            <input id="response-auto-clear" type="checkbox" checked>
+            Auto clear
+          </label>
+          <span id="response-status" class="muted"></span>
+        </div>
+        <pre id="action-result" hidden></pre>
+      </section>
+      <section class="card">
         <h2>Ingress & DNS</h2>
         <div id="global-ingress-panel">{ingress_panel}</div>
         <div class="diagnostics-title">Diagnostics</div>
@@ -3330,8 +3348,13 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
       const ingressBox = document.getElementById('ingress-json');
       const refreshSelect = document.getElementById('refresh-interval');
       const refreshStatus = document.getElementById('refresh-status');
+      const copyResultButton = document.getElementById('copy-action-result');
+      const autoClearCheckbox = document.getElementById('response-auto-clear');
+      const responseStatus = document.getElementById('response-status');
       const refreshKey = 'workerbee.dashboard.refreshIntervalMs';
+      const responseAutoClearKey = 'workerbee.dashboard.responseAutoClear';
       let refreshTimer = null;
+      let responseClearTimer = null;
       const activeJobIds = new Set();
       const expandedRouteProjects = new Set();
 
@@ -3648,11 +3671,53 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         }});
       }}
 
+      function updateResponseControls() {{
+        const hasText = !resultBox.hidden && resultBox.textContent.trim().length > 0;
+        copyResultButton.disabled = !hasText;
+      }}
+
+      function clearResponseTimer() {{
+        if (responseClearTimer) {{
+          clearTimeout(responseClearTimer);
+          responseClearTimer = null;
+        }}
+      }}
+
+      function scheduleResponseClear() {{
+        clearResponseTimer();
+        if (!autoClearCheckbox.checked) return;
+        responseClearTimer = setTimeout(() => {{
+          setResponseText('', {{status: 'cleared'}});
+        }}, 10000);
+      }}
+
+      function setResponseText(text, options = {{}}) {{
+        clearResponseTimer();
+        const value = String(text || '');
+        resultBox.textContent = value;
+        resultBox.hidden = !value;
+        responseStatus.textContent = 'status' in options ? options.status : '';
+        updateResponseControls();
+        if (value && options.autoClear === true) {{
+          scheduleResponseClear();
+        }}
+      }}
+
+      async function copyResponse() {{
+        const text = resultBox.textContent;
+        if (!text.trim()) return;
+        try {{
+          await navigator.clipboard.writeText(text);
+          responseStatus.textContent = 'copied';
+        }} catch (err) {{
+          responseStatus.textContent = `copy failed: ${{err.message}}`;
+        }}
+      }}
+
       function finishJob(job) {{
         activeJobIds.delete(job.job_id);
         updateBusyControls();
-        resultBox.hidden = false;
-        resultBox.textContent = JSON.stringify(job, null, 2);
+        setResponseText(JSON.stringify(job, null, 2), {{autoClear: true}});
         refreshProjects({{silent: true}}).catch((err) => {{
           refreshStatus.textContent = `refresh failed: ${{err.message}}`;
         }});
@@ -3673,14 +3738,11 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
               finishJob(job);
               return;
             }}
-            resultBox.textContent =
-              `Running ${{job.action || 'action'}}... ${{job.status || 'queued'}}`;
+            setResponseText(`Running ${{job.action || 'action'}}... ${{job.status || 'queued'}}`);
             setTimeout(() => pollJob(jobId, attempt + 1), 750);
           }})
           .catch((err) => {{
-            resultBox.hidden = false;
-            resultBox.textContent =
-              `Verifying current state after interrupted poll (${{err.message}})...`;
+            setResponseText(`Verifying current state after interrupted poll (${{err.message}})...`);
             scheduleRefreshAttempt();
             if (attempt < 60) {{
               setTimeout(() => pollJob(jobId, attempt + 1), 1000);
@@ -3710,8 +3772,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
 
       async function postAction(action, projects = []) {{
         if (!confirmation(action, projects)) return;
-        resultBox.hidden = false;
-        resultBox.textContent = `Scheduling ${{action}}...`;
+        setResponseText(`Scheduling ${{action}}...`);
         try {{
           const response = await fetch('/api/actions', {{
             method: 'POST',
@@ -3722,18 +3783,19 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
           if (response.status === 202 && payload.job_id) {{
             activeJobIds.add(payload.job_id);
             updateBusyControls();
-            resultBox.textContent = `Queued ${{action}} as ${{payload.job_id}}`;
+            setResponseText(`Queued ${{action}} as ${{payload.job_id}}`);
             pollJob(payload.job_id);
             scheduleRefreshAttempt();
             return;
           }}
-          resultBox.textContent = JSON.stringify(payload, null, 2);
+          setResponseText(JSON.stringify(payload, null, 2), {{autoClear: true}});
         }} catch (err) {{
-          resultBox.textContent = `${{action}} request was interrupted (${{err.message}}).`;
+          let message = `${{action}} request was interrupted (${{err.message}}).`;
           if (!action.startsWith('mcp_')) {{
-            resultBox.textContent += ' Refreshing to verify current state...';
+            message += ' Refreshing to verify current state...';
             scheduleRefreshAttempt();
           }}
+          setResponseText(message, {{autoClear: true}});
         }}
       }}
 
@@ -3745,22 +3807,38 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         }}
         const button = event.target.closest('button[data-action]');
         if (!button) return;
-          const action = button.dataset.action;
-          const project = button.dataset.project;
-          let projects = project ? [project] : [];
-          if (
-            action === 'start_projects' ||
-            action === 'stop_projects' ||
-            action === 'delete_projects'
-          ) {{
-            projects = projects.length ? projects : selectedProjects();
-            if (!projects.length) {{
-              window.alert('Select at least one WorkerBee project.');
-              return;
-            }}
+        const action = button.dataset.action;
+        const project = button.dataset.project;
+        let projects = project ? [project] : [];
+        if (
+          action === 'start_projects' ||
+          action === 'stop_projects' ||
+          action === 'delete_projects'
+        ) {{
+          projects = projects.length ? projects : selectedProjects();
+          if (!projects.length) {{
+            window.alert('Select at least one WorkerBee project.');
+            return;
           }}
-          postAction(action, projects);
+        }}
+        postAction(action, projects);
       }});
+
+      copyResultButton.addEventListener('click', () => {{
+        copyResponse();
+      }});
+      autoClearCheckbox.checked = localStorage.getItem(responseAutoClearKey) !== '0';
+      autoClearCheckbox.addEventListener('change', () => {{
+        localStorage.setItem(responseAutoClearKey, autoClearCheckbox.checked ? '1' : '0');
+        if (autoClearCheckbox.checked) {{
+          if (!resultBox.hidden && resultBox.textContent.trim()) {{
+            scheduleResponseClear();
+          }}
+        }} else {{
+          clearResponseTimer();
+        }}
+      }});
+      updateResponseControls();
 
       refreshSelect.value = localStorage.getItem(refreshKey) || refreshSelect.value || '5000';
       refreshSelect.addEventListener('change', () => {{
