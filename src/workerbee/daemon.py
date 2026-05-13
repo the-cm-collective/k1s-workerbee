@@ -167,7 +167,6 @@ class WorkerBeeDaemon:
             self._state_lock.acquire(metadata={"mcp_bind_url": mcp_bind_url})
         dashboard_port = self._start_dashboard_server()
         dns_status = self._start_dns_server()
-        self._register_project(self.default_project, cwd_hint=str(self.cwd))
         self.ingress = GlobalIngress(
             state_root=self.state_root,
             runtime=self._resolve_runtime(),
@@ -1434,9 +1433,7 @@ class WorkerBeeDaemon:
     def delete_all_projects(self, *, sync_ingress: bool = True) -> dict[str, Any]:
         projects = self._known_projects()
         if not projects:
-            result = _empty_project_action_result(state_root=self.state_root, purge=True)
-            result["default_restored"] = self._restore_default_project()
-            return result
+            return _empty_project_action_result(state_root=self.state_root, purge=True)
         return self.delete_projects(projects, sync_ingress=sync_ingress)
 
     def delete_projects(
@@ -1495,20 +1492,13 @@ class WorkerBeeDaemon:
         ingress_sync: dict[str, Any] | None = None
         if unregister and removed:
             self._unregister_projects(removed)
-            default_restored = (
-                self._restore_default_project() if self.default_project in names else None
-            )
             ingress_sync = (
                 self._sync_ingress_projects_result()
                 if sync_ingress
                 else self._schedule_ingress_sync()
             )
-        else:
-            default_restored = self._restore_default_project() if (
-                unregister and self.default_project in names
-            ) else None
         failed = [result for result in results if result.get("ok") is False]
-        payload = {
+        return {
             "ok": not errors and not failed,
             "state_root": str(self.state_root),
             "purge": purge,
@@ -1516,23 +1506,6 @@ class WorkerBeeDaemon:
             "projects": results,
             "errors": errors,
             "ingress_sync": ingress_sync,
-        }
-        if default_restored is not None:
-            payload["default_restored"] = default_restored
-        return payload
-
-    def _restore_default_project(self) -> dict[str, Any]:
-        self._register_project(
-            self.default_project,
-            cwd_hint=str(self.cwd),
-            mode=DEFAULT_PROJECT_MODE,
-        )
-        return {
-            "project": self.default_project,
-            "mode": DEFAULT_PROJECT_MODE,
-            "state_dir": str(
-                daemon_project_state_dir(self.default_project, state_root=self.state_root)
-            ),
         }
 
     def schedule_mcp_shutdown(self) -> dict[str, Any]:

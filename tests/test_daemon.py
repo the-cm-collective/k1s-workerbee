@@ -83,6 +83,39 @@ def test_capabilities_surface_probe_and_image_build_hints(tmp_path: Path, monkey
     assert "dockerfile" in payload["tool_hints"]["workerbee_v1_image_build"]
 
 
+def test_daemon_start_does_not_register_default_project(tmp_path: Path, monkeypatch) -> None:
+    daemon = WorkerBeeDaemon(
+        state_root=tmp_path,
+        runtime="docker",
+        default_project="demo",
+        cwd=tmp_path / "checkout",
+    )
+    started_with: list[list[str]] = []
+
+    class FakeIngress:
+        runtime = "docker"
+
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def start(self, *, projects: list[str] | None = None) -> SimpleNamespace:
+            started_with.append(list(projects or []))
+            return SimpleNamespace(dashboard_url="https://dashboard.workerbee.localhost:19443/")
+
+    monkeypatch.setattr(daemon, "_start_dashboard_server", lambda: 18090)
+    monkeypatch.setattr(daemon, "_start_dns_server", lambda: None)
+    monkeypatch.setattr("workerbee.daemon.GlobalIngress", FakeIngress)
+
+    try:
+        daemon.start()
+    finally:
+        if daemon._state_lock is not None:  # noqa: SLF001 - release startup lock in test
+            daemon._state_lock.release()  # noqa: SLF001
+
+    assert daemon._read_registry() == {}  # noqa: SLF001
+    assert started_with == [[]]
+
+
 def test_secret_policy_status_is_project_scoped_and_read_only(
     tmp_path: Path,
     monkeypatch,
@@ -1105,7 +1138,10 @@ def test_delete_projects_purges_and_unregisters_successes(
     assert synced == [True]
 
 
-def test_delete_all_projects_restores_default_project(tmp_path: Path, monkeypatch) -> None:
+def test_delete_all_projects_unregisters_without_restoring_default(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
     daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
     daemon._register_project("alpha", cwd_hint="/var/lib/workerbee/alpha")  # noqa: SLF001
     daemon._register_project("default", cwd_hint="/var/lib/workerbee/default")  # noqa: SLF001
@@ -1126,9 +1162,19 @@ def test_delete_all_projects_restores_default_project(tmp_path: Path, monkeypatc
 
     assert result["ok"] is True
     assert sorted(result["unregistered"]) == ["alpha", "default"]
-    assert result["default_restored"]["project"] == "default"
-    assert sorted(records) == ["default"]
-    assert records["default"]["mode"] == "lazy"
+    assert "default_restored" not in result
+    assert records == {}
+
+
+def test_delete_all_projects_empty_does_not_restore_default(tmp_path: Path) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
+
+    result = daemon.delete_all_projects()
+
+    assert result["ok"] is True
+    assert result["unregistered"] == []
+    assert "default_restored" not in result
+    assert daemon._read_registry() == {}  # noqa: SLF001
 
 
 def test_dashboard_start_projects_schedules_ingress_sync_after_response(
