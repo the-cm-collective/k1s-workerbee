@@ -22,6 +22,7 @@ except Exception:  # pragma: no cover - PyYAML is provided by the k1s runtime pa
     yaml = None  # type: ignore[assignment]
 
 from workerbee.containerd_helper import remove_containerd_helper_tree
+from workerbee.contract import WorkerBeeError
 from workerbee.http import request, wait_for_http
 from workerbee.ingress import ProjectIngressConfig
 from workerbee.k1s_runtime import resolve_k1s_runtime
@@ -752,16 +753,51 @@ class WorkerBeeSupervisor:
             return []
         urls: list[str] = []
         seen: set[str] = set()
+
+        def add_host(host: object) -> None:
+            if not isinstance(host, str):
+                return
+            host = host.strip().strip("\"'")
+            if host and host not in seen:
+                seen.add(host)
+                urls.append(self.ingress.url(host))
+
         for manifest in manifests:
             try:
                 text = manifest.read_text(encoding="utf-8")
             except OSError:
                 continue
-            for match in re.finditer(r"(?m)^\s*host:\s*([A-Za-z0-9_.-]+)\s*$", text):
-                host = match.group(1).strip()
-                if host and host not in seen:
-                    seen.add(host)
-                    urls.append(self.ingress.url(host))
+            parsed_docs: list[dict[str, Any]] | None = None
+            if yaml is not None:
+                try:
+                    parsed_docs = [
+                        doc for doc in yaml.safe_load_all(text) if isinstance(doc, dict)
+                    ]
+                except Exception:
+                    parsed_docs = None
+            if parsed_docs is not None:
+                for doc in parsed_docs:
+                    if str(doc.get("apiVersion") or "") == "ae.dev/v1alpha1":
+                        spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
+                        ingress = (
+                            spec.get("ingress")
+                            if isinstance(spec.get("ingress"), dict)
+                            else {}
+                        )
+                        add_host(ingress.get("host"))
+                    if str(doc.get("kind") or "") == "Ingress":
+                        spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
+                        for rule in spec.get("rules") or []:
+                            if isinstance(rule, dict):
+                                add_host(rule.get("host"))
+                        for tls in spec.get("tls") or []:
+                            if not isinstance(tls, dict):
+                                continue
+                            for host in tls.get("hosts") or []:
+                                add_host(host)
+                continue
+            for match in re.finditer(r"(?m)^\s*-?\s*host:\s*[\"']?([^\"'\s#]+)", text):
+                add_host(match.group(1))
         return urls
 
     def _stack_requires_ingress_restart(self, info: StackInfo) -> bool:
@@ -1729,7 +1765,21 @@ https://{api_host} {{
             "stderr": proc.stderr,
         }
         if proc.returncode != 0:
-            raise RuntimeError(json.dumps(result, indent=2))
+            stderr = " ".join(proc.stderr.split())
+            stdout = " ".join(proc.stdout.split())
+            detail = stderr or stdout
+            suffix = f": {detail[:220]}" if detail else ""
+            raise WorkerBeeError(
+                code="EXEC_COMMAND_FAILED",
+                message=(
+                    f"command failed in {namespace}/{app} with exit code "
+                    f"{proc.returncode}{suffix}"
+                ),
+                details=result,
+                remediation=(
+                    "Inspect command stderr/stdout, fix the command or workload, and retry."
+                ),
+            )
         return result
 
     def _validate_poc_containerd(

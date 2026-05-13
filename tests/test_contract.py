@@ -3,7 +3,14 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
-from workerbee.contract import AGENT_FEEDBACK_SCHEMA, API_VERSION, MCP_TOOL_NAMES, fail, ok
+from workerbee.contract import (
+    AGENT_FEEDBACK_SCHEMA,
+    API_VERSION,
+    MCP_TOOL_NAMES,
+    WorkerBeeError,
+    fail,
+    ok,
+)
 from workerbee.mcp_server import INGRESS_PROBE_INPUT_SCHEMA, _publish_explicit_tool_schema
 
 
@@ -130,6 +137,60 @@ def test_agent_feedback_recommends_prune_for_orphaned_deploy() -> None:
         "args": {"project": "alpha", "stage": "/var/lib/workerbee/stage", "prune": True},
         "reason": "remove workloads from the previous stage that are absent now",
     }
+
+
+def test_agent_feedback_prioritizes_app_ingress_links_for_deploy() -> None:
+    result = ok(
+        kind="ManifestDeployLocal",
+        project="alpha",
+        data={
+            "ok": True,
+            "events": [
+                {
+                    "dashboard_url": "https://k1s.alpha.workerbee.localhost:19443/dashboard",
+                    "controller_url": "https://k1s-api.alpha.workerbee.localhost:19443/",
+                }
+            ],
+            "app_status": {
+                "state": "ready",
+                "ingress_urls": ["https://rawform.alpha.workerbee.localhost:19443/"],
+            },
+            "deployment": {
+                "ingress_urls": ["https://rawform.alpha.workerbee.localhost:19443/"]
+            },
+        },
+    )
+
+    feedback = result["data"]["agent_feedback"]
+
+    assert feedback["links"][0] == "https://rawform.alpha.workerbee.localhost:19443/"
+    assert "https://k1s.alpha.workerbee.localhost:19443/dashboard" in feedback["links"]
+
+
+def test_exec_command_failure_feedback_surfaces_stderr() -> None:
+    result = fail(
+        WorkerBeeError(
+            code="EXEC_COMMAND_FAILED",
+            message="command failed in demo/api with exit code 2",
+            details={
+                "resolved_namespace": "demo",
+                "resolved_app": "api",
+                "returncode": 2,
+                "stdout": "",
+                "stderr": "missing bucket rawform-records\nfull detail",
+            },
+            remediation="Inspect command stderr/stdout, fix the command or workload, and retry.",
+        ),
+        kind="Exec",
+        project="alpha",
+    )
+
+    assert result["error"]["code"] == "EXEC_COMMAND_FAILED"
+    assert result["error"]["details"]["stderr"].startswith("missing bucket")
+    feedback = result["data"]["agent_feedback"]
+    assert feedback["summary"] == (
+        "Exec for `alpha` failed with EXEC_COMMAND_FAILED: missing bucket rawform-records"
+    )
 
 
 def test_ingress_probe_tool_schema_exposes_body_and_headers() -> None:

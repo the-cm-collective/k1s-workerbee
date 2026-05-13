@@ -539,6 +539,63 @@ def test_workerbee_exec_accepts_namespace_app_ref(
     assert calls[1] == ["docker", "exec", "cid-api", "printenv"]
 
 
+def test_workerbee_exec_failure_raises_structured_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="docker")
+
+    def fake_run(cmd: list[str], **_kwargs: object) -> SimpleNamespace:
+        if cmd[:3] == ["docker", "ps", "-q"]:
+            return SimpleNamespace(returncode=0, stdout="cid-api\n", stderr="")
+        if cmd[:3] == ["docker", "exec", "cid-api"]:
+            return SimpleNamespace(returncode=7, stdout="", stderr="bucket not found\n")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    sup.start = lambda: _stack(sup)  # type: ignore[method-assign]
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    with pytest.raises(WorkerBeeError) as exc_info:
+        sup.run_exec("rawform/api", ["mc", "ls", "local/rawform-records"])
+
+    error = exc_info.value
+    assert error.code == "EXEC_COMMAND_FAILED"
+    assert error.details["returncode"] == 7
+    assert error.details["stderr"] == "bucket not found\n"
+    assert error.details["resolved_namespace"] == "rawform"
+    assert error.details["resolved_app"] == "api"
+
+
+def test_ingress_url_extraction_handles_kubernetes_ingress_rules(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    manifest = tmp_path / "ingress.yaml"
+    manifest.write_text(
+        """apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: rawform
+spec:
+  rules:
+    - host: "rawform.alpha.workerbee.localhost"
+      http:
+        paths: []
+""",
+        encoding="utf-8",
+    )
+    sup = WorkerBeeSupervisor(project="alpha", state_dir=tmp_path / "state", runtime="docker")
+    sup.ingress = SimpleNamespace(
+        url=lambda host, path="/": f"https://{host}:19443{path}"
+    )
+
+    assert sup._ingress_urls_for_paths([manifest]) == [
+        "https://rawform.alpha.workerbee.localhost:19443/"
+    ]
+
+
 def test_run_ae_cli_sets_http_timeout_env(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

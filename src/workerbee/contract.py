@@ -232,6 +232,17 @@ def _feedback_summary(
     project_text = f" for `{project}`" if project else ""
     if not ok:
         code = str((error or {}).get("code") or "ERROR")
+        if code == "EXEC_COMMAND_FAILED":
+            details = error.get("details") if isinstance(error, dict) else {}
+            if isinstance(details, dict):
+                output = str(details.get("stderr") or details.get("stdout") or "").strip()
+                first_line = next(
+                    (line.strip() for line in output.splitlines() if line.strip()),
+                    "",
+                )
+                safe_output = _safe_summary_text(first_line) if first_line else None
+                if safe_output:
+                    return f"{label}{project_text} failed with {code}: {safe_output}"
         remediation = str((error or {}).get("remediation") or "").strip()
         safe_remediation = _safe_summary_text(remediation) if remediation else None
         suffix = f" {safe_remediation}" if safe_remediation else ""
@@ -541,6 +552,11 @@ def _action(tool: str, args: dict[str, Any], reason: str) -> dict[str, Any]:
 def _feedback_links(data: Any) -> list[str]:
     urls: list[str] = []
 
+    def add(value: Any) -> None:
+        safe = _safe_url(value)
+        if safe:
+            urls.append(safe)
+
     def visit(value: Any, key: str = "") -> None:
         if _sensitive_key(key):
             return
@@ -553,12 +569,33 @@ def _feedback_links(data: Any) -> list[str]:
             for item in value:
                 visit(item, key)
         elif isinstance(value, str):
-            safe = _safe_url(value)
-            if safe:
-                urls.append(safe)
+            add(value)
 
+    if isinstance(data, dict):
+        for explicit in _explicit_ingress_link_values(data):
+            add(explicit)
     visit(data)
     return _dedupe(urls)
+
+
+def _explicit_ingress_link_values(data: dict[str, Any]) -> list[Any]:
+    values: list[Any] = []
+
+    def collect(value: Any) -> None:
+        if isinstance(value, dict):
+            if "ingress_urls" in value:
+                collect(value["ingress_urls"])
+            for key in ("app_status", "deployment", "latest_deployment", "project_status"):
+                if key in value:
+                    collect(value[key])
+        elif isinstance(value, list | tuple):
+            for item in value:
+                collect(item)
+        else:
+            values.append(value)
+
+    collect(data)
+    return values
 
 
 def _feedback_artifacts(data: Any) -> list[str]:
