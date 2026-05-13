@@ -384,6 +384,7 @@ def serve_mcp(
         target: str = "workerbee",
         profile: str | None = None,
         namespace: str | None = None,
+        include_exited: bool = True,
     ) -> dict[str, Any]:
         """Return recent logs for an app."""
         if target == "profile":
@@ -403,7 +404,12 @@ def serve_mcp(
             project,
             lambda: daemon.with_project(
                 project,
-                lambda supervisor: supervisor.logs(app=app, namespace=namespace, tail=tail),
+                lambda supervisor: supervisor.logs(
+                    app=app,
+                    namespace=namespace,
+                    tail=tail,
+                    include_exited=include_exited,
+                ),
                 require_active=True,
             ),
         )
@@ -543,6 +549,7 @@ def serve_mcp(
         target: str = "workerbee",
         profile: str | None = None,
         k1s_root: str | None = None,
+        prune: bool = False,
     ) -> dict[str, Any]:
         """Apply staged native k1s or practical Kubernetes manifests locally."""
         return protect(
@@ -556,6 +563,7 @@ def serve_mcp(
                 namespace=namespace,
                 timeout=timeout,
                 k1s_root=k1s_root,
+                prune=prune,
             ),
         )
 

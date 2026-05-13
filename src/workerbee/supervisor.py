@@ -685,6 +685,7 @@ class WorkerBeeSupervisor:
         *,
         namespace: str | None = None,
         tail: int = 80,
+        include_exited: bool = True,
     ) -> dict[str, Any]:
         info = self.start()
         resolved_namespace, resolved_app = _resolve_app_ref(
@@ -720,6 +721,7 @@ class WorkerBeeSupervisor:
             app=resolved_app,
             namespace=resolved_namespace,
             tail=tail,
+            include_exited=include_exited,
         )
         if k1s_error:
             result["k1s_error"] = k1s_error
@@ -1600,24 +1602,32 @@ https://{api_host} {{
         shutil.rmtree(self.state_dir)
         return {"ok": True, "removed": True, "path": str(self.state_dir)}
 
-    def _runtime_container_ids(self, info: StackInfo, *, app: str, namespace: str) -> list[str]:
+    def _runtime_container_ids(
+        self,
+        info: StackInfo,
+        *,
+        app: str,
+        namespace: str,
+        all_containers: bool = False,
+    ) -> list[str]:
         filters = [
             "--filter",
             f"label=ae.namespace={namespace}",
             "--filter",
             f"label=app={app}",
         ]
+        ps_args = ["ps", "-aq" if all_containers else "-q", *filters]
         if info.runtime == "podman":
-            cmd = ["podman", "ps", "-q", *filters]
+            cmd = ["podman", *ps_args]
         elif info.runtime == CONTAINERD_RUNTIME:
             cmd = runtime_command_args(
                 info.runtime,
                 state_root=self.state_dir.parent.parent,
                 project=self.project,
-                args=["ps", "-q", *filters],
+                args=ps_args,
             )
         else:
-            cmd = ["docker", "ps", "-q", *filters]
+            cmd = ["docker", *ps_args]
         proc = subprocess.run(
             cmd,
             text=True,
@@ -1635,10 +1645,22 @@ https://{api_host} {{
         app: str,
         namespace: str,
         tail: int,
+        include_exited: bool,
     ) -> dict[str, Any]:
         ids = self._runtime_container_ids(info, app=app, namespace=namespace)
+        container_state = "running"
         if not ids:
-            raise RuntimeError(f"no running container found for app {namespace}/{app}")
+            if include_exited:
+                ids = self._runtime_container_ids(
+                    info,
+                    app=app,
+                    namespace=namespace,
+                    all_containers=True,
+                )
+                container_state = "exited"
+            if not ids:
+                qualifier = "running or exited" if include_exited else "running"
+                raise RuntimeError(f"no {qualifier} container found for app {namespace}/{app}")
         stdout_parts: list[str] = []
         stderr_parts: list[str] = []
         for cid in ids:
@@ -1660,6 +1682,7 @@ https://{api_host} {{
                 raise RuntimeError(proc.stderr.strip() or f"{info.runtime} logs failed")
         return {
             "source": info.runtime,
+            "container_state": container_state,
             "resolved_namespace": namespace,
             "resolved_app": app,
             "cmd": runtime_command_args(

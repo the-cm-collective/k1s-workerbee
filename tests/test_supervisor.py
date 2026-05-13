@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any
 
 from workerbee.k1s_runtime import K1sRuntime
@@ -134,6 +134,46 @@ def test_cleanup_runtime_removes_project_and_deploy_namespace_containers(
         "cid-namespace",
     ]
     assert ["podman", "network", "rm", "workerbee-demo"] in commands
+
+
+def test_logs_falls_back_to_exited_runtime_container(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="docker")
+    calls: list[list[str]] = []
+
+    def fake_run_ae(
+        _self,
+        args: list[str],
+        *,
+        info: StackInfo,
+        timeout: int = 30,
+    ) -> dict[str, Any]:
+        _ = (args, info, timeout)
+        raise RuntimeError("No pods available")
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> SimpleNamespace:
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "ps", "-q"]:
+            return SimpleNamespace(returncode=0, stdout="", stderr="")
+        if cmd[:3] == ["docker", "ps", "-aq"]:
+            return SimpleNamespace(returncode=0, stdout="cid-exited\n", stderr="")
+        if cmd[:2] == ["docker", "logs"]:
+            return SimpleNamespace(returncode=0, stdout="failed job logs\n", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    sup.start = lambda: _stack(tmp_path)  # type: ignore[method-assign]
+    sup.run_ae = MethodType(fake_run_ae, sup)  # type: ignore[method-assign]
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = sup.logs(app="job", namespace="demo")
+
+    assert result["source"] == "docker"
+    assert result["container_state"] == "exited"
+    assert result["stdout"] == "failed job logs\n"
+    assert any(cmd[:3] == ["docker", "ps", "-aq"] for cmd in calls)
 
 
 def _patch_runtime(monkeypatch) -> None:

@@ -165,6 +165,13 @@ def validate_stage(stage_dir: Path, *, cwd: Path | None = None) -> dict[str, Any
         "stage_dir": str(root),
         "manifests": [str(path) for path in paths],
         "manifest_details": details,
+        "workloads": [
+            workload
+            for detail in details
+            if isinstance(detail, dict)
+            for workload in detail.get("workloads", [])
+            if isinstance(workload, dict)
+        ],
         "input_kinds": sorted({item["input_kind"] for item in details if item["input_kind"]}),
         "images": sorted(set(images_seen)),
         "findings": findings,
@@ -214,6 +221,8 @@ def deploy_local_stage(
     stage_dir: Path,
     namespace: str | None = None,
     timeout: int = 180,
+    previous_deployment: dict[str, Any] | None = None,
+    prune: bool = False,
 ) -> dict[str, Any]:
     validation = validate_stage(stage_dir, cwd=supervisor.cwd)
     if not validation["ok"]:
@@ -263,7 +272,251 @@ def deploy_local_stage(
             ),
             retryable=True,
         )
-    return {"ok": True, "validation": validation, "apply": results, "alias_refresh": alias_refresh}
+    app_status = collect_app_status(
+        supervisor=supervisor,
+        workloads=validation_workloads(validation, namespace=namespace),
+        previous_workloads=deployment_workloads(previous_deployment),
+        namespace=namespace,
+        timeout=timeout,
+        wait=True,
+        prune=prune,
+    )
+    app_status["ingress_urls"] = _result_ingress_urls(results)
+    apply_ok = all(item.get("ok") is not False for item in results if isinstance(item, dict))
+    return {
+        "ok": bool(apply_ok and not app_status.get("degraded_workloads")),
+        "apply_ok": bool(apply_ok),
+        "validation": validation,
+        "apply": results,
+        "alias_refresh": alias_refresh,
+        "app_status": app_status,
+        "prune": {"enabled": bool(prune), "deleted": app_status.get("deleted_orphans", [])},
+    }
+
+
+def validation_workloads(
+    validation: dict[str, Any] | None,
+    *,
+    namespace: str | None = None,
+) -> list[dict[str, Any]]:
+    if not isinstance(validation, dict):
+        return []
+    raw_workloads = validation.get("workloads")
+    if not isinstance(raw_workloads, list):
+        raw_workloads = [
+            workload
+            for detail in validation.get("manifest_details", [])
+            if isinstance(detail, dict)
+            for workload in detail.get("workloads", [])
+            if isinstance(workload, dict)
+        ]
+    return _normalize_workloads(raw_workloads, namespace=namespace)
+
+
+def deployment_workloads(deployment: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(deployment, dict):
+        return []
+    validation = (
+        deployment.get("validation") if isinstance(deployment.get("validation"), dict) else {}
+    )
+    namespace = str(deployment.get("namespace") or "") or None
+    return validation_workloads(validation, namespace=namespace)
+
+
+def collect_app_status(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    workloads: list[dict[str, Any]],
+    previous_workloads: list[dict[str, Any]] | None = None,
+    namespace: str | None = None,
+    timeout: int = 180,
+    wait: bool = False,
+    prune: bool = False,
+) -> dict[str, Any]:
+    declared = _normalize_workloads(workloads, namespace=namespace)
+    previous = _normalize_workloads(previous_workloads or [], namespace=namespace)
+    declared_keys = {_workload_key(item) for item in declared}
+    previous_by_key = {_workload_key(item): item for item in previous}
+    orphaned = [
+        _orphan_workload_summary(item)
+        for key, item in sorted(previous_by_key.items())
+        if key not in declared_keys
+    ]
+    info = supervisor.load_stack()
+    if info is None and (wait or prune):
+        info = supervisor.start()
+    deleted_orphans = (
+        _delete_orphan_workloads(
+            supervisor=supervisor,
+            info=info,
+            workloads=orphaned,
+            timeout=timeout,
+        )
+        if prune and orphaned
+        else []
+    )
+    if deleted_orphans:
+        deleted_keys = {
+            _workload_key(item)
+            for item in deleted_orphans
+            if item.get("ok")
+        }
+        orphaned = [item for item in orphaned if _workload_key(item) not in deleted_keys]
+    statuses: list[dict[str, Any]] = []
+    wait_result: dict[str, Any] | None = None
+    if declared and info is None:
+        statuses = [
+            {
+                **workload,
+                "ready": False,
+                "error": "WorkerBee control plane is not running",
+            }
+            for workload in declared
+        ]
+    elif declared and wait and info is not None:
+        wait_result = _wait_for_service_workloads(
+            supervisor=supervisor,
+            info=info,
+            workloads=declared,
+            timeout_seconds=max(1.0, min(30.0, float(timeout) * 0.25)),
+        )
+        statuses = wait_result.get("statuses", [])
+    elif declared and info is not None:
+        statuses = [
+            _service_workload_status(supervisor=supervisor, info=info, workload=workload)
+            for workload in declared
+        ]
+
+    ready_workloads = [item for item in statuses if item.get("ready")]
+    degraded_workloads = [item for item in statuses if not item.get("ready")]
+    if degraded_workloads:
+        state = "degraded"
+    elif orphaned:
+        state = "orphaned"
+    elif declared:
+        state = "ready"
+    else:
+        state = "orphaned" if orphaned else "no_workloads_declared"
+    return {
+        "state": state,
+        "ready": bool(declared) and not degraded_workloads,
+        "declared_workloads": declared,
+        "declared_workload_count": len(declared),
+        "ready_workloads": ready_workloads,
+        "ready_workload_count": len(ready_workloads),
+        "degraded_workloads": degraded_workloads,
+        "degraded_workload_count": len(degraded_workloads),
+        "orphaned_workloads": orphaned,
+        "orphaned_workload_count": len(orphaned),
+        "deleted_orphans": deleted_orphans,
+        "wait": wait_result,
+    }
+
+
+def _normalize_workloads(
+    workloads: list[dict[str, Any]],
+    *,
+    namespace: str | None = None,
+) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in workloads:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "").strip()
+        if not name:
+            continue
+        workload_namespace = str(namespace or item.get("namespace") or "default").strip()
+        key = (workload_namespace, name)
+        if key in seen:
+            continue
+        seen.add(key)
+        normalized.append(
+            {
+                "namespace": workload_namespace,
+                "name": name,
+                "scope": f"{workload_namespace}/{name}",
+                "kind": str(item.get("kind") or "Deployment"),
+                "input_kind": str(item.get("input_kind") or ""),
+            }
+        )
+    return normalized
+
+
+def _workload_key(workload: dict[str, Any]) -> tuple[str, str]:
+    return (str(workload.get("namespace") or "default"), str(workload.get("name") or ""))
+
+
+def _orphan_workload_summary(workload: dict[str, Any]) -> dict[str, Any]:
+    namespace = str(workload.get("namespace") or "default")
+    name = str(workload.get("name") or "")
+    return {
+        **workload,
+        "cleanup_command": f"ae delete {name} -n {namespace} --purge",
+    }
+
+
+def _delete_orphan_workloads(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    info: Any,
+    workloads: list[dict[str, Any]],
+    timeout: int,
+) -> list[dict[str, Any]]:
+    deleted: list[dict[str, Any]] = []
+    for workload in workloads:
+        namespace = str(workload.get("namespace") or "default")
+        name = str(workload.get("name") or "")
+        if not name:
+            continue
+        try:
+            result = supervisor.run_ae(
+                [
+                    "--server",
+                    info.controller_url,
+                    "--token",
+                    info.admin_token,
+                    "delete",
+                    name,
+                    "--purge",
+                    "-n",
+                    namespace,
+                ],
+                info=info,
+                timeout=timeout,
+            )
+            deleted.append(
+                {
+                    "ok": True,
+                    "namespace": namespace,
+                    "name": name,
+                    "delete": result,
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - prune should report partial failures
+            deleted.append(
+                {
+                    "ok": False,
+                    "namespace": namespace,
+                    "name": name,
+                    "error": str(exc),
+                    "cleanup_command": workload.get("cleanup_command"),
+                }
+            )
+    return deleted
+
+
+def _result_ingress_urls(results: list[dict[str, Any]]) -> list[str]:
+    urls: list[str] = []
+    seen: set[str] = set()
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        for url in result.get("ingress_urls") or []:
+            if isinstance(url, str) and url not in seen:
+                seen.add(url)
+                urls.append(url)
+    return urls
 
 
 def _refresh_containerd_service_aliases(
@@ -1530,7 +1783,73 @@ def _validate_k8s_documents(path: Path, docs: list[dict[str, Any]]) -> list[dict
                 "workload_count": len(workloads),
             }
         )
+    for workload in workloads:
+        metadata = workload.get("metadata") if isinstance(workload.get("metadata"), dict) else {}
+        name = str(metadata.get("name") or "<unnamed>")
+        pod_spec = _k8s_pod_spec(workload)
+        containers = [item for item in pod_spec.get("containers") or [] if isinstance(item, dict)]
+        if len(containers) > 1:
+            findings.append(
+                {
+                    "level": "error",
+                    "code": "K8S_MULTI_CONTAINER_UNSUPPORTED",
+                    "path": str(path),
+                    "workload": name,
+                    "message": (
+                        "WorkerBee local Kubernetes apply currently maps one pod container "
+                        "to one k1s workload; split sidecars/workers into separate manifests."
+                    ),
+                    "containers": [
+                        str(container.get("name") or idx)
+                        for idx, container in enumerate(containers)
+                    ],
+                }
+            )
+        init_containers = [
+            item for item in pod_spec.get("initContainers") or [] if isinstance(item, dict)
+        ]
+        if init_containers:
+            findings.append(
+                {
+                    "level": "error",
+                    "code": "K8S_INIT_CONTAINERS_UNSUPPORTED",
+                    "path": str(path),
+                    "workload": name,
+                    "message": (
+                        "WorkerBee local Kubernetes apply does not run Kubernetes initContainers; "
+                        "move initialization into an explicit workload for this target."
+                    ),
+                    "init_containers": [
+                        str(container.get("name") or idx)
+                        for idx, container in enumerate(init_containers)
+                    ],
+                }
+            )
+        for container in containers:
+            if container.get("command"):
+                findings.append(
+                    {
+                        "level": "warning",
+                        "code": "K8S_COMMAND_ENTRYPOINT_SEMANTICS",
+                        "path": str(path),
+                        "workload": name,
+                        "container": str(container.get("name") or "main"),
+                        "image": str(container.get("image") or ""),
+                        "message": (
+                            "Kubernetes command/args entrypoint override semantics may not match "
+                            "the local k1s shim; verify images with entrypoints before relying on "
+                            "shell command overrides."
+                        ),
+                    }
+                )
     return findings
+
+
+def _k8s_pod_spec(doc: dict[str, Any]) -> dict[str, Any]:
+    spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
+    template = spec.get("template") if isinstance(spec.get("template"), dict) else {}
+    pod_spec = template.get("spec") if isinstance(template.get("spec"), dict) else {}
+    return pod_spec
 
 
 def _primary_app_name(detail: dict[str, Any]) -> str | None:

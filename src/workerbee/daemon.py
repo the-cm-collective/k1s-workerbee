@@ -44,7 +44,13 @@ from workerbee.ingress import (
     resolve_ingress_settings,
 )
 from workerbee.locks import FileLock, project_lock_path, state_root_lock_path
-from workerbee.manifests import deploy_profile_stage, export_bundle, prepare_stage
+from workerbee.manifests import (
+    collect_app_status,
+    deploy_profile_stage,
+    deployment_workloads,
+    export_bundle,
+    prepare_stage,
+)
 from workerbee.paths import daemon_project_state_dir, default_state_root
 from workerbee.ports import choose_port
 from workerbee.probe import build_probe_url, probe_workerbee_url
@@ -343,9 +349,22 @@ class WorkerBeeDaemon:
         open_dashboard: bool = False,
     ) -> dict[str, Any]:
         name = project_slug(project or self.default_project)
+
+        def start_and_summarize(supervisor: WorkerBeeSupervisor) -> dict[str, Any]:
+            result = supervisor.start().public_dict()
+            result["running"] = True
+            latest = self._latest_deployment(name)
+            result["latest_deployment"] = latest
+            result["app_status"] = _project_app_status(
+                supervisor=supervisor,
+                latest_deployment=latest,
+                running=True,
+            )
+            return result
+
         result = self.with_project(
             name,
-            lambda supervisor: supervisor.start().public_dict(),
+            start_and_summarize,
             require_active=True,
             autostart=True,
             start_reason="project_start",
@@ -451,11 +470,27 @@ class WorkerBeeDaemon:
                 sup = self._build_supervisor(name, ingress=project_ingress)
                 state_dir = str(sup.state_dir)
                 status = sup.status()
+                latest_deployment = self._latest_deployment(name)
+                app_status = _project_app_status(
+                    supervisor=sup,
+                    latest_deployment=latest_deployment,
+                    running=bool(status.get("running")),
+                )
             except Exception as exc:  # noqa: BLE001 - dashboard must stay renderable
                 status = {
                     "running": False,
                     "apishim_running": False,
                     "error": str(exc),
+                }
+                latest_deployment = self._latest_deployment(name)
+                app_status = {
+                    "state": "unknown",
+                    "ready": False,
+                    "error": str(exc),
+                    "declared_workload_count": 0,
+                    "ready_workload_count": 0,
+                    "degraded_workload_count": 0,
+                    "orphaned_workload_count": 0,
                 }
             profile_status = self._project_profile_status(name, ingress=project_ingress)
             ingress_refresh = (
@@ -530,6 +565,8 @@ class WorkerBeeDaemon:
                     "profile": profile,
                     "profile_status": profile_status,
                     "ingress": (stack or {}).get("ingress") if stack else None,
+                    "latest_deployment": latest_deployment,
+                    "app_status": app_status,
                     "error": error,
                 }
             )
@@ -548,9 +585,20 @@ class WorkerBeeDaemon:
 
     def project_status(self, project: str) -> dict[str, Any]:
         name = project_slug(project)
-        status = self.with_project(name, lambda sup: sup.status())
+
+        def status_and_summarize(supervisor: WorkerBeeSupervisor) -> dict[str, Any]:
+            status = supervisor.status()
+            latest = self._latest_deployment(name)
+            status["latest_deployment"] = latest
+            status["app_status"] = _project_app_status(
+                supervisor=supervisor,
+                latest_deployment=latest,
+                running=bool(status.get("running")),
+            )
+            return status
+
+        status = self.with_project(name, status_and_summarize)
         status["mode"] = self.project_mode(name)
-        status["latest_deployment"] = self._latest_deployment(name)
         return status
 
     def profile_list(self) -> dict[str, Any]:
@@ -789,6 +837,7 @@ class WorkerBeeDaemon:
         namespace: str | None = None,
         timeout: int = 180,
         k1s_root: str | Path | None = None,
+        prune: bool = False,
     ) -> dict[str, Any]:
         from workerbee.manifests import deploy_local_stage, resolve_stage_dir
 
@@ -797,11 +846,14 @@ class WorkerBeeDaemon:
         if target == "workerbee":
             def deploy_and_record(supervisor: WorkerBeeSupervisor) -> dict[str, Any]:
                 stage_dir = resolve_stage_dir(supervisor, stage)
+                previous = self._latest_deployment(name)
                 result = deploy_local_stage(
                     supervisor=supervisor,
                     stage_dir=stage_dir,
                     namespace=namespace,
                     timeout=timeout,
+                    previous_deployment=previous,
+                    prune=prune,
                 )
                 deployment = self._record_deployment(
                     project=name,
@@ -981,8 +1033,12 @@ class WorkerBeeDaemon:
             "created_at": timestamp,
             "updated_at": timestamp,
             "ok": bool(result.get("ok", True)),
+            "apply_ok": bool(result.get("apply_ok", result.get("ok", True))),
             "validation": _deployment_validation_summary(result.get("validation")),
             "apply": _deployment_apply_summary(result.get("apply")),
+            "app_status": (
+                result.get("app_status") if isinstance(result.get("app_status"), dict) else None
+            ),
             "ingress_urls": _deployment_ingress_urls(result),
             "exports": _deployment_exports(stage_dir),
         }
@@ -1157,6 +1213,18 @@ class WorkerBeeDaemon:
                         "for example dockerfile='backend/Dockerfile'."
                     )
                 },
+                "workerbee_v1_logs": {
+                    "include_exited": (
+                        "Defaults to true; WorkerBee falls back to the last matching exited "
+                        "container when no running container has logs."
+                    )
+                },
+                "workerbee_v1_manifest_deploy_local": {
+                    "prune": (
+                        "Defaults to false; reports orphaned workloads and deletes only when "
+                        "the caller explicitly passes prune=true."
+                    )
+                },
                 "workerbee_v1_manifest_deploy_remote_k1s": {
                     "allow_remote_secretrefs": (
                         "Defaults to false; WorkerBee refuses remote secretRefs unless "
@@ -1185,7 +1253,7 @@ class WorkerBeeDaemon:
                     "export_formats": ["k8s", "helm"],
                     "v0_1_constraint": (
                         "one Deployment/StatefulSet/DaemonSet/Job plus optional "
-                        "Service/Ingress per file"
+                        "Service/Ingress per file; one pod container; no initContainers"
                     ),
                 },
             },
@@ -2441,6 +2509,24 @@ def _dashboard_summary(
     running = [item for item in projects if item.get("running")]
     stopped = [item for item in projects if not item.get("running") and not item.get("error")]
     ingress = [item for item in projects if item.get("ingress_ready")]
+    app_ready = [
+        item
+        for item in projects
+        if isinstance(item.get("app_status"), dict)
+        and item["app_status"].get("state") == "ready"
+    ]
+    app_degraded = [
+        item
+        for item in projects
+        if isinstance(item.get("app_status"), dict)
+        and item["app_status"].get("degraded_workload_count")
+    ]
+    app_orphaned = [
+        item
+        for item in projects
+        if isinstance(item.get("app_status"), dict)
+        and item["app_status"].get("orphaned_workload_count")
+    ]
     health_probe = global_dashboard.get("health_probe")
     health_ok = bool(health_probe.get("ok")) if isinstance(health_probe, dict) else False
     dns = global_dashboard.get("dns") if isinstance(global_dashboard.get("dns"), dict) else {}
@@ -2456,7 +2542,63 @@ def _dashboard_summary(
         "projects_stopped": len(stopped),
         "projects_error": len(errors),
         "projects_ingress_ready": len(ingress),
+        "projects_app_ready": len(app_ready),
+        "projects_app_degraded": len(app_degraded),
+        "projects_app_orphaned": len(app_orphaned),
     }
+
+
+def _project_app_status(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    latest_deployment: dict[str, Any] | None,
+    running: bool,
+) -> dict[str, Any]:
+    if not latest_deployment:
+        return {
+            "state": "no_workload_deployed",
+            "ready": False,
+            "declared_workloads": [],
+            "declared_workload_count": 0,
+            "ready_workloads": [],
+            "ready_workload_count": 0,
+            "degraded_workloads": [],
+            "degraded_workload_count": 0,
+            "orphaned_workloads": [],
+            "orphaned_workload_count": 0,
+            "message": (
+                "control plane running, no app workload deployed yet"
+                if running
+                else "no app workload deployed yet"
+            ),
+        }
+    workloads = deployment_workloads(latest_deployment)
+    if not running:
+        return {
+            "state": "control_plane_stopped",
+            "ready": False,
+            "declared_workloads": workloads,
+            "declared_workload_count": len(workloads),
+            "ready_workloads": [],
+            "ready_workload_count": 0,
+            "degraded_workloads": [],
+            "degraded_workload_count": 0,
+            "orphaned_workloads": [],
+            "orphaned_workload_count": 0,
+            "deployment_id": latest_deployment.get("id"),
+            "ingress_urls": latest_deployment.get("ingress_urls", []),
+        }
+    app_status = collect_app_status(
+        supervisor=supervisor,
+        workloads=workloads,
+        namespace=latest_deployment.get("namespace"),
+        timeout=0,
+        wait=False,
+        prune=False,
+    )
+    app_status["deployment_id"] = latest_deployment.get("id")
+    app_status["ingress_urls"] = latest_deployment.get("ingress_urls", [])
+    return app_status
 
 
 def _dashboard_url(status: dict[str, Any]) -> str | None:
@@ -2530,12 +2672,22 @@ def _available_stage_names(state_dir: Path) -> list[str]:
 
 def _deployment_validation_summary(raw: object) -> dict[str, Any]:
     validation = raw if isinstance(raw, dict) else {}
+    workloads = validation.get("workloads")
+    if not isinstance(workloads, list):
+        workloads = [
+            workload
+            for detail in validation.get("manifest_details", [])
+            if isinstance(detail, dict)
+            for workload in detail.get("workloads", [])
+            if isinstance(workload, dict)
+        ]
     return {
         "ok": validation.get("ok"),
         "stage_dir": validation.get("stage_dir"),
         "input_kinds": validation.get("input_kinds", []),
         "images": validation.get("images", []),
         "manifests": validation.get("manifests", []),
+        "workloads": workloads,
         "findings": validation.get("findings", []),
     }
 
@@ -2961,6 +3113,17 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         profile_label = item.get("profile_name") or "none"
         if item.get("profile_running"):
             profile_label = f"{profile_label} running"
+        app_status = item.get("app_status") if isinstance(item.get("app_status"), dict) else {}
+        app_state = str(app_status.get("state") or "unknown")
+        app_class = (
+            "ok"
+            if app_state == "ready"
+            else (
+                "warn"
+                if app_state in {"degraded", "orphaned", "unknown"}
+                else "idle"
+            )
+        )
         ingress_status = str(item.get("ingress_status") or "idle")
         ingress_class = (
             "ok"
@@ -2976,6 +3139,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             f"<td>{project}</td>"
             f'<td><span class="pill idle">{mode}</span></td>'
             f'<td><span class="pill {stack_class}">{stack_label}</span></td>'
+            f'<td><span class="pill {app_class}">{_esc(app_state)}</span></td>'
             f'<td><span class="pill {profile_class}">{_esc(profile_label)}</span></td>'
             f'<td><span class="pill {ingress_class}">{_esc(ingress_status)}</span></td>'
             "<td>"
@@ -2994,12 +3158,12 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             "</div></td>"
             "</tr>"
             f'<tr class="route-details" data-route-project="{project}" hidden>'
-            f'<td colspan="12">{_render_route_details(item)}</td>'
+            f'<td colspan="13">{_render_route_details(item)}</td>'
             "</tr>"
         )
     if not rows:
         rows.append(
-            '<tr><td class="muted" colspan="12">No WorkerBee projects registered.</td></tr>'
+            '<tr><td class="muted" colspan="13">No WorkerBee projects registered.</td></tr>'
         )
     global_dash = payload.get("global_dashboard")
     ingress_json = json.dumps(global_dash, indent=2, sort_keys=True)
@@ -3285,7 +3449,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             <thead>
               <tr>
                 <th>Select</th><th>Project</th><th>Mode</th><th>App Stack</th>
-                <th>k1s Profile</th><th>Ingress</th><th>Routes</th><th>Dashboard</th>
+                <th>App</th><th>k1s Profile</th><th>Ingress</th><th>Routes</th><th>Dashboard</th>
                 <th>Git Branch</th><th>Error</th><th>State</th><th>Actions</th>
               </tr>
             </thead>
@@ -3358,6 +3522,17 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         const profile = item.profile_name || 'none';
         if (item.profile_running) return pill(`${{profile}} running`, 'ok');
         return pill(profile === 'none' ? 'none' : `${{profile}} stopped`, 'idle');
+      }}
+
+      function appPill(item) {{
+        const status = item.app_status && typeof item.app_status === 'object'
+          ? item.app_status
+          : {{}};
+        const state = status.state || 'unknown';
+        const pillState = state === 'ready'
+          ? 'ok'
+          : (['degraded', 'orphaned', 'unknown'].includes(state) ? 'warn' : 'idle');
+        return pill(state, pillState);
       }}
 
       function ingressPill(item) {{
@@ -3440,7 +3615,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         const routes = Array.isArray(item.exposed_routes) ? item.exposed_routes : [];
         if (!routes.length) {{
           return `<tr class="route-details" data-route-project="${{safeProject}}"${{hidden}}>`
-            + '<td colspan="12"><span class="muted">'
+            + '<td colspan="13"><span class="muted">'
             + 'No Caddy routes are currently exposed for this project.'
             + '</span></td></tr>';
         }}
@@ -3461,7 +3636,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             + '</tr>';
         }}).join('');
         return `<tr class="route-details" data-route-project="${{safeProject}}"${{hidden}}>`
-          + '<td colspan="12"><div class="route-panel"><table class="route-table">'
+          + '<td colspan="13"><div class="route-panel"><table class="route-table">'
           + '<thead><tr><th>Type</th><th>Public URL</th><th>Upstream</th>'
           + '<th>Source</th></tr></thead>'
           + `<tbody>${{rows}}</tbody></table></div></td></tr>`;
@@ -3481,7 +3656,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         const selected = selectedSet();
         if (!Array.isArray(projects) || !projects.length) {{
           projectsBody.innerHTML =
-            '<tr><td class="muted" colspan="12">No WorkerBee projects registered.</td></tr>';
+            '<tr><td class="muted" colspan="13">No WorkerBee projects registered.</td></tr>';
           expandedRouteProjects.clear();
           configureRefreshTimer({{persist: false}});
           return;
@@ -3502,6 +3677,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             + `<td>${{safeProject}}</td>`
             + `<td>${{pill(item.mode || 'lazy', 'idle')}}</td>`
             + `<td>${{stackPill(item)}}</td>`
+            + `<td>${{appPill(item)}}</td>`
             + `<td>${{profilePill(item)}}</td>`
             + `<td>${{ingressPill(item)}}</td>`
             + `<td>${{routeButton(item, safeProject, expanded)}}</td>`
@@ -3542,6 +3718,15 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
           pill(`running ${{summary.projects_running ?? 0}}`, 'ok'),
           pill(`stopped ${{summary.projects_stopped ?? 0}}`, 'idle'),
           pill(`errors ${{summary.projects_error ?? 0}}`, summary.projects_error ? 'bad' : 'idle'),
+          pill(`apps ready ${{summary.projects_app_ready ?? 0}}`, 'ok'),
+          pill(
+            `apps degraded ${{summary.projects_app_degraded ?? 0}}`,
+            summary.projects_app_degraded ? 'bad' : 'idle'
+          ),
+          pill(
+            `orphans ${{summary.projects_app_orphaned ?? 0}}`,
+            summary.projects_app_orphaned ? 'warn' : 'idle'
+          ),
           pill(`routes ${{summary.projects_ingress_ready ?? 0}}`, 'idle')
         ].join('');
       }}

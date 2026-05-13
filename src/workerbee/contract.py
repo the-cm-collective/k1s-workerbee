@@ -256,6 +256,16 @@ def _feedback_summary(
     if kind in {"ProjectStatus", "ProjectModeGet", "ProjectModeSet", "ProjectStart"}:
         running = _running_state(data)
         selected_project = project or data.get("project") or "default"
+        app_status = _app_status(data)
+        if running is True and app_status.get("state") == "no_workload_deployed":
+            return (
+                f"WorkerBee project `{selected_project}` control plane is running, "
+                "but no app workload is deployed."
+            )
+        if app_status.get("state") == "degraded":
+            return f"WorkerBee project `{selected_project}` has degraded app workloads."
+        if app_status.get("state") == "orphaned":
+            return f"WorkerBee project `{selected_project}` has orphaned app workloads."
         if running is True:
             return f"WorkerBee project `{selected_project}` is running."
         if running is False:
@@ -280,6 +290,11 @@ def _feedback_summary(
         return f"Ingress probe succeeded{f' with HTTP {status}' if status else ''}."
 
     if kind in {"ManifestValidate", "ManifestDeployLocal", "ManifestDeployRemoteK1s"}:
+        app_status = _app_status(data)
+        if app_status.get("state") == "degraded":
+            return f"{label}{project_text} completed but app workloads are degraded."
+        if app_status.get("state") == "orphaned":
+            return f"{label}{project_text} completed with orphaned workloads."
         if data.get("ready") is False or _nested_get(data, "wait", "ready") is False:
             return f"{label}{project_text} completed but workloads are not ready."
         return f"{label}{project_text} completed."
@@ -329,6 +344,19 @@ def _feedback_observations(
     )
     if isinstance(ready, bool):
         observations.append(f"ready: {str(ready).lower()}")
+    app_status = _app_status(data)
+    if app_status:
+        state = app_status.get("state")
+        if state:
+            observations.append(f"app: {state}")
+        declared = app_status.get("declared_workload_count")
+        degraded = app_status.get("degraded_workload_count")
+        orphaned = app_status.get("orphaned_workload_count")
+        if any(isinstance(value, int) and value for value in (declared, degraded, orphaned)):
+            observations.append(
+                f"workloads: declared={int(declared or 0)}, "
+                f"degraded={int(degraded or 0)}, orphaned={int(orphaned or 0)}"
+            )
     status = data.get("status")
     if isinstance(status, int):
         observations.append(f"http status: {status}")
@@ -416,6 +444,15 @@ def _feedback_next_actions(
         actions.append(
             _action("workerbee_v1_project_status", project_args, "verify workload status")
         )
+        app_status = _app_status(data)
+        if kind == "ManifestDeployLocal" and stage and app_status.get("orphaned_workload_count"):
+            actions.append(
+                _action(
+                    "workerbee_v1_manifest_deploy_local",
+                    {**project_args, "stage": stage, "prune": True},
+                    "remove workloads from the previous stage that are absent now",
+                )
+            )
         if _feedback_links(data):
             actions.append(
                 _action(
@@ -614,6 +651,9 @@ def _data_reports_problem(data: dict[str, Any]) -> bool:
     wait = data.get("wait")
     if isinstance(wait, dict) and wait.get("ready") is False:
         return True
+    app_status = _app_status(data)
+    if app_status.get("degraded_workload_count") or app_status.get("orphaned_workload_count"):
+        return True
     status_matches = data.get("status_matches")
     body_matches = data.get("body_matches")
     return status_matches is False or body_matches is False
@@ -624,8 +664,19 @@ def _data_reports_success(data: dict[str, Any]) -> bool:
         return True
     if data.get("ready") is True:
         return True
+    app_status = _app_status(data)
+    if app_status.get("state") == "ready":
+        return True
     running = _running_state(data)
     return running is True
+
+
+def _app_status(data: dict[str, Any]) -> dict[str, Any]:
+    value = data.get("app_status")
+    if isinstance(value, dict):
+        return value
+    nested = _nested_get(data, "project_status", "app_status")
+    return nested if isinstance(nested, dict) else {}
 
 
 def _stage_ref(data: dict[str, Any]) -> str | None:

@@ -92,6 +92,46 @@ def test_agent_feedback_recommends_diagnostics_for_probe_mismatch() -> None:
     ]
 
 
+def test_agent_feedback_calls_out_running_control_plane_without_workload() -> None:
+    result = ok(
+        kind="ProjectStart",
+        project="alpha",
+        data={"running": True, "app_status": {"state": "no_workload_deployed"}},
+    )
+
+    feedback = result["data"]["agent_feedback"]
+
+    assert feedback["severity"] == "ok"
+    assert "no app workload is deployed" in feedback["summary"]
+    assert "app: no_workload_deployed" in feedback["observations"]
+
+
+def test_agent_feedback_recommends_prune_for_orphaned_deploy() -> None:
+    result = ok(
+        kind="ManifestDeployLocal",
+        project="alpha",
+        data={
+            "ok": True,
+            "deployment": {"id": "deploy-1", "stage_dir": "/var/lib/workerbee/stage"},
+            "app_status": {
+                "state": "orphaned",
+                "declared_workload_count": 1,
+                "orphaned_workload_count": 1,
+            },
+        },
+    )
+
+    feedback = result["data"]["agent_feedback"]
+
+    assert feedback["severity"] == "warning"
+    assert "orphaned workloads" in feedback["summary"]
+    assert feedback["next_actions"][1] == {
+        "tool": "workerbee_v1_manifest_deploy_local",
+        "args": {"project": "alpha", "stage": "/var/lib/workerbee/stage", "prune": True},
+        "reason": "remove workloads from the previous stage that are absent now",
+    }
+
+
 def test_ingress_probe_tool_schema_exposes_body_and_headers() -> None:
     mcp = FastMCP("workerbee-test")
 

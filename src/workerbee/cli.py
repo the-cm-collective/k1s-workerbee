@@ -246,6 +246,11 @@ def build_parser() -> argparse.ArgumentParser:
     manifest_local.add_argument("--k1s-root", type=Path, default=None)
     manifest_local.add_argument("-n", "--namespace", default=None)
     manifest_local.add_argument("--timeout", type=int, default=180)
+    manifest_local.add_argument(
+        "--prune",
+        action="store_true",
+        help="Delete workloads from the previous WorkerBee deployment that are absent now",
+    )
     manifest_k1s = manifest_sub.add_parser("deploy-k1s", help="Deploy staged files to remote k1s")
     manifest_k1s.add_argument("--stage", type=Path, required=True)
     manifest_k1s.add_argument("--server", required=True)
@@ -303,6 +308,12 @@ def build_parser() -> argparse.ArgumentParser:
     logs.add_argument("app", nargs="?", default="api")
     logs.add_argument("-n", "--namespace", default=None)
     logs.add_argument("--tail", type=int, default=80)
+    logs.add_argument(
+        "--include-exited",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Fall back to logs from exited containers when no running container exists",
+    )
     exec_p = sub.add_parser("exec", help="Run a command in an app container")
     exec_p.add_argument("app")
     exec_p.add_argument("-n", "--namespace", default=None)
@@ -678,6 +689,7 @@ def main(argv: list[str] | None = None) -> int:
                             namespace=args.namespace,
                             timeout=args.timeout,
                             k1s_root=args.k1s_root,
+                            prune=args.prune,
                         )
                         result["containerd_privilege"] = containerd_privilege_summary(privilege)
                         return _print(result, json_out=args.json)
@@ -691,6 +703,7 @@ def main(argv: list[str] | None = None) -> int:
                             stage_dir=resolve_stage_dir(sup, args.stage),
                             namespace=args.namespace,
                             timeout=args.timeout,
+                            prune=args.prune,
                         ),
                     ),
                     json_out=args.json,
@@ -860,6 +873,7 @@ def main(argv: list[str] | None = None) -> int:
                         app=args.app,
                         namespace=args.namespace,
                         tail=args.tail,
+                        include_exited=args.include_exited,
                     ),
                 ),
                 json_out=args.json,

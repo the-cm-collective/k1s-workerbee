@@ -31,6 +31,24 @@ def _supervisor(tmp_path: Path, monkeypatch) -> WorkerBeeSupervisor:
     return WorkerBeeSupervisor(project="Demo App", state_dir=tmp_path / "state", runtime="docker")
 
 
+def _ready_wait(**kwargs: Any) -> dict[str, Any]:
+    workloads = kwargs.get("workloads") or []
+    return {
+        "ready": True,
+        "waited_seconds": 0.0,
+        "statuses": [
+            {
+                "namespace": item["namespace"],
+                "name": item["name"],
+                "ready": True,
+                "desired": 1,
+                "ready_replicas": 1,
+            }
+            for item in workloads
+        ],
+    }
+
+
 def test_prepare_and_validate_native_stage(tmp_path: Path, monkeypatch) -> None:
     sup = _supervisor(tmp_path, monkeypatch)
 
@@ -326,6 +344,72 @@ spec:
     assert result["manifest_details"][0]["supported_export_formats"] == ["k8s", "helm"]
 
 
+def test_validate_kubernetes_stage_rejects_multi_container_and_init_container(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    (manifests / "web.yaml").write_text(
+        """apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: init
+          image: busybox:latest
+      containers:
+        - name: web
+          image: nginx:latest
+        - name: worker
+          image: busybox:latest
+""",
+        encoding="utf-8",
+    )
+
+    result = validate_stage(stage)
+
+    codes = {finding["code"] for finding in result["findings"]}
+    assert result["ok"] is False
+    assert "K8S_MULTI_CONTAINER_UNSUPPORTED" in codes
+    assert "K8S_INIT_CONTAINERS_UNSUPPORTED" in codes
+
+
+def test_validate_kubernetes_stage_warns_for_command_entrypoint_semantics(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    (manifests / "job.yaml").write_text(
+        """apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-init
+spec:
+  template:
+    spec:
+      containers:
+        - name: mc
+          image: minio/mc:latest
+          command: ["/bin/sh", "-c"]
+          args: ["echo ok"]
+""",
+        encoding="utf-8",
+    )
+
+    result = validate_stage(stage)
+
+    assert result["ok"] is True
+    assert any(
+        finding["code"] == "K8S_COMMAND_ENTRYPOINT_SEMANTICS"
+        for finding in result["findings"]
+    )
+
+
 def test_local_deploy_uses_k8s_apply_flag(tmp_path: Path, monkeypatch) -> None:
     sup = _supervisor(tmp_path, monkeypatch)
     stage = tmp_path / "stage"
@@ -359,12 +443,166 @@ spec:
         return {"ok": True, "input_kind": "kubernetes", "manifest": str(path)}
 
     sup.deploy_k8s_manifest = MethodType(fake_deploy, sup)  # type: ignore[method-assign]
+    sup.load_stack = MethodType(  # type: ignore[method-assign]
+        lambda _self: SimpleNamespace(runtime="docker", controller_url="", read_token=""),
+        sup,
+    )
+    monkeypatch.setattr("workerbee.manifests._wait_for_service_workloads", _ready_wait)
 
     result = deploy_local_stage(supervisor=sup, stage_dir=stage, namespace="demo", timeout=55)
 
     assert result["ok"] is True
     assert calls == [(manifest.resolve(), "demo", 55)]
     assert result["alias_refresh"]["enabled"] is False
+    assert result["app_status"]["state"] == "ready"
+
+
+def test_local_deploy_reports_degraded_app_status(tmp_path: Path, monkeypatch) -> None:
+    sup = _supervisor(tmp_path, monkeypatch)
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    manifest = manifests / "api.k1s.yaml"
+    manifest.write_text(
+        """apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: api
+  namespace: demo
+spec:
+  image: workerbee-demo-api:dev
+""",
+        encoding="utf-8",
+    )
+
+    def fake_deploy(
+        _self,
+        path: Path,
+        *,
+        namespace: str | None = None,
+        timeout: int = 180,
+    ) -> dict[str, Any]:
+        _ = (path, namespace, timeout)
+        return {"ok": True, "manifest": str(manifest)}
+
+    def degraded_wait(**kwargs: Any) -> dict[str, Any]:
+        workload = kwargs["workloads"][0]
+        return {
+            "ready": False,
+            "waited_seconds": 1.0,
+            "statuses": [
+                {
+                    "namespace": workload["namespace"],
+                    "name": workload["name"],
+                    "ready": False,
+                    "desired": 1,
+                    "ready_replicas": 0,
+                }
+            ],
+        }
+
+    sup.deploy_manifest = MethodType(fake_deploy, sup)  # type: ignore[method-assign]
+    sup.load_stack = MethodType(  # type: ignore[method-assign]
+        lambda _self: SimpleNamespace(runtime="docker", controller_url="", read_token=""),
+        sup,
+    )
+    monkeypatch.setattr("workerbee.manifests._wait_for_service_workloads", degraded_wait)
+
+    result = deploy_local_stage(supervisor=sup, stage_dir=stage, timeout=30)
+
+    assert result["apply_ok"] is True
+    assert result["ok"] is False
+    assert result["app_status"]["state"] == "degraded"
+    assert result["app_status"]["degraded_workload_count"] == 1
+
+
+def test_local_deploy_reports_and_prunes_orphaned_previous_workload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sup = _supervisor(tmp_path, monkeypatch)
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    manifest = manifests / "api.k1s.yaml"
+    manifest.write_text(
+        """apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: api
+  namespace: demo
+spec:
+  image: workerbee-demo-api:dev
+""",
+        encoding="utf-8",
+    )
+    previous = {
+        "validation": {
+            "workloads": [
+                {"name": "api", "namespace": "demo", "kind": "Deployment"},
+                {"name": "old-worker", "namespace": "demo", "kind": "Deployment"},
+            ]
+        }
+    }
+    deletes: list[list[str]] = []
+
+    def fake_deploy(
+        _self,
+        path: Path,
+        *,
+        namespace: str | None = None,
+        timeout: int = 180,
+    ) -> dict[str, Any]:
+        _ = (path, namespace, timeout)
+        return {"ok": True, "manifest": str(manifest)}
+
+    def fake_run_ae(
+        _self,
+        args: list[str],
+        *,
+        info: object,
+        timeout: int = 60,
+    ) -> dict[str, Any]:
+        _ = (info, timeout)
+        deletes.append(args)
+        return {"stdout": "deleted old-worker"}
+
+    sup.deploy_manifest = MethodType(fake_deploy, sup)  # type: ignore[method-assign]
+    sup.run_ae = MethodType(fake_run_ae, sup)  # type: ignore[method-assign]
+    sup.load_stack = MethodType(  # type: ignore[method-assign]
+        lambda _self: SimpleNamespace(
+            runtime="docker",
+            controller_url="http://127.0.0.1:19108",
+            read_token="-".join(["read", "token"]),
+            admin_token="-".join(["admin", "token"]),
+        ),
+        sup,
+    )
+    monkeypatch.setattr("workerbee.manifests._wait_for_service_workloads", _ready_wait)
+
+    report = deploy_local_stage(
+        supervisor=sup,
+        stage_dir=stage,
+        previous_deployment=previous,
+        prune=False,
+    )
+    pruned = deploy_local_stage(
+        supervisor=sup,
+        stage_dir=stage,
+        previous_deployment=previous,
+        prune=True,
+    )
+
+    assert report["ok"] is True
+    assert report["app_status"]["state"] == "orphaned"
+    assert report["app_status"]["orphaned_workload_count"] == 1
+    assert "ae delete old-worker -n demo --purge" in report["app_status"]["orphaned_workloads"][0][
+        "cleanup_command"
+    ]
+    assert pruned["ok"] is True
+    assert pruned["app_status"]["state"] == "ready"
+    assert pruned["app_status"]["deleted_orphans"][0]["name"] == "old-worker"
+    assert any("delete" in args and "old-worker" in args for args in deletes)
 
 
 def test_local_containerd_native_deploy_reapplies_after_service_ready(
@@ -515,8 +753,19 @@ spec:
         calls.append(path.name)
         return {"ok": True, "manifest": str(path)}
 
+    def fake_run_ae(
+        _self,
+        args: list[str],
+        *,
+        info: object,
+        timeout: int = 60,
+    ) -> dict[str, Any]:
+        _ = (args, info, timeout)
+        return {"stdout": '{"desired_replicas":1,"ready_replicas":1}'}
+
     sup.load_stack = MethodType(fake_load_stack, sup)  # type: ignore[method-assign]
     sup.deploy_manifest = MethodType(fake_deploy, sup)  # type: ignore[method-assign]
+    sup.run_ae = MethodType(fake_run_ae, sup)  # type: ignore[method-assign]
 
     result = deploy_local_stage(supervisor=sup, stage_dir=stage, namespace=None, timeout=60)
 
