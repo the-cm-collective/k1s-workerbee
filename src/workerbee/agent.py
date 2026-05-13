@@ -125,19 +125,23 @@ queues, or integration behavior that benefits from a running local stack.
 4. Use WorkerBee MCP to build local images, prepare or stage manifests, validate manifests, deploy
    locally, inspect status/logs, probe HTTPS ingress, and export k1s/Kubernetes/Helm artifacts.
    For repo-root image builds with nested Dockerfiles, pass `dockerfile="path/to/Dockerfile"`.
-5. If this is the first WorkerBee run for a repo, there may be no deployed workload to inspect yet.
+5. When the user asks to bring, run, or start the project up in WorkerBee, treat that as a request
+   for a running app workload: build needed images, stage and validate manifests, deploy with
+   `workerbee_v1_manifest_deploy_local`, then inspect status/logs and probe ingress. Do not stop
+   after `workerbee_v1_project_start` if deployable manifests or Containerfiles/Dockerfiles exist.
+6. If this is the first WorkerBee run for a repo, there may be no deployed workload to inspect yet.
    Prefer existing repo manifests and Containerfiles/Dockerfiles. When they are absent, create a
    temporary native k1s staged deployment in WorkerBee state, then build, validate, and deploy it
    before runtime validation or security review.
-6. When the user asks for a security review, call `workerbee_v1_security_review_project` after
+7. When the user asks for a security review, call `workerbee_v1_security_review_project` after
    session bootstrap and project status. If it reports no deployment, stage and deploy the app
    first, then rerun the review.
-7. In lazy mode, do not start the stack until deployment or an explicit project start is needed.
-8. If WorkerBee reports `PROJECT_STOPPED`, tell the user WorkerBee is disabled for this project
+8. In lazy mode, do not start the stack until deployment or an explicit project start is needed.
+9. If WorkerBee reports `PROJECT_STOPPED`, tell the user WorkerBee is disabled for this project
    and show `workerbee project mode start --project <project>`.
-9. Iterate against the live app through status, logs, exec, and `workerbee_v1_ingress_probe` until
+10. Iterate against the live app through status, logs, exec, and `workerbee_v1_ingress_probe` until
    the requested behavior is verified. Use probe `headers` for signed requests such as S3 PUTs.
-10. Export artifacts with `workerbee_v1_bundle_export` when the implementation is ready to hand off.
+11. Export artifacts with `workerbee_v1_bundle_export` when the implementation is ready to hand off.
 
 For staged WorkerBee manifests, app logs and exec default to the WorkerBee project namespace.
 Use `app="namespace/name"` or pass `namespace` only when inspecting a non-default namespace;
@@ -171,6 +175,13 @@ Use the local shell for repo edits and ordinary tests. Use WorkerBee MCP for
 local image builds, native k1s/Kubernetes manifest staging, validation,
 deployment, status, logs, HTTPS ingress probes, security review, dashboard URLs,
 cleanup, and artifact export.
+
+If the user asks to bring, run, or start the project up in WorkerBee, treat that
+as a request for a running app workload. Build needed local images, stage and
+validate manifests, deploy with `workerbee_v1_manifest_deploy_local`, then
+inspect status/logs and probe ingress. Do not stop after
+`workerbee_v1_project_start` if deployable manifests or
+Containerfiles/Dockerfiles exist.
 
 If this is the first time WorkerBee is coming up for a project, there may be no
 deployed workload to inspect yet. Prefer existing repo manifests and
@@ -273,6 +284,11 @@ def runbook_payload() -> dict[str, Any]:
             "Use app names and the optional namespace field for logs/exec, not container names.",
             "Probe WorkerBee HTTPS ingress through workerbee_v1_ingress_probe.",
             "Pass probe headers for signed request checks such as presigned S3 PUTs.",
+            (
+                "Treat bring/run/start the project up in WorkerBee as a request to "
+                "deploy a running app workload with workerbee_v1_manifest_deploy_local; "
+                "do not stop after workerbee_v1_project_start when deployable app inputs exist."
+            ),
             (
                 "For first-time projects, stage and deploy a native k1s workload before "
                 "runtime review."

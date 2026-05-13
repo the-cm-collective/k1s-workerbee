@@ -13,6 +13,13 @@ local image builds, native k1s/Kubernetes manifest staging, validation,
 deployment, status, logs, HTTPS ingress probes, security review, dashboard URLs,
 cleanup, and artifact export.
 
+If the user asks to bring, run, or start the project up in WorkerBee, treat that
+as a request for a running app workload. Build needed local images, stage and
+validate manifests, deploy with `workerbee_v1_manifest_deploy_local`, then
+inspect status/logs and probe ingress. Do not stop after
+`workerbee_v1_project_start` if deployable manifests or
+Containerfiles/Dockerfiles exist.
+
 If this is the first time WorkerBee is coming up for a project, there may be no
 deployed workload to inspect yet. Prefer existing repo manifests and
 Containerfiles/Dockerfiles. When they are absent, build a temporary native k1s

@@ -96,6 +96,23 @@ def test_agent_instructions_include_first_run_security_review_guidance() -> None
     assert "security review" in instructions
     assert "first time WorkerBee is coming up" in instructions
     assert "temporary native k1s" in instructions
+    assert "bring, run, or start the project up in WorkerBee" in instructions
+    assert "running app workload" in instructions
+    assert "workerbee_v1_manifest_deploy_local" in instructions
+    assert "Do not stop after" in instructions
+
+
+def test_runbook_treats_bring_project_up_as_app_deploy() -> None:
+    markdown = runbook_markdown()
+    payload = runbook_payload()
+    loop = "\n".join(payload["loop"])
+
+    assert "bring, run, or start the project up in WorkerBee" in markdown
+    assert "workerbee_v1_manifest_deploy_local" in markdown
+    assert "Do not stop" in markdown
+    assert "workerbee_v1_project_start" in markdown
+    assert "Treat bring/run/start the project up in WorkerBee" in loop
+    assert "workerbee_v1_project_start" in loop
 
 
 def test_runbook_includes_tandem_k1s_dev_workflow() -> None:
