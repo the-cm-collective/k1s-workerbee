@@ -1826,22 +1826,13 @@ def _validate_k8s_documents(path: Path, docs: list[dict[str, Any]]) -> list[dict
                 }
             )
         for container in containers:
-            if container.get("command"):
-                findings.append(
-                    {
-                        "level": "warning",
-                        "code": "K8S_COMMAND_ENTRYPOINT_SEMANTICS",
-                        "path": str(path),
-                        "workload": name,
-                        "container": str(container.get("name") or "main"),
-                        "image": str(container.get("image") or ""),
-                        "message": (
-                            "Kubernetes command/args entrypoint override semantics may not match "
-                            "the local k1s shim; verify images with entrypoints before relying on "
-                            "shell command overrides."
-                        ),
-                    }
-                )
+            command_finding = _k8s_command_entrypoint_finding(
+                path=path,
+                workload=name,
+                container=container,
+            )
+            if command_finding:
+                findings.append(command_finding)
     return findings
 
 
@@ -1850,6 +1841,79 @@ def _k8s_pod_spec(doc: dict[str, Any]) -> dict[str, Any]:
     template = spec.get("template") if isinstance(spec.get("template"), dict) else {}
     pod_spec = template.get("spec") if isinstance(template.get("spec"), dict) else {}
     return pod_spec
+
+
+def _k8s_command_entrypoint_finding(
+    *,
+    path: Path,
+    workload: str,
+    container: dict[str, Any],
+) -> dict[str, Any] | None:
+    command = _command_items(container.get("command"))
+    if not command:
+        return None
+    image = str(container.get("image") or "")
+    if _low_risk_command_override(image=image, command=command):
+        return None
+    risk = _command_entrypoint_risk(image=image, command=command)
+    if risk == "known_entrypoint_image":
+        message = (
+            "This image is known to use an entrypoint; Kubernetes command/args "
+            "override semantics may fail under the local k1s shim. Prefer an image "
+            "whose entrypoint already matches the command, or verify this workload "
+            "with logs after deploy."
+        )
+    else:
+        message = (
+            "Kubernetes command/args entrypoint override semantics may not match "
+            "the local k1s shim; verify images with entrypoints before relying on "
+            "command overrides."
+        )
+    return {
+        "level": "warning",
+        "code": "K8S_COMMAND_ENTRYPOINT_SEMANTICS",
+        "path": str(path),
+        "workload": workload,
+        "container": str(container.get("name") or "main"),
+        "image": image,
+        "command": command,
+        "risk": risk,
+        "message": message,
+    }
+
+
+def _command_items(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item) for item in value if item is not None]
+    return [str(value)]
+
+
+def _low_risk_command_override(*, image: str, command: list[str]) -> bool:
+    if not command:
+        return False
+    executable = Path(command[0]).name.lower()
+    local_image = image.startswith(("localhost/", "localhost:", "workerbee-"))
+    return local_image and executable in {"python", "python3"}
+
+
+def _command_entrypoint_risk(*, image: str, command: list[str]) -> str:
+    normalized_image = _image_repository(image)
+    if normalized_image == "minio/mc" or normalized_image.endswith("/minio/mc"):
+        return "known_entrypoint_image"
+    executable = Path(command[0]).name.lower() if command else ""
+    if executable in {"sh", "bash", "dash"}:
+        return "shell_override"
+    return "unknown_entrypoint"
+
+
+def _image_repository(image: str) -> str:
+    value = image.split("@", 1)[0].lower()
+    last_segment = value.rsplit("/", 1)[-1]
+    if ":" in last_segment:
+        value = value.rsplit(":", 1)[0]
+    return value
 
 
 def _primary_app_name(detail: dict[str, Any]) -> str | None:

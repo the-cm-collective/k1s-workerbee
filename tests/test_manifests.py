@@ -403,8 +403,46 @@ spec:
 
     result = validate_stage(stage)
 
+    command_findings = [
+        finding
+        for finding in result["findings"]
+        if finding["code"] == "K8S_COMMAND_ENTRYPOINT_SEMANTICS"
+    ]
     assert result["ok"] is True
     assert any(
+        finding["code"] == "K8S_COMMAND_ENTRYPOINT_SEMANTICS"
+        for finding in result["findings"]
+    )
+    assert command_findings[0]["risk"] == "known_entrypoint_image"
+    assert "known to use an entrypoint" in command_findings[0]["message"]
+
+
+def test_validate_kubernetes_stage_skips_low_risk_local_python_command(
+    tmp_path: Path,
+) -> None:
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    (manifests / "worker.yaml").write_text(
+        """apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bucket-init
+spec:
+  template:
+    spec:
+      containers:
+        - name: init
+          image: localhost/rawform-first-run:workerbee
+          command: ["python", "-m", "rawform.bootstrap"]
+""",
+        encoding="utf-8",
+    )
+
+    result = validate_stage(stage)
+
+    assert result["ok"] is True
+    assert not any(
         finding["code"] == "K8S_COMMAND_ENTRYPOINT_SEMANTICS"
         for finding in result["findings"]
     )
