@@ -4,6 +4,9 @@ import shutil
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from workerbee.contract import WorkerBeeError
 from workerbee.daemon import (
     DASHBOARD_BACKGROUND_PATH,
     DASHBOARD_LOGO_PATH,
@@ -767,6 +770,247 @@ def test_caddy_exposed_routes_parses_workload_handle_path(tmp_path: Path) -> Non
     assert routes[1]["public_urls"] == ["https://app.rawform.workerbee.localhost:19443/"]
 
 
+def test_ingress_probe_tls_failure_recovers_after_route_reload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="podman", default_project="demo")
+    ca = tmp_path / "global" / "caddy-local-root.crt"
+    ca.parent.mkdir(parents=True)
+    ca.write_text("cert", encoding="utf-8")
+    (tmp_path / "projects" / "demo" / "caddy").mkdir(parents=True)
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        daemon,
+        "global_dashboard",
+        lambda: {
+            "enabled": True,
+            "running": True,
+            "https_port": 19443,
+            "ca_bundle": str(ca),
+            "caddy_container": "workerbee-caddy-test",
+        },
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_sync_ingress_projects_result",
+        lambda: calls.append("reload") or {"scheduled": False, "synced": True},
+    )
+
+    def fake_probe(**kwargs):
+        calls.append("probe")
+        if calls.count("probe") == 1:
+            raise WorkerBeeError(
+                code="PROBE_FAILED",
+                message="certificate verify failed",
+                details={"primary_error": "certificate verify failed"},
+                retryable=True,
+            )
+        return {"ok": True, "url": kwargs["url"], "probe_method": "direct", "status": 200}
+
+    monkeypatch.setattr("workerbee.daemon.probe_workerbee_url", fake_probe)
+
+    result = daemon.ingress_probe(project="demo", host="app.demo.workerbee.localhost")
+
+    assert result["ok"] is True
+    assert calls == ["probe", "reload", "probe"]
+    assert result["probe_recovery"]["reload"] == {"scheduled": False, "synced": True}
+    assert result["probe_recovery"]["caddy_recovery"] is None
+
+
+def test_ingress_probe_tls_failure_recovers_after_caddy_tls_state_reset(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="podman", default_project="demo")
+    ca = tmp_path / "global" / "caddy-local-root.crt"
+    ca.parent.mkdir(parents=True)
+    ca.write_text("cert", encoding="utf-8")
+    calls: list[str] = []
+
+    class FakeIngress:
+        def recover_caddy_tls_state(self, initial_probe: dict[str, object]) -> dict[str, object]:
+            calls.append("caddy-recover")
+            assert "reload_error" in initial_probe
+            return {"ok": True, "container": "workerbee-caddy-test"}
+
+    daemon.ingress = FakeIngress()  # type: ignore[assignment]
+    monkeypatch.setattr(
+        daemon,
+        "global_dashboard",
+        lambda: {
+            "enabled": True,
+            "running": True,
+            "https_port": 19443,
+            "ca_bundle": str(ca),
+            "caddy_container": "workerbee-caddy-test",
+        },
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_sync_ingress_projects_result",
+        lambda: calls.append("reload") or {"scheduled": False, "synced": True},
+    )
+
+    def fake_probe(**kwargs):
+        calls.append("probe")
+        if calls.count("probe") < 3:
+            raise WorkerBeeError(
+                code="PROBE_FAILED",
+                message="tls handshake failed",
+                details={"loopback_error": "tls handshake failed"},
+                retryable=True,
+            )
+        return {"ok": True, "url": kwargs["url"], "probe_method": "direct", "status": 200}
+
+    monkeypatch.setattr("workerbee.daemon.probe_workerbee_url", fake_probe)
+
+    result = daemon.ingress_probe(project="demo", host="app.demo.workerbee.localhost")
+
+    assert result["ok"] is True
+    assert calls == ["probe", "reload", "probe", "caddy-recover", "reload", "probe"]
+    assert result["probe_recovery"]["caddy_recovery"]["ok"] is True
+
+
+def test_ingress_probe_non_tls_failure_does_not_recover(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="podman", default_project="demo")
+    ca = tmp_path / "global" / "caddy-local-root.crt"
+    ca.parent.mkdir(parents=True)
+    ca.write_text("cert", encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        daemon,
+        "global_dashboard",
+        lambda: {"enabled": True, "running": True, "https_port": 19443, "ca_bundle": str(ca)},
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_sync_ingress_projects_result",
+        lambda: calls.append("reload") or {"scheduled": False, "synced": True},
+    )
+
+    def fake_probe(**_kwargs):
+        calls.append("probe")
+        raise WorkerBeeError(
+            code="PROBE_FAILED",
+            message="connection refused",
+            details={"loopback_error": "connection refused"},
+            retryable=True,
+        )
+
+    monkeypatch.setattr("workerbee.daemon.probe_workerbee_url", fake_probe)
+
+    with pytest.raises(WorkerBeeError):
+        daemon.ingress_probe(project="demo", host="app.demo.workerbee.localhost")
+
+    assert calls == ["probe"]
+
+
+def test_ingress_probe_status_mismatch_does_not_recover(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="podman", default_project="demo")
+    ca = tmp_path / "global" / "caddy-local-root.crt"
+    ca.parent.mkdir(parents=True)
+    ca.write_text("cert", encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        daemon,
+        "global_dashboard",
+        lambda: {"enabled": True, "running": True, "https_port": 19443, "ca_bundle": str(ca)},
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_sync_ingress_projects_result",
+        lambda: calls.append("reload") or {"scheduled": False, "synced": True},
+    )
+    monkeypatch.setattr(
+        "workerbee.daemon.probe_workerbee_url",
+        lambda **kwargs: calls.append("probe")
+        or {"ok": False, "url": kwargs["url"], "probe_method": "direct", "status": 404},
+    )
+
+    result = daemon.ingress_probe(
+        project="demo",
+        host="app.demo.workerbee.localhost",
+        expected_status=200,
+    )
+
+    assert result["ok"] is False
+    assert calls == ["probe"]
+    assert "probe_recovery" not in result
+
+
+def test_ingress_probe_final_tls_failure_includes_route_diagnostics(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="podman", default_project="demo")
+    ca = tmp_path / "global" / "caddy-local-root.crt"
+    ca.parent.mkdir(parents=True)
+    ca.write_text("cert", encoding="utf-8")
+    sites = tmp_path / "projects" / "demo" / "caddy"
+    sites.mkdir(parents=True)
+    (sites / "frontend.caddy").write_text(
+        """https://app.demo.workerbee.localhost {
+    tls internal
+    reverse_proxy host.docker.internal:8080
+}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        daemon,
+        "global_dashboard",
+        lambda: {
+            "enabled": True,
+            "running": True,
+            "https_port": 19443,
+            "ca_bundle": str(ca),
+            "caddy_container": "workerbee-caddy-test",
+        },
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_sync_ingress_projects_result",
+        lambda: {"scheduled": False, "synced": True},
+    )
+
+    class FakeIngress:
+        def recover_caddy_tls_state(self, _initial_probe: dict[str, object]) -> dict[str, object]:
+            return {"ok": True, "container": "workerbee-caddy-test"}
+
+    daemon.ingress = FakeIngress()  # type: ignore[assignment]
+
+    def fake_probe(**_kwargs):
+        raise WorkerBeeError(
+            code="PROBE_FAILED",
+            message="tlsv1 alert internal error",
+            details={
+                "primary_error": "certificate verify failed",
+                "loopback_error": "tlsv1 alert internal error",
+            },
+            retryable=True,
+        )
+
+    monkeypatch.setattr("workerbee.daemon.probe_workerbee_url", fake_probe)
+
+    with pytest.raises(WorkerBeeError) as exc_info:
+        daemon.ingress_probe(project="demo", host="app.demo.workerbee.localhost")
+
+    details = exc_info.value.details
+    assert details["probe_recovery"]["final_error"]["message"] == "tlsv1 alert internal error"
+    diagnostics = details["route_diagnostics"]
+    assert diagnostics["sites_dir"] == str(sites)
+    assert diagnostics["files"][0]["path"].endswith("frontend.caddy")
+    assert diagnostics["routes"][0]["hosts"] == ["app.demo.workerbee.localhost"]
+
+
 def test_dashboard_action_rejects_missing_or_wrong_token(tmp_path: Path) -> None:
     daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
 
@@ -1512,10 +1756,13 @@ def test_global_ingress_status_falls_back_to_loopback_health_probe(
     assert status["https_running"] is True
     assert status["health_probe"]["method"] == "loopback-host-header"
     assert status["health_probe"]["primary_error"] == "DNS lookup failed"
+    assert status["health_probe"]["tls_verified"] is True
     assert requests[0][0] == "https://dashboard.workerbee.localhost:19443/healthz"
     assert loopback_requests[0][0] == "https://127.0.0.1:19443/healthz"
     assert loopback_requests[0][1]["server_hostname"] == "dashboard.workerbee.localhost"
     assert loopback_requests[0][1]["host_header"] == "dashboard.workerbee.localhost:19443"
+    assert loopback_requests[0][1]["verify_tls"] is True
+    assert loopback_requests[0][1]["ca_bundle"] == ca
 
 
 def test_global_ingress_status_reports_running_container(
@@ -1689,6 +1936,182 @@ def test_global_ingress_exports_caddy_ca_bundle(tmp_path: Path, monkeypatch) -> 
     assert calls
     assert "cat" in calls[0]
     assert "/data/caddy/pki/authorities/local/root.crt" in calls[0]
+
+
+def test_global_ingress_retries_ca_export_until_caddy_ca_ready(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="containerd",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    ingress.global_dir.mkdir(parents=True)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs):
+        calls.append(cmd)
+        if len(calls) == 1:
+            return SimpleNamespace(returncode=1, stdout="", stderr="root.crt: no such file")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="-----BEGIN CERTIFICATE-----\ncert\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr("workerbee.ingress.subprocess.run", fake_run)
+    monkeypatch.setattr("workerbee.ingress.time.sleep", lambda _seconds: None)
+
+    ingress._export_ca_bundle()  # noqa: SLF001
+
+    assert len(calls) == 2
+    assert ingress.ca_bundle.read_text(encoding="utf-8").startswith("-----BEGIN CERTIFICATE-----")
+
+
+def test_global_ingress_start_verifies_exported_ca(tmp_path: Path, monkeypatch) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    calls: list[object] = []
+
+    def fake_export() -> None:
+        calls.append("export")
+        ingress.ca_bundle.write_text("-----BEGIN CERTIFICATE-----\ncert\n", encoding="utf-8")
+
+    def fake_probe(info: dict[str, object]) -> dict[str, object]:
+        calls.append(("probe", info["ca_bundle"]))
+        return {
+            "ok": True,
+            "url": "https://dashboard.workerbee.localhost:19443/healthz",
+            "tls_verified": True,
+        }
+
+    monkeypatch.setattr(ingress, "_ensure_caddy_container", lambda: calls.append("ensure"))
+    monkeypatch.setattr(ingress, "_wait_ready", lambda: calls.append("wait"))
+    monkeypatch.setattr(ingress, "_export_ca_bundle", fake_export)
+    monkeypatch.setattr("workerbee.ingress._global_dashboard_health_probe", fake_probe)
+
+    info = ingress.start(projects=["alpha"])
+
+    assert calls == [
+        "ensure",
+        "wait",
+        "export",
+        ("probe", str(ingress.ca_bundle)),
+    ]
+    assert info.ca_bundle == str(ingress.ca_bundle)
+    assert ingress.info_file.is_file()
+
+
+def test_global_ingress_start_recovers_caddy_ca_mismatch_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    stale = ingress.caddy_data / "stale-ca-cache"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("old", encoding="utf-8")
+    calls: list[str] = []
+    probes = iter(
+        [
+            {"ok": False, "error": "certificate verify failed"},
+            {
+                "ok": True,
+                "url": "https://dashboard.workerbee.localhost:19443/healthz",
+                "tls_verified": True,
+            },
+        ]
+    )
+
+    def fake_export() -> None:
+        calls.append("export")
+        ingress.ca_bundle.write_text("-----BEGIN CERTIFICATE-----\ncert\n", encoding="utf-8")
+
+    monkeypatch.setattr(ingress, "_ensure_caddy_container", lambda: calls.append("ensure"))
+    monkeypatch.setattr(ingress, "_wait_ready", lambda: calls.append("wait"))
+    monkeypatch.setattr(ingress, "_export_ca_bundle", fake_export)
+    monkeypatch.setattr(ingress, "stop", lambda: calls.append("stop") or {"ok": True})
+    monkeypatch.setattr(
+        "workerbee.ingress._global_dashboard_health_probe",
+        lambda _info: next(probes),
+    )
+
+    ingress.start()
+
+    assert calls == ["ensure", "wait", "export", "stop", "ensure", "wait", "export"]
+    assert not stale.exists()
+    assert ingress.caddy_data.is_dir()
+    assert ingress.ca_bundle.is_file()
+
+
+def test_global_ingress_public_tls_recovery_rewrites_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    ingress.global_dir.mkdir(parents=True)
+    ingress.ca_bundle.write_text("-----BEGIN CERTIFICATE-----\ncert\n", encoding="utf-8")
+    monkeypatch.setattr(
+        ingress,
+        "_recover_caddy_ca_mismatch",
+        lambda _initial_probe: {"ok": True, "verification": {"ok": True}},
+    )
+
+    result = ingress.recover_caddy_tls_state({"ok": False})
+
+    assert result["ok"] is True
+    metadata = json.loads(ingress.info_file.read_text(encoding="utf-8"))
+    assert metadata["caddy_container"] == ingress.container
+    assert metadata["ca_bundle"] == str(ingress.ca_bundle)
+
+
+def test_global_ingress_start_reports_ca_recovery_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+
+    def fake_export() -> None:
+        ingress.ca_bundle.write_text("-----BEGIN CERTIFICATE-----\ncert\n", encoding="utf-8")
+
+    monkeypatch.setattr(ingress, "_ensure_caddy_container", lambda: None)
+    monkeypatch.setattr(ingress, "_wait_ready", lambda: None)
+    monkeypatch.setattr(ingress, "_export_ca_bundle", fake_export)
+    monkeypatch.setattr(ingress, "stop", lambda: {"ok": True})
+    monkeypatch.setattr(
+        "workerbee.ingress._global_dashboard_health_probe",
+        lambda _info: {"ok": False, "error": "certificate verify failed"},
+    )
+
+    with pytest.raises(RuntimeError) as exc_info:
+        ingress.start()
+
+    message = str(exc_info.value)
+    assert "certificate trusted by its exported CA" in message
+    assert "certificate verify failed" in message
+    assert str(ingress.ca_bundle) in message
+    assert ingress.container in message
+    assert "19443" in message
 
 
 class _FakeDashboardHandler:

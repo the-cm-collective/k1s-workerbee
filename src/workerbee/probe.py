@@ -135,13 +135,17 @@ def probe_workerbee_url(
                 ca_bundle=ca_bundle,
             )
         except OSError as loopback_exc:
+            message = str(loopback_exc)
+            if primary_error:
+                message = f"{message}; direct probe failed first: {primary_error}"
             raise WorkerBeeError(
                 code="PROBE_FAILED",
-                message=str(loopback_exc),
+                message=message,
                 details={
                     "url": url,
                     "connect_url": connect_url,
                     "primary_error": primary_error,
+                    "loopback_error": str(loopback_exc),
                 },
                 retryable=True,
                 remediation="Check WorkerBee project status, ingress routes, and Caddy health.",

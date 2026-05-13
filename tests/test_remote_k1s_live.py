@@ -18,6 +18,7 @@ from workerbee.containerd_helper import (
     stop_containerd_helper,
     temporary_containerd_privilege_env,
 )
+from workerbee.contract import WorkerBeeError
 from workerbee.daemon import (
     WorkerBeeDaemon,
     _copy_realtime_contexts,
@@ -202,6 +203,14 @@ def _wait_for_ingress_probe(
                 expected_status=200,
                 timeout=5.0,
             )
+        except WorkerBeeError as exc:
+            last = {
+                "ok": False,
+                "host": host,
+                "path": path,
+                "error": str(exc),
+                "workerbee_error": exc.public_dict(),
+            }
         except Exception as exc:  # noqa: BLE001
             last = {"ok": False, "host": host, "path": path, "error": str(exc)}
         else:
@@ -232,13 +241,36 @@ def _compact_deploy(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def _compact_probe(result: dict[str, Any]) -> dict[str, Any]:
-    return {
+    compact = {
         "ok": result.get("ok"),
         "url": result.get("url"),
+        "connect_url": result.get("connect_url"),
         "status": result.get("status"),
         "method": result.get("probe_method") or result.get("method"),
         "error": result.get("error") or result.get("primary_error"),
     }
+    for key in (
+        "primary_error",
+        "loopback_error",
+        "probe_recovery",
+        "route_diagnostics",
+        "workerbee_error",
+    ):
+        if key in result:
+            compact[key] = result[key]
+    workerbee_error = result.get("workerbee_error")
+    if isinstance(workerbee_error, dict):
+        details = workerbee_error.get("details")
+        if isinstance(details, dict):
+            for key in (
+                "primary_error",
+                "loopback_error",
+                "probe_recovery",
+                "route_diagnostics",
+            ):
+                if key in details and key not in compact:
+                    compact[key] = details[key]
+    return compact
 
 
 def _local_containerd_realtime_image(project: str, app: str) -> str:

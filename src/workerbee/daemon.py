@@ -1596,20 +1596,171 @@ class WorkerBeeDaemon:
         self._raise_if_project_stopped(name)
         info = self.global_dashboard()
         probe_url = build_probe_url(ingress_info=info, url=url, host=host, path=path)
+        probe_args = {
+            "method": method,
+            "expected_status": expected_status,
+            "body_contains": body_contains,
+            "json_body": json_body,
+            "body": body,
+            "headers": headers,
+            "timeout": timeout,
+        }
+        try:
+            return self._ingress_probe_once(
+                project=name,
+                info=info,
+                probe_url=probe_url,
+                probe_args=probe_args,
+            )
+        except WorkerBeeError as exc:
+            if not _ingress_probe_tls_failure(exc):
+                raise
+            return self._recover_ingress_probe_tls_failure(
+                project=name,
+                info=info,
+                probe_url=probe_url,
+                probe_args=probe_args,
+                initial_error=exc,
+            )
+
+    def _ingress_probe_once(
+        self,
+        *,
+        project: str,
+        info: dict[str, Any],
+        probe_url: str,
+        probe_args: dict[str, Any],
+    ) -> dict[str, Any]:
         result = probe_workerbee_url(
-            project=name,
+            project=project,
             ingress_info=info,
             url=probe_url,
-            method=method,
-            expected_status=expected_status,
-            body_contains=body_contains,
-            json_body=json_body,
-            body=body,
-            headers=headers,
-            timeout=timeout,
+            **probe_args,
         )
-        result["project"] = name
+        result["project"] = project
         return result
+
+    def _recover_ingress_probe_tls_failure(
+        self,
+        *,
+        project: str,
+        info: dict[str, Any],
+        probe_url: str,
+        probe_args: dict[str, Any],
+        initial_error: WorkerBeeError,
+    ) -> dict[str, Any]:
+        diagnostics = self._project_route_diagnostics(project, info=info, probe_url=probe_url)
+        recovery: dict[str, Any] = {
+            "reason": "tls_probe_failure",
+            "initial_error": initial_error.public_dict(),
+            "reload": None,
+            "caddy_recovery": None,
+        }
+        try:
+            recovery["reload"] = self._sync_ingress_projects_result()
+        except Exception as exc:  # noqa: BLE001 - continue to Caddy TLS-state recovery
+            recovery["reload"] = {"ok": False, "error": str(exc)}
+
+        info = self.global_dashboard()
+        try:
+            result = self._ingress_probe_once(
+                project=project,
+                info=info,
+                probe_url=probe_url,
+                probe_args=probe_args,
+            )
+            return _probe_result_with_recovery(result, recovery, diagnostics)
+        except WorkerBeeError as reload_error:
+            recovery["reload_error"] = reload_error.public_dict()
+            if not _ingress_probe_tls_failure(reload_error):
+                raise _probe_error_with_recovery(
+                    reload_error,
+                    recovery,
+                    diagnostics,
+                ) from reload_error
+            last_error = reload_error
+
+        ingress = self._active_ingress()
+        if ingress is None:
+            recovery["caddy_recovery"] = {
+                "ok": False,
+                "reason": "global ingress is not running",
+            }
+            raise _probe_error_with_recovery(last_error, recovery, diagnostics) from last_error
+
+        recovery["caddy_recovery"] = ingress.recover_caddy_tls_state(
+            {
+                "probe_url": probe_url,
+                "initial_error": initial_error.public_dict(),
+                "reload_error": last_error.public_dict(),
+                "route_diagnostics": diagnostics,
+            }
+        )
+        if recovery["caddy_recovery"].get("ok"):
+            try:
+                recovery["post_recovery_reload"] = self._sync_ingress_projects_result()
+            except Exception as exc:  # noqa: BLE001 - final probe will carry the failure if needed
+                recovery["post_recovery_reload"] = {"ok": False, "error": str(exc)}
+        else:
+            raise _probe_error_with_recovery(last_error, recovery, diagnostics) from last_error
+
+        info = self.global_dashboard()
+        try:
+            result = self._ingress_probe_once(
+                project=project,
+                info=info,
+                probe_url=probe_url,
+                probe_args=probe_args,
+            )
+            return _probe_result_with_recovery(result, recovery, diagnostics)
+        except WorkerBeeError as final_error:
+            recovery["final_error"] = final_error.public_dict()
+            raise _probe_error_with_recovery(final_error, recovery, diagnostics) from final_error
+
+    def _project_route_diagnostics(
+        self,
+        project: str,
+        *,
+        info: dict[str, Any],
+        probe_url: str,
+    ) -> dict[str, Any]:
+        sites_dir = self.projects_dir / project / "caddy"
+        diagnostics: dict[str, Any] = {
+            "project": project,
+            "url": probe_url,
+            "https_port": info.get("https_port"),
+            "caddy_container": info.get("caddy_container"),
+            "sites_dir": str(sites_dir),
+            "sites_dir_exists": sites_dir.is_dir(),
+            "known_projects": self._known_projects(),
+            "files": [],
+            "routes": [],
+            "errors": [],
+        }
+        if not sites_dir.is_dir():
+            return diagnostics
+        for path in sorted(sites_dir.glob("*.caddy")):
+            try:
+                text = path.read_text(encoding="utf-8")
+                diagnostics["files"].append(
+                    {
+                        "path": str(path),
+                        "size": len(text.encode("utf-8")),
+                        "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                        "excerpt": text[:4096],
+                        "truncated": len(text) > 4096,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - diagnostics should not break probes
+                diagnostics["errors"].append({"path": str(path), "error": str(exc)})
+                continue
+            try:
+                diagnostics["routes"].extend(
+                    _caddy_exposed_routes(path, https_port=int(info.get("https_port") or 0))
+                )
+            except Exception as exc:  # noqa: BLE001 - preserve parse failures as diagnostics
+                diagnostics["errors"].append({"path": str(path), "route_error": str(exc)})
+        return diagnostics
 
     def _project_ingress(self, project: str) -> ProjectIngressConfig | None:
         ingress = self._active_ingress()
@@ -2112,6 +2263,58 @@ def _default_ingress_sync_scheduler(callback: Callable[[], None]) -> None:
     timer = threading.Timer(1.0, callback)
     timer.daemon = True
     timer.start()
+
+
+def _probe_result_with_recovery(
+    result: dict[str, Any],
+    recovery: dict[str, Any],
+    diagnostics: dict[str, Any],
+) -> dict[str, Any]:
+    result["probe_recovery"] = recovery
+    if not result.get("ok"):
+        result["route_diagnostics"] = diagnostics
+    return result
+
+
+def _probe_error_with_recovery(
+    exc: WorkerBeeError,
+    recovery: dict[str, Any],
+    diagnostics: dict[str, Any],
+) -> WorkerBeeError:
+    return WorkerBeeError(
+        code=exc.code,
+        message=exc.message,
+        details={
+            **exc.details,
+            "probe_recovery": recovery,
+            "route_diagnostics": diagnostics,
+        },
+        retryable=exc.retryable,
+        remediation=exc.remediation,
+    )
+
+
+def _ingress_probe_tls_failure(exc: WorkerBeeError) -> bool:
+    if exc.code != "PROBE_FAILED":
+        return False
+    haystack = " ".join(
+        [
+            exc.message,
+            str(exc.details.get("primary_error") or ""),
+            str(exc.details.get("loopback_error") or ""),
+        ]
+    ).lower()
+    return any(
+        token in haystack
+        for token in (
+            "certificate verify",
+            "tls",
+            "ssl",
+            "x509",
+            "unknown authority",
+            "handshake",
+        )
+    )
 
 
 def _dashboard_host_allowed(

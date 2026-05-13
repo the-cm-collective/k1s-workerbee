@@ -252,6 +252,11 @@ class GlobalIngress:
         self._ensure_caddy_container()
         self._wait_ready()
         self._export_ca_bundle()
+        verification = self._verified_dashboard_health_probe()
+        if not verification.get("ok"):
+            recovery = self._recover_caddy_ca_mismatch(verification)
+            if not recovery.get("ok"):
+                raise RuntimeError(_caddy_ca_verification_error(recovery))
         info = self.info()
         self.info_file.write_text(json.dumps(info.public_dict(), indent=2), encoding="utf-8")
         return info
@@ -518,25 +523,109 @@ https://{self.dashboard_host} {{
             _wait_for_tcp(probe_host, self.ca_http_port, timeout_seconds=20)
 
     def _export_ca_bundle(self) -> None:
-        proc = subprocess.run(
-            runtime_command_args(
-                self.runtime,
-                state_root=self.state_root,
-                project=None,
-                system=True,
-                args=["exec", self.container, "cat", self._container_ca_bundle],
-            ),
-            check=False,
-            text=True,
-            capture_output=True,
-            timeout=10,
-        )
-        if proc.returncode != 0 or not proc.stdout.strip():
-            raise RuntimeError(f"failed to export WorkerBee Caddy CA:\n{proc.stderr}")
+        deadline = time.monotonic() + 10.0
+        last_output = ""
+        while True:
+            proc = subprocess.run(
+                runtime_command_args(
+                    self.runtime,
+                    state_root=self.state_root,
+                    project=None,
+                    system=True,
+                    args=["exec", self.container, "cat", self._container_ca_bundle],
+                ),
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                break
+            last_output = (proc.stderr or proc.stdout or "").strip()
+            if time.monotonic() >= deadline:
+                raise RuntimeError(f"failed to export WorkerBee Caddy CA:\n{last_output}")
+            time.sleep(0.2)
         tmp = self.ca_bundle.with_suffix(".tmp")
         tmp.write_text(proc.stdout, encoding="utf-8")
         tmp.chmod(0o644)
         tmp.replace(self.ca_bundle)
+
+    def _verified_dashboard_health_probe(self) -> dict[str, Any]:
+        return _global_dashboard_health_probe(self.info().public_dict())
+
+    def recover_caddy_tls_state(self, initial_probe: dict[str, Any]) -> dict[str, Any]:
+        recovery = self._recover_caddy_ca_mismatch(initial_probe)
+        if recovery.get("ok"):
+            self.info_file.write_text(
+                json.dumps(self.info().public_dict(), indent=2),
+                encoding="utf-8",
+            )
+        return recovery
+
+    def _recover_caddy_ca_mismatch(self, initial_probe: dict[str, Any]) -> dict[str, Any]:
+        recovery: dict[str, Any] = {
+            "ok": False,
+            "reason": "caddy CA verification failed",
+            "container": self.container,
+            "https_port": self.https_port,
+            "ca_bundle": str(self.ca_bundle),
+            "initial_probe": initial_probe,
+        }
+        try:
+            stop_result = self.stop()
+            recovery["stop"] = stop_result
+            if not stop_result.get("ok"):
+                raise RuntimeError(
+                    "failed to stop WorkerBee Caddy before CA recovery: "
+                    f"{stop_result}"
+                )
+            recovery["purge"] = self._purge_caddy_state()
+            self.caddy_data.mkdir(parents=True, exist_ok=True)
+            self._ensure_caddy_container()
+            self._wait_ready()
+            self._export_ca_bundle()
+            verification = self._verified_dashboard_health_probe()
+            recovery["verification"] = verification
+            recovery["ok"] = bool(verification.get("ok"))
+            return recovery
+        except Exception as exc:  # noqa: BLE001 - include recovery details in startup error
+            recovery["error"] = str(exc)
+            return recovery
+
+    def _purge_caddy_state(self) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "caddy_data": str(self.caddy_data),
+            "ca_bundle": str(self.ca_bundle),
+            "removed_caddy_data": False,
+            "removed_ca_bundle": False,
+        }
+        if self.ca_bundle.exists() or self.ca_bundle.is_symlink():
+            self.ca_bundle.unlink()
+            result["removed_ca_bundle"] = True
+        if not self.caddy_data.exists() and not self.caddy_data.is_symlink():
+            return result
+        try:
+            if self.caddy_data.is_dir() and not self.caddy_data.is_symlink():
+                shutil.rmtree(self.caddy_data)
+            else:
+                self.caddy_data.unlink()
+            result["removed_caddy_data"] = True
+            return result
+        except Exception as exc:  # noqa: BLE001 - try privileged helper for root-owned files
+            result["direct_error"] = str(exc)
+            if self.runtime != CONTAINERD_RUNTIME:
+                raise
+        from workerbee.containerd_helper import remove_containerd_helper_tree
+
+        helper = remove_containerd_helper_tree(self.state_root, self.caddy_data)
+        result["helper"] = helper
+        if not helper.get("ok"):
+            raise RuntimeError(
+                "failed to purge WorkerBee Caddy data after CA verification failure: "
+                f"{helper}"
+            )
+        result["removed_caddy_data"] = bool(helper.get("removed"))
+        return result
 
     def _container_running(self) -> bool:
         return _caddy_container_running(self.state_root, self.runtime, self.container)
@@ -771,7 +860,10 @@ def _global_dashboard_health_probe(info: dict[str, Any]) -> dict[str, Any]:
             return {
                 "ok": True,
                 "url": health_url,
+                "method": "direct",
                 "status": result.status,
+                "tls_verified": ca_ready,
+                "ca_ready": ca_ready,
             }
         primary_error = None
         primary_status = result.status
@@ -781,6 +873,7 @@ def _global_dashboard_health_probe(info: dict[str, Any]) -> dict[str, Any]:
     fallback = _loopback_dashboard_health_probe(
         parsed,
         ca_ready=ca_ready,
+        ca_bundle=ca_bundle if ca_ready else None,
         connect_host=_bind_probe_host(str(info.get("bind_host") or INGRESS_BIND_LOOPBACK)),
     )
     if fallback is not None:
@@ -795,6 +888,8 @@ def _global_dashboard_health_probe(info: dict[str, Any]) -> dict[str, Any]:
         "url": health_url,
         "error": primary_error,
         "status": primary_status,
+        "tls_verified": False,
+        "ca_ready": ca_ready,
     }
 
 
@@ -802,6 +897,7 @@ def _loopback_dashboard_health_probe(
     parsed: SplitResult,
     *,
     ca_ready: bool,
+    ca_bundle: Path | None = None,
     connect_host: str = INGRESS_BIND_LOOPBACK,
 ) -> dict[str, Any] | None:
     if parsed.scheme != "https" or not parsed.port:
@@ -815,7 +911,8 @@ def _loopback_dashboard_health_probe(
             timeout=1.0,
             server_hostname=parsed.hostname or "dashboard.workerbee.localhost",
             host_header=parsed.netloc,
-            verify_tls=False,
+            verify_tls=ca_ready,
+            ca_bundle=ca_bundle if ca_ready else None,
         )
     except Exception as exc:  # noqa: BLE001 - status probe only
         return {
@@ -824,6 +921,7 @@ def _loopback_dashboard_health_probe(
             "host_header": parsed.netloc,
             "method": "loopback-host-header",
             "ca_ready": ca_ready,
+            "tls_verified": False,
             "error": str(exc),
         }
     return {
@@ -832,8 +930,18 @@ def _loopback_dashboard_health_probe(
         "host_header": parsed.netloc,
         "method": "loopback-host-header",
         "ca_ready": ca_ready,
+        "tls_verified": bool(ca_ready and result.status == 200),
         "status": result.status,
     }
+
+
+def _caddy_ca_verification_error(recovery: dict[str, Any]) -> str:
+    details = json.dumps(recovery, indent=2, sort_keys=True, default=str)
+    return (
+        "WorkerBee Caddy did not serve a certificate trusted by its exported CA "
+        "after one recovery attempt.\n"
+        f"{details}"
+    )
 
 
 def _container_name(state_root: Path) -> str:

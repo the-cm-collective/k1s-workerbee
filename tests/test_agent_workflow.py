@@ -597,6 +597,38 @@ def test_probe_falls_back_to_loopback_when_workerbee_dns_fails(
     assert calls[0]["ca_bundle"] == ca
 
 
+def test_probe_reports_direct_and_loopback_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ca = tmp_path / "root.crt"
+    ca.write_text("fake", encoding="utf-8")
+    ingress = {"https_port": 19443, "ca_bundle": str(ca)}
+
+    def fake_urlopen(*_args: object, **_kwargs: object) -> object:
+        raise OSError("direct TLS mismatch")
+
+    def fake_loopback(*_args: object, **_kwargs: object) -> object:
+        raise OSError("loopback TLS mismatch")
+
+    monkeypatch.setattr(ssl, "create_default_context", lambda **_kwargs: object())
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr("workerbee.probe.request_https_via_loopback", fake_loopback)
+
+    with pytest.raises(WorkerBeeError) as exc_info:
+        probe_workerbee_url(
+            project="demo",
+            ingress_info=ingress,
+            url="https://api.demo.workerbee.localhost:19443/healthz",
+            expected_status=200,
+        )
+
+    assert "loopback TLS mismatch" in str(exc_info.value)
+    assert "direct TLS mismatch" in str(exc_info.value)
+    assert exc_info.value.details["primary_error"] == "direct TLS mismatch"
+    assert exc_info.value.details["loopback_error"] == "loopback TLS mismatch"
+
+
 def _stack(supervisor: WorkerBeeSupervisor) -> StackInfo:
     return StackInfo(
         project=supervisor.project,
