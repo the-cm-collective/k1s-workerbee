@@ -182,6 +182,11 @@ def test_global_dashboard_uses_k1s_visual_style() -> None:
     assert 'data-action="start_projects"' in html
     assert 'data-action="delete_projects"' in html
     assert 'data-action="start_all_projects"' in html
+    assert 'data-action-scope="selected"' in html
+    assert 'data-action-scope="all"' in html
+    assert 'data-action-scope="row"' in html
+    assert "reconcileActionJobs" in html
+    assert "selectedCount" in html
     assert 'data-action="mcp_reboot"' in html
     assert 'class="row-actions"><div class="row-actions-inner">' in html
     assert ".row-actions { display: flex" not in html

@@ -3170,10 +3170,12 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             f"<td>{_esc(error)}</td>"
             f"<td>{_esc(item.get('state_dir'))}</td>"
             '<td class="row-actions"><div class="row-actions-inner">'
-            f'<button data-action="start_projects" data-project="{project}">Start</button>'
-            f'<button data-action="stop_projects" data-project="{project}">Stop</button>'
+            f'<button data-action="start_projects" data-action-scope="row" '
+            f'data-project="{project}">Start</button>'
+            f'<button data-action="stop_projects" data-action-scope="row" '
+            f'data-project="{project}">Stop</button>'
             f'<button class="danger" data-action="delete_projects" '
-            f'data-project="{project}">Delete</button>'
+            f'data-action-scope="row" data-project="{project}">Delete</button>'
             "</div></td>"
             "</tr>"
             f'<tr class="route-details" data-route-project="{project}" hidden>'
@@ -3432,18 +3434,31 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
       <section class="card">
         <h2>Controls</h2>
         <div class="actions">
-          <button id="start-selected" data-action="start_projects">Start Selected</button>
-          <button id="stop-selected" data-action="stop_projects">Stop Selected</button>
-          <button id="delete-selected" class="danger" data-action="delete_projects">
+          <button id="start-selected" data-action="start_projects" data-action-scope="selected">
+            Start Selected
+          </button>
+          <button id="stop-selected" data-action="stop_projects" data-action-scope="selected">
+            Stop Selected
+          </button>
+          <button id="delete-selected" class="danger" data-action="delete_projects"
+            data-action-scope="selected">
             Delete Selected
           </button>
-          <button id="start-all" data-action="start_all_projects">Start All</button>
-          <button id="stop-all" data-action="stop_all_projects">Stop All</button>
-          <button id="delete-all" class="danger" data-action="delete_all_projects">
+          <button id="start-all" data-action="start_all_projects" data-action-scope="all">
+            Start All
+          </button>
+          <button id="stop-all" data-action="stop_all_projects" data-action-scope="all">
+            Stop All
+          </button>
+          <button id="delete-all" class="danger" data-action="delete_all_projects"
+            data-action-scope="all">
             Delete All
           </button>
-          <button id="mcp-reboot" data-action="mcp_reboot">Reboot MCP</button>
-          <button id="mcp-shutdown" class="danger" data-action="mcp_shutdown">
+          <button id="mcp-reboot" data-action="mcp_reboot" data-action-scope="lifecycle">
+            Reboot MCP
+          </button>
+          <button id="mcp-shutdown" class="danger" data-action="mcp_shutdown"
+            data-action-scope="lifecycle">
             Shutdown MCP
           </button>
           <label class="refresh-controls">
@@ -3693,6 +3708,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             '<tr><td class="muted" colspan="13">No WorkerBee projects registered.</td></tr>';
           expandedRouteProjects.clear();
           configureRefreshTimer({{persist: false}});
+          updateBusyControls();
           return;
         }}
         const presentProjects = new Set(projects.map((item) => String(item.project || '')));
@@ -3720,15 +3736,18 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             + `<td>${{escapeHtml(error)}}</td>`
             + `<td>${{escapeHtml(item.state_dir || '')}}</td>`
             + '<td class="row-actions"><div class="row-actions-inner">'
-            + `<button data-action="start_projects" data-project="${{safeProject}}">Start</button>`
-            + `<button data-action="stop_projects" data-project="${{safeProject}}">Stop</button>`
+            + `<button data-action="start_projects" data-action-scope="row" `
+            + `data-project="${{safeProject}}">Start</button>`
+            + `<button data-action="stop_projects" data-action-scope="row" `
+            + `data-project="${{safeProject}}">Stop</button>`
             + `<button class="danger" data-action="delete_projects" `
-            + `data-project="${{safeProject}}">Delete</button>`
+            + `data-action-scope="row" data-project="${{safeProject}}">Delete</button>`
             + '</div></td>'
             + '</tr>'
             + renderRouteDetails(item, safeProject, expanded);
         }}).join('');
         configureRefreshTimer({{persist: false}});
+        updateBusyControls();
       }}
 
       function renderSummary(summary = {{}}, globalDashboard = {{}}) {{
@@ -3772,15 +3791,19 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         return 'idle';
       }}
 
-      function renderJobs(jobs = []) {{
-        const recent = Array.isArray(jobs) ? jobs.slice(0, 6) : [];
-        recent.forEach((job) => {{
+      function reconcileActionJobs(jobs = []) {{
+        activeJobIds.clear();
+        jobs.forEach((job) => {{
           if (job.status === 'queued' || job.status === 'running') {{
             activeJobIds.add(job.job_id);
-          }} else {{
-            activeJobIds.delete(job.job_id);
           }}
         }});
+      }}
+
+      function renderJobs(jobs = []) {{
+        const allJobs = Array.isArray(jobs) ? jobs : [];
+        reconcileActionJobs(allJobs);
+        const recent = allJobs.slice(0, 6);
         jobsGrid.innerHTML = recent.map((job) => {{
           const label = `${{job.action}}: ${{job.status}}`;
           return pill(label, jobState(job));
@@ -3858,8 +3881,10 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
 
       function updateBusyControls() {{
         const busy = activeJobIds.size > 0;
+        const selectedCount = selectedProjects().length;
         document.querySelectorAll('button[data-action]').forEach((button) => {{
-          button.disabled = busy;
+          const scope = button.dataset.actionScope || (button.dataset.project ? 'row' : 'selected');
+          button.disabled = busy || (scope === 'selected' && selectedCount === 0);
         }});
       }}
 
@@ -3999,21 +4024,28 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         }}
         const button = event.target.closest('button[data-action]');
         if (!button) return;
+        if (button.disabled) return;
         const action = button.dataset.action;
+        const scope = button.dataset.actionScope || (button.dataset.project ? 'row' : 'selected');
         const project = button.dataset.project;
-        let projects = project ? [project] : [];
-        if (
-          action === 'start_projects' ||
-          action === 'stop_projects' ||
-          action === 'delete_projects'
-        ) {{
-          projects = projects.length ? projects : selectedProjects();
+        let projects = [];
+        if (scope === 'row') {{
+          if (!project) return;
+          projects = [project];
+        }} else if (scope === 'selected') {{
+          projects = selectedProjects();
           if (!projects.length) {{
             window.alert('Select at least one WorkerBee project.');
             return;
           }}
         }}
         postAction(action, projects);
+      }});
+
+      document.addEventListener('change', (event) => {{
+        if (event.target.closest('.project-select')) {{
+          updateBusyControls();
+        }}
       }});
 
       copyResultButton.addEventListener('click', () => {{
@@ -4031,6 +4063,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         }}
       }});
       updateResponseControls();
+      updateBusyControls();
 
       refreshSelect.value = localStorage.getItem(refreshKey) || refreshSelect.value || '5000';
       refreshSelect.addEventListener('change', () => {{
