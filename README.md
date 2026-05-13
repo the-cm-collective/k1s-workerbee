@@ -433,7 +433,26 @@ prints and writes a fallback cleanup command in its JSON report, for example:
 workerbee --runtime containerd --state-root <state-root> cleanup --execute --purge-images
 ```
 
-`--stage` accepts either the absolute `stage_dir` returned by prepare or the named stage under the project `artifacts/staged` directory. `manifest prepare --source <file-or-dir>` can stage native k1s YAML or practical Kubernetes YAML. Kubernetes input is applied through the k1s shim `ae apply --k8s` path and should keep exactly one workload plus matching Service/Ingress documents per file. Native k1s manifests are the required input when exporting a native k1s bundle; Kubernetes input can be exported as Kubernetes YAML or a Helm skeleton. Kubernetes and Helm exports preserve Secret references but do not emit Secret values; create environment-specific Secret objects before applying those exports.
+`--stage` accepts either the absolute `stage_dir` returned by prepare or the
+named stage under the project `artifacts/staged` directory.
+`manifest prepare --source <file-or-dir>` can stage native k1s YAML or practical
+Kubernetes YAML. Kubernetes input is applied through the k1s shim
+`ae apply --k8s` path and should keep exactly one workload plus matching
+Service/Ingress documents per file. Native k1s manifests are the required input
+when exporting a native k1s bundle; Kubernetes input can be exported as
+Kubernetes YAML or a Helm skeleton. Kubernetes and Helm exports preserve Secret
+references but do not emit Secret values; create environment-specific Secret
+objects before applying those exports.
+
+For Compose-shaped first runs, treat Compose as the source topology rather than
+as a directly runnable WorkerBee input. Map each service to a separate
+one-container workload, keep API and background workers separate unless the repo
+already ships a combined development image, run object stores or queues as their
+own workloads, and model bucket/database/bootstrap setup as an explicit Job or
+temporary setup workload. WorkerBee v0.1 does not run Kubernetes
+`initContainers`, multi-container pods, or exact Kubernetes entrypoint override
+semantics in local apply, so validate these translations with status, logs, and
+ingress probes after deployment.
 
 `workerbee_v1_ingress_status` reports global ingress, DNS, CA readiness, CA
 SHA256, and command guidance for export/trust/LAN download.

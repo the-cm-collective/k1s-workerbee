@@ -106,13 +106,16 @@ def test_runbook_treats_bring_project_up_as_app_deploy() -> None:
     markdown = runbook_markdown()
     payload = runbook_payload()
     loop = "\n".join(payload["loop"])
+    first_run = "\n".join(payload["first_run"])
 
     assert "bring, run, or start the project up in WorkerBee" in markdown
     assert "workerbee_v1_manifest_deploy_local" in markdown
     assert "Do not stop" in markdown
     assert "workerbee_v1_project_start" in markdown
+    assert "Compose-shaped repos" in markdown
     assert "Treat bring/run/start the project up in WorkerBee" in loop
     assert "workerbee_v1_project_start" in loop
+    assert "map services to separate one-container workloads" in first_run
 
 
 def test_runbook_includes_tandem_k1s_dev_workflow() -> None:

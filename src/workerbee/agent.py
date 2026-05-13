@@ -133,15 +133,18 @@ queues, or integration behavior that benefits from a running local stack.
    Prefer existing repo manifests and Containerfiles/Dockerfiles. When they are absent, create a
    temporary native k1s staged deployment in WorkerBee state, then build, validate, and deploy it
    before runtime validation or security review.
-7. When the user asks for a security review, call `workerbee_v1_security_review_project` after
+7. For Compose-shaped repos, translate the topology to WorkerBee's supported shape instead of
+   trying to run Compose directly: one container per workload, API/worker/store as separate
+   workloads, and one-shot initialization as an explicit Job or temporary setup workload.
+8. When the user asks for a security review, call `workerbee_v1_security_review_project` after
    session bootstrap and project status. If it reports no deployment, stage and deploy the app
    first, then rerun the review.
-8. In lazy mode, do not start the stack until deployment or an explicit project start is needed.
-9. If WorkerBee reports `PROJECT_STOPPED`, tell the user WorkerBee is disabled for this project
+9. In lazy mode, do not start the stack until deployment or an explicit project start is needed.
+10. If WorkerBee reports `PROJECT_STOPPED`, tell the user WorkerBee is disabled for this project
    and show `workerbee project mode start --project <project>`.
-10. Iterate against the live app through status, logs, exec, and `workerbee_v1_ingress_probe` until
+11. Iterate against the live app through status, logs, exec, and `workerbee_v1_ingress_probe` until
    the requested behavior is verified. Use probe `headers` for signed requests such as S3 PUTs.
-11. Export artifacts with `workerbee_v1_bundle_export` when the implementation is ready to hand off.
+12. Export artifacts with `workerbee_v1_bundle_export` when the implementation is ready to hand off.
 
 For staged WorkerBee manifests, app logs and exec default to the WorkerBee project namespace.
 Use `app="namespace/name"` or pass `namespace` only when inspecting a non-default namespace;
@@ -302,6 +305,10 @@ def runbook_payload() -> dict[str, Any]:
             (
                 "When no deployable manifests exist, generate temporary native k1s staged "
                 "artifacts in WorkerBee state and deploy them locally."
+            ),
+            (
+                "For Compose-shaped repos, map services to separate one-container workloads; "
+                "model API, worker, store, and one-shot init as separate workloads or Jobs."
             ),
             (
                 "Keep generated first-run artifacts out of the repo unless the user asks to "
