@@ -191,6 +191,22 @@ prerequisite for the default runtime path.
 If `k1s-workerbee-runtime` is already available from your configured package
 index, the local wheelhouse build and `--find-links` option can be omitted.
 
+When rebuilding WorkerBee from this checkout and restarting the normal
+background MCP daemon, stop the old daemon before reinstalling and refresh sudo
+before start:
+
+```bash
+workerbee mcp stop
+scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse
+uv pip install --python .venv -e '.[dev]' --find-links dist/workerbee-wheelhouse --force-reinstall
+sudo -v && workerbee mcp start
+```
+
+This keeps the background daemon from serving old in-process code, refreshes the
+editable install against the rebuilt local runtime wheelhouse, and ensures
+direct-containerd startup has a current sudo credential when `sudo-helper` is
+configured.
+
 For the advanced direct containerd verification path, use the repo-local helper:
 
 ```bash

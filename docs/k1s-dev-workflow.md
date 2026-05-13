@@ -43,6 +43,21 @@ uv venv .venv
 uv pip install -e '.[dev]' --find-links dist/workerbee-wheelhouse
 ```
 
+When rebuilding WorkerBee itself and restarting the normal MCP daemon, use the
+clean stop, rebuild, force-reinstall, sudo-refresh, start sequence:
+
+```bash
+workerbee mcp stop
+scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse
+uv pip install --python .venv -e '.[dev]' --find-links dist/workerbee-wheelhouse --force-reinstall
+sudo -v && workerbee mcp start
+```
+
+Stopping first prevents the daemon from serving old in-process code. The
+`--force-reinstall` install refreshes WorkerBee against the rebuilt local
+wheelhouse, and `sudo -v` refreshes credentials before direct-containerd
+`sudo-helper` startup.
+
 Start the direct-containerd MCP daemon with the repo helper:
 
 ```bash
@@ -143,8 +158,11 @@ Kubernetes, and Helm artifacts.
 
 - After k1s source changes, restart the profile so controller and API shim
   Python processes reload `/workspace/src`.
-- After WorkerBee source changes, restart MCP with
-  `scripts/dev/wb-containerd mcp-restart`.
+- After WorkerBee source changes that are only interpreted from the editable
+  checkout, restart MCP with `scripts/dev/wb-containerd mcp-restart`.
+- After rebuilding WorkerBee packages or the local k1s runtime wheelhouse, use
+  the clean MCP stop, wheelhouse build, `uv pip install --force-reinstall`, and
+  `sudo -v && workerbee mcp start` sequence from Setup.
 - After changing WorkerBee's generated helper bridge behavior, purge the profile
   because existing `workerbee-nerdctl` bridge scripts in WorkerBee state are not
   rewritten once created:
