@@ -341,6 +341,18 @@ def _feedback_observations(
             observations.append("retryable: true")
     if warnings:
         observations.append(f"warnings: {len(warnings)}")
+    build_summary = data.get("build_summary")
+    if isinstance(build_summary, dict):
+        line_count = build_summary.get("line_count")
+        warning_count = build_summary.get("warning_count")
+        error_count = build_summary.get("error_count")
+        if any(isinstance(value, int) for value in (line_count, warning_count, error_count)):
+            observations.append(
+                "build output: "
+                f"lines={int(line_count or 0)}, "
+                f"warnings={int(warning_count or 0)}, "
+                f"errors={int(error_count or 0)}"
+            )
 
     mode = data.get("mode") or _nested_get(data, "project_status", "mode")
     if mode:

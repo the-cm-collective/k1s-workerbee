@@ -193,6 +193,26 @@ def test_exec_command_failure_feedback_surfaces_stderr() -> None:
     )
 
 
+def test_agent_feedback_observes_image_build_summary() -> None:
+    result = ok(
+        kind="ImageBuild",
+        project="alpha",
+        data={
+            "ok": True,
+            "tag": "workerbee-alpha-api:dev",
+            "build_summary": {
+                "line_count": 150,
+                "warning_count": 2,
+                "error_count": 0,
+            },
+        },
+    )
+
+    feedback = result["data"]["agent_feedback"]
+
+    assert "build output: lines=150, warnings=2, errors=0" in feedback["observations"]
+
+
 def test_ingress_probe_tool_schema_exposes_body_and_headers() -> None:
     mcp = FastMCP("workerbee-test")
 

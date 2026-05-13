@@ -181,7 +181,10 @@ def test_docker_build_uses_containerfile_when_no_dockerfile(
 
     def fake_run(cmd: list[str], **_kwargs):
         calls.append(cmd)
-        return SimpleNamespace(returncode=0, stdout="ok")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="Step 1/2\nWARNING: cache disabled\nSuccessfully built\n",
+        )
 
     monkeypatch.setattr("workerbee.runtime_support.subprocess.run", fake_run)
 
@@ -197,6 +200,10 @@ def test_docker_build_uses_containerfile_when_no_dockerfile(
     assert calls[0][0:4] == ["docker", "build", "-t", "workerbee-demo:test"]
     assert calls[0][4:6] == ["-f", str(containerfile)]
     assert "--no-cache" in calls[0]
+    assert result["build_summary"]["backend"] == "docker"
+    assert result["build_summary"]["line_count"] == 3
+    assert result["build_summary"]["warning_count"] == 1
+    assert result["build_summary"]["error_count"] == 0
 
 
 def test_docker_build_accepts_explicit_dockerfile_with_repo_root_context(
@@ -271,6 +278,9 @@ def test_containerd_fallback_build_loads_image_from_state_local_tar(
 
     assert result["ok"] is True
     assert result["build_backend"] == "podman-save-load"
+    assert result["build_summary"]["backend"] == "podman-save-load"
+    assert result["build_summary"]["line_count"] == 3
+    assert result["attempts"][0]["summary"]["error_count"] == 1
     assert "--no-cache" in calls[0]
     assert calls[-1][-3:] == ["load", "-i", calls[-1][-1]]
     assert not list((tmp_path / "global" / "image-transfer").glob("*.tar"))
@@ -316,6 +326,36 @@ def test_containerd_build_skips_nerdctl_when_buildctl_missing_and_fallback_exist
     assert result["attempts"][0]["skipped"] is True
     assert any(cmd[:2] == ["podman", "build"] and "--no-cache" in cmd for cmd in calls)
     assert not any(cmd[0] == "nerdctl" and "build" in cmd for cmd in calls)
+
+
+def test_docker_build_failure_includes_build_summary(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    context.mkdir()
+
+    def fake_run(_cmd: list[str], **_kwargs):
+        return SimpleNamespace(
+            returncode=1,
+            stdout="Step 1/2\nwarning: old base image\nERROR: build failed\n",
+        )
+
+    monkeypatch.setattr("workerbee.runtime_support.subprocess.run", fake_run)
+
+    with pytest.raises(RuntimeError) as exc_info:
+        build_image_with_runtime(
+            runtime="docker",
+            state_root=tmp_path,
+            project="demo",
+            context=context,
+            tag="workerbee-demo:test",
+        )
+
+    payload = json.loads(str(exc_info.value))
+    assert payload["build_summary"]["line_count"] == 3
+    assert payload["build_summary"]["warning_count"] == 1
+    assert payload["build_summary"]["error_count"] == 1
 
 
 def test_containerd_cli_wrapper_routes_caddy_exec_to_system_namespace(tmp_path: Path) -> None:

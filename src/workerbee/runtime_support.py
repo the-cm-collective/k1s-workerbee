@@ -24,6 +24,8 @@ CONTAINERD_RESERVED_NAMESPACES = frozenset({"ae", "k8s.io", "moby", "default"})
 CONTAINERD_REQUIRED_CNI_PLUGINS = ("bridge", "host-local", "loopback", "portmap")
 MICROK8S_ROOT = Path("/var/snap/microk8s")
 MICROK8S_CONTAINERD_SOCKET = MICROK8S_ROOT / "common" / "run" / "containerd.sock"
+BUILD_SUMMARY_TAIL_LINES = 8
+BUILD_SUMMARY_MATCH_LIMIT = 12
 
 
 @dataclass(frozen=True, slots=True)
@@ -679,6 +681,7 @@ def build_image_with_runtime(
         "labels": label_values,
         "cmd": cmd,
         "stdout": proc.stdout,
+        "build_summary": _build_output_summary(proc.stdout, backend=selected, tag=tag),
     }
     if proc.returncode != 0:
         raise RuntimeError(json.dumps(result, indent=2))
@@ -857,9 +860,7 @@ def _build_image_containerd(
             stderr=subprocess.STDOUT,
             timeout=timeout,
         )
-        attempts.append(
-            {"backend": "nerdctl", "returncode": proc.returncode, "stdout": proc.stdout}
-        )
+        attempts.append(_build_attempt("nerdctl", proc.returncode, proc.stdout, tag=tag))
         if proc.returncode == 0:
             return {
                 "ok": True,
@@ -871,6 +872,11 @@ def _build_image_containerd(
                 "labels": labels,
                 "cmd": cmd,
                 "stdout": proc.stdout,
+                "build_summary": _build_output_summary(
+                    proc.stdout,
+                    backend="nerdctl",
+                    tag=tag,
+                ),
             }
     for fallback in fallbacks:
         result = _build_with_fallback_and_load(
@@ -895,6 +901,7 @@ def _build_image_containerd(
                 "labels": labels,
                 "cmd": result["cmd"],
                 "stdout": result["stdout"],
+                "build_summary": result["summary"],
                 "attempts": attempts,
             }
     raise RuntimeError(
@@ -907,6 +914,7 @@ def _build_image_containerd(
                 "dockerfile": str(dockerfile) if dockerfile else None,
                 "labels": labels,
                 "attempts": attempts,
+                "build_summary": _build_attempts_summary(attempts, tag=tag),
             },
             indent=2,
         )
@@ -943,6 +951,7 @@ def _build_with_fallback_and_load(
             "returncode": build_proc.returncode,
             "cmd": build_cmd,
             "stdout": build_proc.stdout,
+            "summary": _build_output_summary(build_proc.stdout, backend=fallback, tag=tag),
         }
     transfer_dir = state_root.expanduser().resolve() / "global" / "image-transfer"
     transfer_dir.mkdir(parents=True, exist_ok=True)
@@ -969,6 +978,11 @@ def _build_with_fallback_and_load(
                 "returncode": save_proc.returncode,
                 "cmd": [*build_cmd, "&&", *save_cmd],
                 "stdout": build_proc.stdout + "\n" + save_proc.stdout,
+                "summary": _build_output_summary(
+                    build_proc.stdout + "\n" + save_proc.stdout,
+                    backend=f"{fallback}-save-load",
+                    tag=tag,
+                ),
             }
         load_proc = subprocess.run(
             load_cmd,
@@ -986,7 +1000,67 @@ def _build_with_fallback_and_load(
         "returncode": load_proc.returncode,
         "cmd": [*build_cmd, "&&", *save_cmd, "&&", *load_cmd],
         "stdout": stdout,
+        "summary": _build_output_summary(
+            stdout,
+            backend=f"{fallback}-save-load",
+            tag=tag,
+        ),
     }
+
+
+def _build_attempt(backend: str, returncode: int, stdout: str, *, tag: str) -> dict[str, Any]:
+    return {
+        "backend": backend,
+        "returncode": returncode,
+        "stdout": stdout,
+        "summary": _build_output_summary(stdout, backend=backend, tag=tag),
+    }
+
+
+def _build_attempts_summary(attempts: list[dict[str, Any]], *, tag: str) -> dict[str, Any]:
+    stdout = "\n".join(str(item.get("stdout") or "") for item in attempts)
+    summary = _build_output_summary(stdout, backend="attempts", tag=tag)
+    summary["attempt_count"] = len(attempts)
+    summary["failed_backends"] = [
+        str(item.get("backend"))
+        for item in attempts
+        if isinstance(item.get("returncode"), int) and int(item["returncode"]) != 0
+    ]
+    return summary
+
+
+def _build_output_summary(stdout: str, *, backend: str, tag: str) -> dict[str, Any]:
+    lines = stdout.splitlines()
+    warning_lines = [
+        line.strip()
+        for line in lines
+        if line.strip() and _build_log_warning_line(line)
+    ]
+    error_lines = [
+        line.strip()
+        for line in lines
+        if line.strip() and _build_log_error_line(line)
+    ]
+    return {
+        "backend": backend,
+        "tag": tag,
+        "line_count": len(lines),
+        "warning_count": len(warning_lines),
+        "error_count": len(error_lines),
+        "warning_lines": warning_lines[:BUILD_SUMMARY_MATCH_LIMIT],
+        "error_lines": error_lines[:BUILD_SUMMARY_MATCH_LIMIT],
+        "tail_lines": lines[-BUILD_SUMMARY_TAIL_LINES:],
+    }
+
+
+def _build_log_warning_line(line: str) -> bool:
+    lowered = line.lower()
+    return "warning" in lowered or "deprecated" in lowered
+
+
+def _build_log_error_line(line: str) -> bool:
+    lowered = line.lower()
+    return any(marker in lowered for marker in ("error", "failed", "failure", "unable to"))
 
 
 def _cleanup_containers(
