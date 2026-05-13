@@ -208,6 +208,8 @@ def test_global_dashboard_uses_k1s_visual_style() -> None:
     assert 'id="response-auto-clear"' in html
     assert "responseAutoClearKey" in html
     assert "navigator.clipboard.writeText" in html
+    assert "Dashboard CA" in html
+    assert "/workerbee-ca.crt" in html
     assert "setResponseText('', {status: 'cleared'});" in html
     assert "}, 10000);" in html
     assert 'id="global-ingress-panel"' in html
@@ -232,6 +234,12 @@ def test_global_dashboard_renders_dns_enabled_state() -> None:
                 "https_port": 19443,
                 "dashboard_url": "https://dashboard.workerbee.home.arpa:19443/",
                 "ca_download_url": "http://ca.workerbee.home.arpa:19080/workerbee-ca.crt",
+                "dashboard_ca_download_url": (
+                    "https://dashboard.workerbee.home.arpa:19443/workerbee-ca.crt"
+                ),
+                "dashboard_ca_sha256_url": (
+                    "https://dashboard.workerbee.home.arpa:19443/workerbee-ca.sha256"
+                ),
                 "ca_sha256": "abc123",
                 "ca_commands": {
                     "export": "workerbee ingress ca --output workerbee-ca.crt",
@@ -262,6 +270,8 @@ def test_global_dashboard_renders_dns_enabled_state() -> None:
     assert "workerbee.home.arpa" in html
     assert "192.168.1.23:53" in html
     assert "127.0.0.1:5300" in html
+    assert "https://dashboard.workerbee.home.arpa:19443/workerbee-ca.crt" in html
+    assert "https://dashboard.workerbee.home.arpa:19443/workerbee-ca.sha256" in html
     assert "http://ca.workerbee.home.arpa:19080/workerbee-ca.crt" in html
     assert "workerbee ingress ca --output workerbee-ca.crt" in html
     assert "workerbee trust install --target system" in html
@@ -367,6 +377,47 @@ def test_lan_ca_download_serves_cert_and_fingerprint(tmp_path: Path) -> None:
 
     assert handler.status == 200
     assert len(handler.wfile.data.decode().strip()) == 64
+
+
+def test_loopback_dashboard_ca_download_serves_cert_and_fingerprint(tmp_path: Path) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path)
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    ingress.global_dir.mkdir(parents=True)
+    ingress.ca_bundle.write_text("-----BEGIN CERTIFICATE-----\ncert\n", encoding="utf-8")
+    daemon.ingress = ingress
+
+    handler = _FakeDashboardHandler()
+    _send_ca_download(handler, daemon=daemon, path="/workerbee-ca.crt")
+
+    assert handler.status == 200
+    assert handler.headers["Content-Type"] == "application/x-x509-ca-cert"
+    assert handler.wfile.data.startswith(b"-----BEGIN CERTIFICATE-----")
+
+    handler = _FakeDashboardHandler()
+    _send_ca_download(handler, daemon=daemon, path="/workerbee-ca.sha256")
+
+    assert handler.status == 200
+    assert len(handler.wfile.data.decode().strip()) == 64
+
+
+def test_dashboard_ca_download_missing_bundle_returns_not_found(tmp_path: Path) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path)
+    daemon.ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+
+    handler = _FakeDashboardHandler()
+    _send_ca_download(handler, daemon=daemon, path="/workerbee-ca.crt")
+
+    assert handler.status == 404
 
 
 def test_profile_control_plane_checks_use_loopback_with_public_host(
@@ -1381,6 +1432,32 @@ def test_global_dashboard_rejects_unexpected_host(tmp_path: Path) -> None:
     assert result.status == 403
 
 
+def test_global_dashboard_rejects_ca_download_from_unexpected_host(tmp_path: Path) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    ingress.global_dir.mkdir(parents=True)
+    ingress.ca_bundle.write_text("-----BEGIN CERTIFICATE-----\ncert\n", encoding="utf-8")
+    daemon.ingress = ingress
+    port = daemon._start_dashboard_server()  # noqa: SLF001
+    try:
+        result = request(
+            f"http://127.0.0.1:{port}/workerbee-ca.crt",
+            headers={"Host": "evil.example"},
+            timeout=2.0,
+        )
+    finally:
+        assert daemon._dashboard is not None  # noqa: SLF001
+        daemon._dashboard.shutdown()  # noqa: SLF001
+        daemon._dashboard.server_close()  # noqa: SLF001
+
+    assert result.status == 404
+
+
 def test_global_dashboard_action_job_endpoint(tmp_path: Path) -> None:
     daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker")
     scheduled: list[object] = []
@@ -1450,6 +1527,25 @@ def test_global_ingress_containerd_uses_loopback_host_alias(tmp_path: Path) -> N
     assert config.host_alias == "127.0.0.1"
 
 
+def test_global_ingress_loopback_public_info_includes_dashboard_ca_urls(tmp_path: Path) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="containerd",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+
+    info = ingress.info().public_dict()
+
+    assert info["ca_download_url"] is None
+    assert info["dashboard_ca_download_url"] == (
+        "https://dashboard.workerbee.localhost:19443/workerbee-ca.crt"
+    )
+    assert info["dashboard_ca_sha256_url"] == (
+        "https://dashboard.workerbee.localhost:19443/workerbee-ca.sha256"
+    )
+
+
 def test_global_ingress_writes_explicit_project_imports(tmp_path: Path) -> None:
     ingress = GlobalIngress(
         state_root=tmp_path,
@@ -1510,6 +1606,11 @@ def test_global_ingress_lan_writes_ca_bootstrap_route(tmp_path: Path) -> None:
     assert config.domain == "alpha.192-168-1-23.sslip.io"
     assert config.host("api") == "api.alpha.192-168-1-23.sslip.io"
     assert config.ca_download_url == "http://ca.192-168-1-23.sslip.io:19080/workerbee-ca.crt"
+    info = ingress.info().public_dict()
+    assert info["dashboard_ca_download_url"] == (
+        "https://dashboard.192-168-1-23.sslip.io:19443/workerbee-ca.crt"
+    )
+    assert info["ca_download_url"] == "http://ca.192-168-1-23.sslip.io:19080/workerbee-ca.crt"
 
 
 def test_global_ingress_lan_publishes_https_and_ca_ports(
@@ -1868,6 +1969,7 @@ def test_global_ingress_status_includes_lan_ca_download_command(tmp_path: Path) 
                 "enabled": True,
                 "runtime": "podman",
                 "base_domain": "workerbee.home.arpa",
+                "dashboard_url": "https://dashboard.workerbee.home.arpa:19443/",
                 "ca_bundle": str(ca),
                 "ca_download_url": "http://ca.workerbee.home.arpa:19080/workerbee-ca.crt",
             }
@@ -1879,6 +1981,12 @@ def test_global_ingress_status_includes_lan_ca_download_command(tmp_path: Path) 
 
     assert status["ca_ready"] is True
     assert status["ca_sha256"]
+    assert status["dashboard_ca_download_url"] == (
+        "https://dashboard.workerbee.home.arpa:19443/workerbee-ca.crt"
+    )
+    assert status["dashboard_ca_sha256_url"] == (
+        "https://dashboard.workerbee.home.arpa:19443/workerbee-ca.sha256"
+    )
     assert status["ca_commands"]["download_curl"] == (
         "curl -fsSL http://ca.workerbee.home.arpa:19080/workerbee-ca.crt "
         "-o workerbee-ca.crt"

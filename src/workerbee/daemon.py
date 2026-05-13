@@ -35,7 +35,6 @@ from workerbee.contract import WorkerBeeError
 from workerbee.dns import WorkerBeeDNSServer
 from workerbee.http import request, request_https_via_loopback
 from workerbee.ingress import (
-    INGRESS_EXPOSURE_LAN,
     GlobalIngress,
     GlobalIngressInfo,
     IngressSettings,
@@ -2215,10 +2214,14 @@ def _send_ca_download(
     path: str,
 ) -> None:
     ingress = daemon.ingress
-    if ingress is None or ingress.exposure != INGRESS_EXPOSURE_LAN:
+    if ingress is not None:
+        ca = ingress.ca_bundle
+    else:
+        ca_raw = str(daemon.global_dashboard().get("ca_bundle") or "")
+        ca = Path(ca_raw) if ca_raw else None
+    if ca is None:
         _send_not_found(handler)
         return
-    ca = ingress.ca_bundle
     if not ca.is_file():
         _send_not_found(handler)
         return
@@ -3030,6 +3033,14 @@ def _render_global_ingress_panel(global_dashboard: Any) -> str:
     data = global_dashboard if isinstance(global_dashboard, dict) else {}
     dns = data.get("dns") if isinstance(data.get("dns"), dict) else {}
     ca_commands = data.get("ca_commands") if isinstance(data.get("ca_commands"), dict) else {}
+    dashboard_ca_url = data.get("dashboard_ca_download_url") or _dashboard_ca_path(
+        data.get("dashboard_url"),
+        "workerbee-ca.crt",
+    )
+    dashboard_ca_sha_url = data.get("dashboard_ca_sha256_url") or _dashboard_ca_path(
+        data.get("dashboard_url"),
+        "workerbee-ca.sha256",
+    )
     dns_enabled = bool(dns.get("enabled"))
     dns_running = bool(dns.get("running"))
     dns_mode = str(dns.get("mode") or "off")
@@ -3056,7 +3067,9 @@ def _render_global_ingress_panel(global_dashboard: Any) -> str:
         _info_item("Base Domain", data.get("base_domain")),
         _info_item("Dashboard", _link(data.get("dashboard_url")), html=True),
         _info_item("HTTPS", _host_port_value(data.get("bind_host"), data.get("https_port"))),
-        _info_item("CA", _link(data.get("ca_download_url")), html=True),
+        _info_item("Dashboard CA", _link(dashboard_ca_url), html=True),
+        _info_item("CA Fingerprint", _link(dashboard_ca_sha_url), html=True),
+        _info_item("LAN CA", _link(data.get("ca_download_url")), html=True),
         _info_item("CA SHA256", data.get("ca_sha256")),
         _info_item("CA Export", ca_commands.get("export")),
         _info_item("System Trust", ca_commands.get("trust_system")),
@@ -3074,6 +3087,12 @@ def _render_global_ingress_panel(global_dashboard: Any) -> str:
         _info_item("DNS TTL", dns.get("ttl")),
     ]
     return f'<div class="info-grid">{"".join(rows)}</div>'
+
+
+def _dashboard_ca_path(dashboard_url: Any, filename: str) -> str:
+    if dashboard_url:
+        return f"{str(dashboard_url).rstrip('/')}/{filename}"
+    return f"/{filename}"
 
 
 def _info_item(label: str, value: Any, *, html: bool = False) -> str:
@@ -3561,6 +3580,17 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         return `${{host || '*'}}:${{port}}`;
       }}
 
+      function dashboardCaPath(globalDashboard, filename) {{
+        const explicit = filename.endsWith('.sha256')
+          ? globalDashboard.dashboard_ca_sha256_url
+          : globalDashboard.dashboard_ca_download_url;
+        if (explicit) return explicit;
+        if (globalDashboard.dashboard_url) {{
+          return `${{String(globalDashboard.dashboard_url).replace(/[/]+$/, '')}}/${{filename}}`;
+        }}
+        return `/${{filename}}`;
+      }}
+
       function renderGlobalIngressPanel(globalDashboard = {{}}) {{
         const dns = globalDashboard.dns && typeof globalDashboard.dns === 'object'
           ? globalDashboard.dns
@@ -3580,6 +3610,8 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
           ? (dns.answer ? `${{dns.answer}}:${{dns.port || 53}}` : `port ${{dns.port || 53}}`)
           : '';
         const upstreams = Array.isArray(dns.upstreams) ? dns.upstreams.join(', ') : '';
+        const dashboardCaUrl = dashboardCaPath(globalDashboard, 'workerbee-ca.crt');
+        const dashboardCaShaUrl = dashboardCaPath(globalDashboard, 'workerbee-ca.sha256');
         return [
           infoItem('Ingress', pill(globalDashboard.running ? 'running' : 'stopped', ingressState)),
           infoItem('Exposure', valueOrDash(globalDashboard.exposure || 'loopback')),
@@ -3589,7 +3621,9 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
             'HTTPS',
             valueOrDash(hostPort(globalDashboard.bind_host, globalDashboard.https_port))
           ),
-          infoItem('CA', link(globalDashboard.ca_download_url)),
+          infoItem('Dashboard CA', link(dashboardCaUrl)),
+          infoItem('CA Fingerprint', link(dashboardCaShaUrl)),
+          infoItem('LAN CA', link(globalDashboard.ca_download_url)),
           infoItem('CA SHA256', valueOrDash(globalDashboard.ca_sha256)),
           infoItem('CA Export', valueOrDash(caCommands.export)),
           infoItem('System Trust', valueOrDash(caCommands.trust_system)),

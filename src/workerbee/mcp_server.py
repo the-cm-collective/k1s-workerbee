@@ -174,6 +174,9 @@ def serve_mcp(
     print(f"WorkerBee global dashboard: {ingress.dashboard_url}", flush=True)
     ingress_public = ingress.public_dict() if hasattr(ingress, "public_dict") else {}
     ca_commands = ingress_public.get("ca_commands") if isinstance(ingress_public, dict) else {}
+    dashboard_ca_download_url = getattr(ingress, "dashboard_ca_download_url", None)
+    if dashboard_ca_download_url:
+        print(f"WorkerBee dashboard CA: {dashboard_ca_download_url}", flush=True)
     ca_download_url = getattr(ingress, "ca_download_url", None)
     if ca_download_url:
         print(f"WorkerBee CA download: {ca_download_url}", flush=True)

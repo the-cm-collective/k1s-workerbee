@@ -460,6 +460,10 @@ def mcp_daemon_status(config: MCPDaemonConfig) -> dict[str, Any]:
         "stale": stale,
         "dashboard_url": ingress.get("dashboard_url") or metadata.get("dashboard_url"),
         "ca_download_url": ingress.get("ca_download_url") or metadata.get("ca_download_url"),
+        "dashboard_ca_download_url": ingress.get("dashboard_ca_download_url")
+        or metadata.get("dashboard_ca_download_url"),
+        "dashboard_ca_sha256_url": ingress.get("dashboard_ca_sha256_url")
+        or metadata.get("dashboard_ca_sha256_url"),
         "ca_commands": ingress.get("ca_commands") or metadata.get("ca_commands") or {},
         "dns": ingress.get("dns") or metadata.get("ingress_dns"),
         "global_dashboard": ingress,
@@ -485,6 +489,8 @@ def _wait_ready(config: MCPDaemonConfig, *, timeout: float) -> dict[str, Any]:
                 return {
                     "dashboard_url": dashboard_url,
                     "ca_download_url": ingress.get("ca_download_url"),
+                    "dashboard_ca_download_url": ingress.get("dashboard_ca_download_url"),
+                    "dashboard_ca_sha256_url": ingress.get("dashboard_ca_sha256_url"),
                     "ca_commands": ingress.get("ca_commands") or {},
                     "global_dashboard": ingress,
                     "ready_at": time.time(),

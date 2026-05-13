@@ -107,6 +107,8 @@ class GlobalIngressInfo:
     bind_host: str = INGRESS_BIND_LOOPBACK
     dashboard_dns_ok: bool = True
     ca_download_url: str | None = None
+    dashboard_ca_download_url: str | None = None
+    dashboard_ca_sha256_url: str | None = None
     ca_sha256: str | None = None
     ca_http_port: int = DEFAULT_INGRESS_CA_HTTP_PORT
     dns: dict[str, Any] = field(default_factory=dict)
@@ -231,6 +233,8 @@ class GlobalIngress:
         self.dashboard_host = f"dashboard.{self.base_domain}"
         self.ca_host = f"ca.{self.base_domain}"
         self.dashboard_url = f"https://{self.dashboard_host}:{self.https_port}/"
+        self.dashboard_ca_download_url = _dashboard_ca_download_url(self.dashboard_url)
+        self.dashboard_ca_sha256_url = _dashboard_ca_sha256_url(self.dashboard_url)
         self.ca_download_url = (
             f"http://{self.ca_host}:{self.ca_http_port}/workerbee-ca.crt"
             if self.exposure == INGRESS_EXPOSURE_LAN
@@ -369,6 +373,8 @@ class GlobalIngress:
             bind_host=self.bind_host,
             dashboard_dns_ok=_dns_ok(self.dashboard_host),
             ca_download_url=self.ca_download_url,
+            dashboard_ca_download_url=self.dashboard_ca_download_url,
+            dashboard_ca_sha256_url=self.dashboard_ca_sha256_url,
             ca_sha256=_sha256(self.ca_bundle) if self.ca_bundle.is_file() else None,
             ca_http_port=self.ca_http_port,
             dns=self._dns_public_dict(),
@@ -667,6 +673,18 @@ def ca_command_guidance(info: dict[str, Any]) -> dict[str, str]:
     return commands
 
 
+def _dashboard_ca_download_url(dashboard_url: str | None) -> str | None:
+    if not dashboard_url:
+        return None
+    return f"{str(dashboard_url).rstrip('/')}/workerbee-ca.crt"
+
+
+def _dashboard_ca_sha256_url(dashboard_url: str | None) -> str | None:
+    if not dashboard_url:
+        return None
+    return f"{str(dashboard_url).rstrip('/')}/workerbee-ca.sha256"
+
+
 def export_global_ingress_ca(
     state_root: Path,
     *,
@@ -702,6 +720,8 @@ def export_global_ingress_ca(
         "ca_ready": True,
         "ca_sha256": ca_sha256,
         "ca_download_url": status.get("ca_download_url"),
+        "dashboard_ca_download_url": status.get("dashboard_ca_download_url"),
+        "dashboard_ca_sha256_url": status.get("dashboard_ca_sha256_url"),
         "ca_commands": ca_command_guidance(status),
     }
 
@@ -748,6 +768,10 @@ def global_ingress_status(state_root: Path, *, runtime: str = "auto") -> dict[st
         "stale": not bool(running),
         "ca_ready": ca_ready,
         "ca_sha256": _safe_sha256(ca) if ca_ready else None,
+        "dashboard_ca_download_url": info.get("dashboard_ca_download_url")
+        or _dashboard_ca_download_url(str(info.get("dashboard_url") or "")),
+        "dashboard_ca_sha256_url": info.get("dashboard_ca_sha256_url")
+        or _dashboard_ca_sha256_url(str(info.get("dashboard_url") or "")),
         "ca_commands": ca_command_guidance(info) if ca_ready else {},
         "runtime_running": runtime_running,
         "https_running": health_running,

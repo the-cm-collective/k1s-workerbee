@@ -955,6 +955,8 @@ def _print(payload: dict[str, Any], *, json_out: bool) -> int:
         print(f"mcp: {payload['mcp_url']}")
         if payload.get("dashboard_url"):
             print(f"dashboard: {payload['dashboard_url']}")
+        if payload.get("dashboard_ca_download_url"):
+            print(f"ca dashboard: {payload['dashboard_ca_download_url']}")
         if payload.get("ca_download_url"):
             print(f"ca: {payload['ca_download_url']}")
         _print_ca_guidance(payload)
@@ -977,6 +979,8 @@ def _print(payload: dict[str, Any], *, json_out: bool) -> int:
         print(f"ca sha256: {payload.get('ca_sha256')}")
         if payload.get("ca_download_url"):
             print(f"ca url: {payload['ca_download_url']}")
+        if payload.get("dashboard_ca_download_url"):
+            print(f"ca dashboard: {payload['dashboard_ca_download_url']}")
         return 1 if payload.get("ok") is False else 0
     if _is_global_ingress_payload(payload):
         if payload.get("dashboard_url"):
@@ -988,6 +992,8 @@ def _print(payload: dict[str, Any], *, json_out: bool) -> int:
             print(f"ca sha256: {payload['ca_sha256']}")
         if payload.get("ca_download_url"):
             print(f"ca url: {payload['ca_download_url']}")
+        if payload.get("dashboard_ca_download_url"):
+            print(f"ca dashboard: {payload['dashboard_ca_download_url']}")
         _print_ca_guidance(payload)
         dns = payload.get("dns")
         if isinstance(dns, dict) and dns.get("enabled"):
