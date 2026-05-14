@@ -14,6 +14,21 @@ Docker for ordinary app validation. Advanced k1s controller/runtime development
 uses explicit direct containerd mode, where every k1s profile component is
 containerized and scoped under WorkerBee-owned namespaces.
 
+## What WorkerBee Does
+
+WorkerBee gives coding agents a local cloud-native loop they can use without
+turning your workstation into a shared cluster. For each project, it can build
+images, stage native k1s or practical Kubernetes manifests, run the workload,
+probe HTTPS ingress, inspect status and logs, run bounded commands, review
+basic security posture, and export handoff artifacts.
+
+The short version: you keep editing in your repo, and WorkerBee gives the agent
+a bounded build-deploy-check-export workbench around that repo.
+
+<p align="center">
+  <img src="docs/assets/how-workerbee-works-v0.png" alt="How WorkerBee works" width="760">
+</p>
+
 ## Capabilities
 
 - Shared local MCP daemon for one or more agents, with project-scoped state,
@@ -44,10 +59,6 @@ containerized and scoped under WorkerBee-owned namespaces.
 ```bash
 curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/latest/download/install-workerbee.sh | sh
 ```
-
-This command uses GitHub's unauthenticated latest-release asset URL. While this
-repository is private, unauthenticated `curl` requests to release assets will
-fail; use the downloaded release artifacts method below instead.
 
 ### Install from downloaded release artifacts
 
@@ -658,10 +669,6 @@ curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/latest/do
 export PATH="$HOME/.local/bin:$PATH"
 workerbee doctor
 ```
-
-While this repository is private, unauthenticated `curl` requests to release
-assets will fail. Use the downloaded release artifacts method in Quickstart when
-you need to install from manually downloaded GitHub release assets.
 
 The installer uses an active virtual environment when one is enabled. Without an
 active venv, it creates a standalone WorkerBee venv under
