@@ -33,6 +33,7 @@ from workerbee.agent import (
 from workerbee.containerd_helper import containerd_privilege_status, containerd_privilege_summary
 from workerbee.contract import WorkerBeeError
 from workerbee.dns import WorkerBeeDNSServer
+from workerbee.edge_link import K1sEdgeLinkRunner
 from workerbee.http import request, request_https_via_loopback
 from workerbee.ingress import (
     GlobalIngress,
@@ -53,7 +54,7 @@ from workerbee.manifests import (
 from workerbee.paths import daemon_project_state_dir, default_state_root
 from workerbee.ports import choose_port
 from workerbee.probe import build_probe_url, probe_workerbee_url
-from workerbee.profiles import K1sProfileRunner, builtin_profiles
+from workerbee.profiles import K1sProfileRunner, builtin_profiles, is_edge_link_profile
 from workerbee.runtime_support import (
     cleanup_runtime,
     resolve_runtime,
@@ -610,16 +611,57 @@ class WorkerBeeDaemon:
         project: str | None = None,
         k1s_root: str | Path | None = None,
         timeout: float = 180.0,
+        from_microk8s: bool = False,
+        release: str = "k1s-dev-a",
+        namespace: str = "k1s-dev-a",
+        site_id: str = "workerbee-edge",
+        node_id: str = "workerbee-edge-node",
+        bundle: dict[str, Any] | str | None = None,
+        bundle_path: str | Path | None = None,
+        controller_url: str | None = None,
+        agent_token: str | None = None,
+        nats_leaf_addr: str | None = None,
+        nats_leaf_url: str | None = None,
+        rathole_server_addr: str | None = None,
+        rathole_token: str | None = None,
+        registry_host: str | None = None,
+        stack_domain: str | None = None,
+        wildcard_apps_domain: str | None = None,
+        advertise_host: str | None = None,
+        build_images: bool = True,
     ) -> dict[str, Any]:
         name = project_slug(project or self.default_project)
         with self._project_lock(name):
             file_lock = FileLock(project_lock_path(self.state_root, name), label=f"project {name}")
             with file_lock:
                 self._register_project(name, cwd_hint=str(self._project_cwd(name)))
-                result = self._profile_runner(name, k1s_root=k1s_root).start(
-                    profile=profile,
-                    timeout=timeout,
-                )
+                if is_edge_link_profile(profile):
+                    result = self._edge_link_runner(name, k1s_root=k1s_root).start(
+                        from_microk8s=from_microk8s,
+                        release=release,
+                        namespace=namespace,
+                        site_id=site_id,
+                        node_id=node_id,
+                        bundle=bundle,
+                        bundle_path=bundle_path,
+                        controller_url=controller_url,
+                        agent_token=agent_token,
+                        nats_leaf_addr=nats_leaf_addr,
+                        nats_leaf_url=nats_leaf_url,
+                        rathole_server_addr=rathole_server_addr,
+                        rathole_token=rathole_token,
+                        registry_host=registry_host,
+                        stack_domain=stack_domain,
+                        wildcard_apps_domain=wildcard_apps_domain,
+                        advertise_host=advertise_host,
+                        timeout=timeout,
+                        build_images=build_images,
+                    )
+                else:
+                    result = self._profile_runner(name, k1s_root=k1s_root).start(
+                        profile=profile,
+                        timeout=timeout,
+                    )
                 ingress_sync = self._sync_ingress_projects_result()
                 self._register_project(name, cwd_hint=str(self._project_cwd(name)))
                 return {
@@ -637,6 +679,10 @@ class WorkerBeeDaemon:
         name = project_slug(project or self.default_project)
         self._register_project(name, cwd_hint=str(self._project_cwd(name)))
         result = self._profile_runner(name, k1s_root=k1s_root).status()
+        if not result.get("running"):
+            edge_result = self._edge_link_runner(name, k1s_root=k1s_root).status()
+            if edge_result.get("running"):
+                result = edge_result
         return {**result, "project": name, "ingress_sync": self._sync_ingress_projects_result()}
 
     def profile_stop(
@@ -651,6 +697,16 @@ class WorkerBeeDaemon:
             file_lock = FileLock(project_lock_path(self.state_root, name), label=f"project {name}")
             with file_lock:
                 result = self._profile_runner(name, k1s_root=k1s_root).stop(purge=purge)
+                edge_result = self._edge_link_runner(name, k1s_root=k1s_root).stop(purge=purge)
+                if edge_result.get("removed") or edge_result.get("purged"):
+                    if not result.get("removed"):
+                        result = edge_result
+                    else:
+                        result = {
+                            **result,
+                            "edge_link_stop": edge_result,
+                            "ok": bool(result.get("ok")) and bool(edge_result.get("ok")),
+                        }
                 ingress_sync = self._sync_ingress_projects_result()
                 return {
                     **result,
@@ -665,22 +721,192 @@ class WorkerBeeDaemon:
         project: str | None = None,
         k1s_root: str | Path | None = None,
         timeout: float = 180.0,
+        from_microk8s: bool = False,
+        release: str = "k1s-dev-a",
+        namespace: str = "k1s-dev-a",
+        site_id: str = "workerbee-edge",
+        node_id: str = "workerbee-edge-node",
+        bundle: dict[str, Any] | str | None = None,
+        bundle_path: str | Path | None = None,
+        controller_url: str | None = None,
+        agent_token: str | None = None,
+        nats_leaf_addr: str | None = None,
+        nats_leaf_url: str | None = None,
+        rathole_server_addr: str | None = None,
+        rathole_token: str | None = None,
+        registry_host: str | None = None,
+        stack_domain: str | None = None,
+        wildcard_apps_domain: str | None = None,
+        advertise_host: str | None = None,
+        build_images: bool = True,
+        require_gpu_smoke: bool = True,
     ) -> dict[str, Any]:
         name = project_slug(project or self.default_project)
         with self._project_lock(name):
             file_lock = FileLock(project_lock_path(self.state_root, name), label=f"project {name}")
             with file_lock:
                 self._register_project(name, cwd_hint=str(self._project_cwd(name)))
-                result = self._profile_runner(name, k1s_root=k1s_root).validate(
-                    profile=profile,
-                    timeout=timeout,
-                )
+                if is_edge_link_profile(profile):
+                    result = self._edge_link_runner(name, k1s_root=k1s_root).validate(
+                        from_microk8s=from_microk8s,
+                        release=release,
+                        namespace=namespace,
+                        site_id=site_id,
+                        node_id=node_id,
+                        bundle=bundle,
+                        bundle_path=bundle_path,
+                        controller_url=controller_url,
+                        agent_token=agent_token,
+                        nats_leaf_addr=nats_leaf_addr,
+                        nats_leaf_url=nats_leaf_url,
+                        rathole_server_addr=rathole_server_addr,
+                        rathole_token=rathole_token,
+                        registry_host=registry_host,
+                        stack_domain=stack_domain,
+                        wildcard_apps_domain=wildcard_apps_domain,
+                        advertise_host=advertise_host,
+                        timeout=timeout,
+                        build_images=build_images,
+                        require_gpu_smoke=require_gpu_smoke,
+                    )
+                else:
+                    result = self._profile_runner(name, k1s_root=k1s_root).validate(
+                        profile=profile,
+                        timeout=timeout,
+                    )
                 ingress_sync = self._sync_ingress_projects_result()
                 return {
                     **result,
                     "project": name,
                     "ingress_sync": ingress_sync,
                 }
+
+    def edge_link_start(
+        self,
+        *,
+        project: str | None = None,
+        k1s_root: str | Path | None = None,
+        from_microk8s: bool = False,
+        release: str = "k1s-dev-a",
+        namespace: str = "k1s-dev-a",
+        site_id: str = "workerbee-edge",
+        node_id: str = "workerbee-edge-node",
+        bundle: dict[str, Any] | str | None = None,
+        bundle_path: str | Path | None = None,
+        controller_url: str | None = None,
+        agent_token: str | None = None,
+        nats_leaf_addr: str | None = None,
+        nats_leaf_url: str | None = None,
+        rathole_server_addr: str | None = None,
+        rathole_token: str | None = None,
+        registry_host: str | None = None,
+        stack_domain: str | None = None,
+        wildcard_apps_domain: str | None = None,
+        advertise_host: str | None = None,
+        timeout: float = 180.0,
+        build_images: bool = True,
+    ) -> dict[str, Any]:
+        return self.profile_start(
+            profile="k1s-edge-link",
+            project=project,
+            k1s_root=k1s_root,
+            timeout=timeout,
+            from_microk8s=from_microk8s,
+            release=release,
+            namespace=namespace,
+            site_id=site_id,
+            node_id=node_id,
+            bundle=bundle,
+            bundle_path=bundle_path,
+            controller_url=controller_url,
+            agent_token=agent_token,
+            nats_leaf_addr=nats_leaf_addr,
+            nats_leaf_url=nats_leaf_url,
+            rathole_server_addr=rathole_server_addr,
+            rathole_token=rathole_token,
+            registry_host=registry_host,
+            stack_domain=stack_domain,
+            wildcard_apps_domain=wildcard_apps_domain,
+            advertise_host=advertise_host,
+            build_images=build_images,
+        )
+
+    def edge_link_status(
+        self,
+        *,
+        project: str | None = None,
+        k1s_root: str | Path | None = None,
+    ) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+        self._register_project(name, cwd_hint=str(self._project_cwd(name)))
+        result = self._edge_link_runner(name, k1s_root=k1s_root).status()
+        return {**result, "project": name}
+
+    def edge_link_stop(
+        self,
+        *,
+        project: str | None = None,
+        purge: bool = False,
+        k1s_root: str | Path | None = None,
+    ) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+        with self._project_lock(name):
+            file_lock = FileLock(project_lock_path(self.state_root, name), label=f"project {name}")
+            with file_lock:
+                result = self._edge_link_runner(name, k1s_root=k1s_root).stop(purge=purge)
+                return {**result, "project": name}
+
+    def edge_link_validate(
+        self,
+        *,
+        project: str | None = None,
+        k1s_root: str | Path | None = None,
+        from_microk8s: bool = False,
+        release: str = "k1s-dev-a",
+        namespace: str = "k1s-dev-a",
+        site_id: str = "workerbee-edge",
+        node_id: str = "workerbee-edge-node",
+        bundle: dict[str, Any] | str | None = None,
+        bundle_path: str | Path | None = None,
+        controller_url: str | None = None,
+        agent_token: str | None = None,
+        nats_leaf_addr: str | None = None,
+        nats_leaf_url: str | None = None,
+        rathole_server_addr: str | None = None,
+        rathole_token: str | None = None,
+        registry_host: str | None = None,
+        stack_domain: str | None = None,
+        wildcard_apps_domain: str | None = None,
+        advertise_host: str | None = None,
+        timeout: float = 180.0,
+        build_images: bool = True,
+        require_gpu_smoke: bool = True,
+    ) -> dict[str, Any]:
+        return self.profile_validate(
+            profile="k1s-edge-link",
+            project=project,
+            k1s_root=k1s_root,
+            timeout=timeout,
+            from_microk8s=from_microk8s,
+            release=release,
+            namespace=namespace,
+            site_id=site_id,
+            node_id=node_id,
+            bundle=bundle,
+            bundle_path=bundle_path,
+            controller_url=controller_url,
+            agent_token=agent_token,
+            nats_leaf_addr=nats_leaf_addr,
+            nats_leaf_url=nats_leaf_url,
+            rathole_server_addr=rathole_server_addr,
+            rathole_token=rathole_token,
+            registry_host=registry_host,
+            stack_domain=stack_domain,
+            wildcard_apps_domain=wildcard_apps_domain,
+            advertise_host=advertise_host,
+            build_images=build_images,
+            require_gpu_smoke=require_gpu_smoke,
+        )
 
     def profile_workload_validate(
         self,
@@ -1283,6 +1509,15 @@ class WorkerBeeDaemon:
                 "profiles": [item["name"] for item in builtin_profiles()["profiles"]],
                 "workload_targets": ["profile"],
             },
+            "k1s_edge_links": {
+                "runtime_requirement": "containerd",
+                "profile": "k1s-edge-link",
+                "advanced": True,
+                "external_core": True,
+                "bootstrap_sources": ["microk8s", "bundle", "manual"],
+                "components": ["edge-nats", "rathole-client", "gateway", "node"],
+                "gpu_validation": True,
+            },
             "runtime": runtime_diagnostics(self.runtime_requested, state_root=self.state_root),
             "containerd_privilege": containerd_privilege_summary(
                 containerd_privilege_status(
@@ -1824,6 +2059,21 @@ class WorkerBeeDaemon:
             ingress=self._project_ingress(project),
         )
 
+    def _edge_link_runner(
+        self,
+        project: str,
+        *,
+        k1s_root: str | Path | None = None,
+    ) -> K1sEdgeLinkRunner:
+        root = Path(k1s_root).expanduser().resolve() if k1s_root is not None else None
+        return K1sEdgeLinkRunner(
+            project=project,
+            state_root=self.state_root,
+            runtime=self.runtime_requested,
+            cwd=self._project_cwd(project),
+            k1s_root=root,
+        )
+
     def _project_profile_status(
         self,
         project: str,
@@ -1853,6 +2103,20 @@ class WorkerBeeDaemon:
                 before_dashboard_url = None
         try:
             result = dict(runner.status(refresh_ingress=refresh_ingress))
+            if not result.get("running"):
+                edge_result = self._edge_link_runner(project).status()
+                if edge_result.get("running"):
+                    edge_result["profile"] = edge_result.get("edge_link")
+                    edge_result["ingress_refresh"] = _profile_ingress_refresh_metadata(
+                        refresh_ingress=False,
+                        running=True,
+                        before_dashboard_url=None,
+                        before_site_text=None,
+                        after_site_text=None,
+                        site_path=None,
+                        profile=edge_result.get("profile"),
+                    )
+                    return edge_result
             result["ingress_refresh"] = _profile_ingress_refresh_metadata(
                 refresh_ingress=refresh_ingress,
                 running=bool(result.get("running")),

@@ -100,11 +100,80 @@ Use the smallest profile that exercises the behavior under test:
   runtime integration behavior.
 - `k1s-ha-min`: three controllers, shared etcd, and NATS for HA, leadership,
   transport, and profile-workload validation.
+- `k1s-edge-link`: advanced external-core lane that runs a WorkerBee-scoped
+  edge gateway and edge node against an already running k1s core.
 
 Native k1s `make` profiles in `../k1s` remain useful for k1s-only validation,
 especially strict CRI and core/edge lanes. WorkerBee profiles complement those
 lanes by testing k1s through WorkerBee's staging, ingress, logs, probes, and
 artifact export paths.
+
+## External Edge Link
+
+Use `edge-link` when the local host needs to connect to an external k1s core as
+a short-lived edge site. The current dev target is the sibling `../k1s`
+MicroK8s HA stack:
+
+```bash
+scripts/dev/wb-containerd --project wb014 edge-link start \
+  --k1s-root ../k1s \
+  --from-microk8s \
+  --release k1s-dev-a \
+  --namespace k1s-dev-a \
+  --site-id workerbee-edge \
+  --node-id workerbee-edge-node
+```
+
+The same runner is also exposed as the advanced profile `k1s-edge-link`:
+
+```bash
+scripts/dev/wb-containerd --project wb014 profile start \
+  --profile k1s-edge-link \
+  --k1s-root ../k1s \
+  --from-microk8s \
+  --release k1s-dev-a \
+  --namespace k1s-dev-a
+```
+
+Edge-link uses WorkerBee's direct-containerd namespace, data root, and CNI
+paths. It does not use the MicroK8s containerd socket or MicroK8s CNI paths.
+The node agent is published on a LAN-reachable host port so the external core
+can heartbeat back to the local host. Pass `--advertise-host` if WorkerBee
+cannot infer the host address.
+
+The external core must be configured to accept the chosen site ID. For the
+MicroK8s dev stack, add the WorkerBee site to the Helm release before starting
+the link:
+
+```bash
+helm -n k1s-dev-a upgrade k1s-dev-a ../k1s/ops/helm/k1s-core-ha \
+  --reuse-values \
+  --set 'controller.siteIds[0]=host-a' \
+  --set 'controller.siteIds[1]=workerbee-edge'
+```
+
+On hosts where the MicroK8s API restarts during this path, wait for all
+`k1s-dev-a` pods and `http://k1s-dev-a.core.home.arpa:9110/healthz` to become
+healthy again before judging the link. `edge-link start --timeout` waits for a
+fresh post-start node heartbeat so short restart windows do not produce a false
+success.
+
+Validation includes node heartbeat and GPU advertisement. When NVIDIA tooling
+is present, `edge-link validate` runs a real `runtimeClassName: nvidia` smoke:
+
+```bash
+scripts/dev/wb-containerd --project wb014 edge-link validate \
+  --k1s-root ../k1s \
+  --from-microk8s \
+  --release k1s-dev-a \
+  --namespace k1s-dev-a
+```
+
+Stop and optionally purge the short-lived link when the test is complete:
+
+```bash
+scripts/dev/wb-containerd --project wb014 edge-link stop --purge
+```
 
 ## Development Loop
 

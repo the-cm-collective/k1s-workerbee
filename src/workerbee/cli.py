@@ -60,6 +60,63 @@ from workerbee.supervisor import WorkerBeeSupervisor
 from workerbee.trust import trust_install, trust_status, trust_uninstall
 
 
+def _add_edge_link_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--from-microk8s", action="store_true", help="Read bootstrap from MicroK8s")
+    parser.add_argument("--release", default="k1s-dev-a", help="MicroK8s Helm release")
+    parser.add_argument("--namespace", default="k1s-dev-a", help="MicroK8s namespace")
+    parser.add_argument("--site-id", default="workerbee-edge", help="External edge site id")
+    parser.add_argument("--node-id", default="workerbee-edge-node", help="External edge node id")
+    parser.add_argument(
+        "--bundle",
+        dest="bundle_path",
+        type=Path,
+        default=None,
+        help="External-core bootstrap JSON or env file",
+    )
+    parser.add_argument("--controller-url", default=None)
+    parser.add_argument("--agent-token", default=None)
+    parser.add_argument("--nats-leaf-addr", default=None)
+    parser.add_argument("--nats-leaf-url", default=None)
+    parser.add_argument("--rathole-server-addr", default=None)
+    parser.add_argument("--rathole-token", default=None)
+    parser.add_argument("--registry-host", default=None)
+    parser.add_argument("--stack-domain", default=None)
+    parser.add_argument("--wildcard-apps-domain", default=None)
+    parser.add_argument("--advertise-host", default=None)
+    parser.add_argument(
+        "--skip-build",
+        action="store_true",
+        help="Use existing gateway/node images",
+    )
+    parser.add_argument(
+        "--no-gpu-smoke",
+        action="store_true",
+        help="Skip the real NVIDIA runtime smoke during validation",
+    )
+
+
+def _edge_link_kwargs(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "from_microk8s": bool(getattr(args, "from_microk8s", False)),
+        "release": getattr(args, "release", "k1s-dev-a"),
+        "namespace": getattr(args, "namespace", "k1s-dev-a"),
+        "site_id": getattr(args, "site_id", "workerbee-edge"),
+        "node_id": getattr(args, "node_id", "workerbee-edge-node"),
+        "bundle_path": getattr(args, "bundle_path", None),
+        "controller_url": getattr(args, "controller_url", None),
+        "agent_token": getattr(args, "agent_token", None),
+        "nats_leaf_addr": getattr(args, "nats_leaf_addr", None),
+        "nats_leaf_url": getattr(args, "nats_leaf_url", None),
+        "rathole_server_addr": getattr(args, "rathole_server_addr", None),
+        "rathole_token": getattr(args, "rathole_token", None),
+        "registry_host": getattr(args, "registry_host", None),
+        "stack_domain": getattr(args, "stack_domain", None),
+        "wildcard_apps_domain": getattr(args, "wildcard_apps_domain", None),
+        "advertise_host": getattr(args, "advertise_host", None),
+        "build_images": not bool(getattr(args, "skip_build", False)),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="workerbee")
     parser.add_argument("--version", action="version", version=f"workerbee {__version__}")
@@ -152,16 +209,37 @@ def build_parser() -> argparse.ArgumentParser:
     profile_start.add_argument("--profile", required=True)
     profile_start.add_argument("--k1s-root", type=Path, default=None)
     profile_start.add_argument("--timeout", type=float, default=180.0)
+    _add_edge_link_arguments(profile_start)
     profile_status = profile_sub.add_parser("status", help="Show k1s profile status")
     profile_status.add_argument("--k1s-root", type=Path, default=None)
     profile_stop = profile_sub.add_parser("stop", help="Stop a containerized k1s profile")
     profile_stop.add_argument("--k1s-root", type=Path, default=None)
     profile_stop.add_argument("--purge", action="store_true")
+    edge_link = sub.add_parser("edge-link", help="Manage an advanced external k1s edge link")
+    edge_link_sub = edge_link.add_subparsers(dest="edge_link_cmd", required=True)
+    edge_link_start = edge_link_sub.add_parser("start", help="Start a k1s edge gateway/node link")
+    edge_link_start.add_argument("--k1s-root", type=Path, default=None)
+    edge_link_start.add_argument("--timeout", type=float, default=180.0)
+    _add_edge_link_arguments(edge_link_start)
+    edge_link_status = edge_link_sub.add_parser("status", help="Show k1s edge-link status")
+    edge_link_status.add_argument("--k1s-root", type=Path, default=None)
+    edge_link_stop = edge_link_sub.add_parser("stop", help="Stop a k1s edge-link")
+    edge_link_stop.add_argument("--k1s-root", type=Path, default=None)
+    edge_link_stop.add_argument("--purge", action="store_true")
+    edge_link_validate = edge_link_sub.add_parser("validate", help="Validate a k1s edge-link")
+    edge_link_validate.add_argument("--k1s-root", type=Path, default=None)
+    edge_link_validate.add_argument("--timeout", type=float, default=180.0)
+    _add_edge_link_arguments(edge_link_validate)
     validate = sub.add_parser("validate", help="Run WorkerBee validation scenarios")
-    validate.add_argument("--scenario", choices=["k1s-profile", "profile-workload"], required=True)
-    validate.add_argument("--profile", required=True)
+    validate.add_argument(
+        "--scenario",
+        choices=["k1s-profile", "profile-workload", "edge-link"],
+        required=True,
+    )
+    validate.add_argument("--profile", default=None)
     validate.add_argument("--k1s-root", type=Path, default=None)
     validate.add_argument("--timeout", type=float, default=180.0)
+    _add_edge_link_arguments(validate)
     project = sub.add_parser("project", help="Manage daemon project policy")
     project_sub = project.add_subparsers(dest="project_cmd", required=True)
     project_mode = project_sub.add_parser("mode", help="Set project mode: start, lazy, or stop")
@@ -517,6 +595,7 @@ def main(argv: list[str] | None = None) -> int:
                         project=args.project,
                         k1s_root=args.k1s_root,
                         timeout=args.timeout,
+                        **_edge_link_kwargs(args),
                     )
                 elif args.profile_cmd == "status":
                     result = daemon.profile_status(project=args.project, k1s_root=args.k1s_root)
@@ -530,6 +609,49 @@ def main(argv: list[str] | None = None) -> int:
                     result = {"ok": False, "error": f"unknown profile command: {args.profile_cmd}"}
                 result["containerd_privilege"] = containerd_privilege_summary(privilege)
                 return _print(result, json_out=args.json)
+        if args.cmd == "edge-link":
+            daemon = WorkerBeeDaemon(
+                state_root=args.state_root,
+                runtime=args.runtime,
+                default_project=args.project or "default",
+                cwd=args.cwd,
+            )
+            privilege = ensure_containerd_privilege(
+                state_root=args.state_root or default_state_root(),
+                runtime=args.runtime,
+                mode=containerd_privilege,
+            )
+            with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
+                if args.edge_link_cmd == "start":
+                    result = daemon.edge_link_start(
+                        project=args.project,
+                        k1s_root=args.k1s_root,
+                        timeout=args.timeout,
+                        **_edge_link_kwargs(args),
+                    )
+                elif args.edge_link_cmd == "status":
+                    result = daemon.edge_link_status(project=args.project, k1s_root=args.k1s_root)
+                elif args.edge_link_cmd == "stop":
+                    result = daemon.edge_link_stop(
+                        project=args.project,
+                        purge=args.purge,
+                        k1s_root=args.k1s_root,
+                    )
+                elif args.edge_link_cmd == "validate":
+                    result = daemon.edge_link_validate(
+                        project=args.project,
+                        k1s_root=args.k1s_root,
+                        timeout=args.timeout,
+                        require_gpu_smoke=not bool(args.no_gpu_smoke),
+                        **_edge_link_kwargs(args),
+                    )
+                else:
+                    result = {
+                        "ok": False,
+                        "error": f"unknown edge-link command: {args.edge_link_cmd}",
+                    }
+                result["containerd_privilege"] = containerd_privilege_summary(privilege)
+                return _print(result, json_out=args.json)
         if args.cmd == "validate":
             daemon = WorkerBeeDaemon(
                 state_root=args.state_root,
@@ -538,6 +660,8 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=args.cwd,
             )
             if args.scenario == "k1s-profile":
+                if not args.profile:
+                    raise ValueError("--profile is required for k1s-profile validation")
                 privilege = ensure_containerd_privilege(
                     state_root=args.state_root or default_state_root(),
                     runtime=args.runtime,
@@ -549,10 +673,13 @@ def main(argv: list[str] | None = None) -> int:
                         project=args.project,
                         k1s_root=args.k1s_root,
                         timeout=args.timeout,
+                        **_edge_link_kwargs(args),
                     )
                     result["containerd_privilege"] = containerd_privilege_summary(privilege)
                     return _print(result, json_out=args.json)
             if args.scenario == "profile-workload":
+                if not args.profile:
+                    raise ValueError("--profile is required for profile-workload validation")
                 privilege = ensure_containerd_privilege(
                     state_root=args.state_root or default_state_root(),
                     runtime=args.runtime,
@@ -564,6 +691,22 @@ def main(argv: list[str] | None = None) -> int:
                         project=args.project,
                         k1s_root=args.k1s_root,
                         timeout=args.timeout,
+                    )
+                    result["containerd_privilege"] = containerd_privilege_summary(privilege)
+                    return _print(result, json_out=args.json)
+            if args.scenario == "edge-link":
+                privilege = ensure_containerd_privilege(
+                    state_root=args.state_root or default_state_root(),
+                    runtime=args.runtime,
+                    mode=containerd_privilege,
+                )
+                with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
+                    result = daemon.edge_link_validate(
+                        project=args.project,
+                        k1s_root=args.k1s_root,
+                        timeout=args.timeout,
+                        require_gpu_smoke=not bool(args.no_gpu_smoke),
+                        **_edge_link_kwargs(args),
                     )
                     result["containerd_privilege"] = containerd_privilege_summary(privilege)
                     return _print(result, json_out=args.json)

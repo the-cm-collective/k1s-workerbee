@@ -41,6 +41,7 @@ DEFAULT_K1S_PYTHON_IMAGE = "docker.io/library/python:3.12-slim"
 DEFAULT_ETCD_IMAGE = "quay.io/coreos/etcd:v3.5.14"
 DEFAULT_NATS_IMAGE = "docker.io/library/nats:2.10.18-alpine"
 PROFILE_STATE_FILE = "k1s-profile.json"
+EDGE_LINK_PROFILE_NAME = "k1s-edge-link"
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +55,9 @@ class K1sProfileDescriptor:
     nats: bool = False
     ha_mode: bool = False
     workload_runtime: str = CONTAINERD_RUNTIME
+    advanced: bool = False
+    external_core: bool = False
+    requires_bootstrap: bool = False
 
     def public_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -135,6 +139,19 @@ BUILTIN_PROFILES: dict[str, K1sProfileDescriptor] = {
         nats=True,
         ha_mode=True,
     ),
+    EDGE_LINK_PROFILE_NAME: K1sProfileDescriptor(
+        name=EDGE_LINK_PROFILE_NAME,
+        description=(
+            "Advanced edge gateway and edge node connected to an external k1s core."
+        ),
+        controllers=0,
+        state_backend="external",
+        transport_backend="nats-js",
+        nats=True,
+        advanced=True,
+        external_core=True,
+        requires_bootstrap=True,
+    ),
 }
 
 
@@ -145,6 +162,10 @@ def builtin_profiles() -> dict[str, Any]:
         "runtime_requirement": CONTAINERD_RUNTIME,
         "host_k1s_processes": False,
     }
+
+
+def is_edge_link_profile(profile: str | None) -> bool:
+    return str(profile or "").strip() == EDGE_LINK_PROFILE_NAME
 
 
 class K1sProfileRunner:
@@ -170,6 +191,12 @@ class K1sProfileRunner:
 
     def start(self, *, profile: str, timeout: float = 180.0) -> dict[str, Any]:
         descriptor = _profile_descriptor(profile)
+        if descriptor.external_core:
+            raise WorkerBeeError(
+                code="K1S_EDGE_LINK_PROFILE_REQUIRES_DELEGATION",
+                message=f"profile `{profile}` is managed by the k1s edge-link runner",
+                remediation="Use WorkerBeeDaemon.profile_start or `workerbee edge-link start`.",
+            )
         self._require_containerd()
         info = self.load()
         if info and info.profile != descriptor.name:

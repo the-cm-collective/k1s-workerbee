@@ -1,0 +1,243 @@
+from __future__ import annotations
+
+import json
+import subprocess
+from pathlib import Path
+from stat import S_IMODE
+from typing import Any
+
+import pytest
+
+from workerbee.contract import WorkerBeeError
+from workerbee.daemon import WorkerBeeDaemon
+from workerbee.edge_link import K1sEdgeLinkInfo, K1sEdgeLinkRunner
+
+MASKED_VALUE = "***"
+
+
+def _bundle() -> dict[str, Any]:
+    return {
+        "site_id": "workerbee-edge",
+        "controller_url": "http://192.168.29.15:9110",
+        "agent_token": "agent-secret",
+        "nats_leaf_addr": "192.168.29.15:7422",
+        "nats_leaf_url": "nats://site-uplink:leaf-secret@192.168.29.15:7422",
+        "rathole_server_addr": "192.168.29.15:2333",
+        "rathole_token": "rathole-secret",
+        "registry_host": "reg.microk8s.core.home.arpa:32000",
+        "stack_domain": "k1s-dev-a.core.home.arpa",
+        "wildcard_apps_domain": "*.apps.k1s-dev-a.core.home.arpa",
+        "suggested_edge_env": {
+            "AE_CONTROLLER_URL": "http://192.168.29.15:9110",
+            "AE_AGENT_TOKEN": "agent-secret",
+            "K1S_NATS_LEAF_ADDR": "192.168.29.15:7422",
+            "K1S_NATS_LEAF_URL": "nats://site-uplink:leaf-secret@192.168.29.15:7422",
+            "AE_RATHOLE_SERVER_ADDR": "192.168.29.15:2333",
+            "AE_RATHOLE_DEFAULT_TOKEN": "rathole-secret",
+        },
+    }
+
+
+def test_edge_link_runner_rejects_non_containerd_runtime(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("workerbee.edge_link.resolve_runtime", lambda _runtime: "docker")
+    runner = K1sEdgeLinkRunner(project="demo", state_root=tmp_path, runtime="docker")
+
+    with pytest.raises(WorkerBeeError) as exc:
+        runner.start(bundle=_bundle(), advertise_host="192.168.29.111", build_images=False)
+
+    assert exc.value.code == "K1S_EDGE_LINK_REQUIRES_CONTAINERD"
+
+
+def test_edge_link_requires_bootstrap(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("workerbee.edge_link.resolve_runtime", lambda _runtime: "containerd")
+    runner = K1sEdgeLinkRunner(project="demo", state_root=tmp_path, runtime="containerd")
+
+    with pytest.raises(WorkerBeeError) as exc:
+        runner.start(advertise_host="192.168.29.111", build_images=False)
+
+    assert exc.value.code == "EDGE_LINK_BOOTSTRAP_REQUIRED"
+    assert exc.value.details["missing"] == [
+        "agent_token",
+        "controller_url",
+        "nats_leaf_addr",
+        "rathole_server_addr",
+    ]
+
+
+def test_edge_link_start_writes_masked_state_and_container_commands(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("workerbee.edge_link.resolve_runtime", lambda _runtime: "containerd")
+    monkeypatch.setattr(K1sEdgeLinkRunner, "_infer_advertise_host", lambda _self: "192.168.29.111")
+    monkeypatch.setattr(K1sEdgeLinkRunner, "_wait_ready", lambda *_args, **_kwargs: {"ok": True})
+    monkeypatch.setattr(
+        "workerbee.edge_link.choose_port",
+        lambda preferred, **_kwargs: int(preferred),
+    )
+
+    nvidia_dir = tmp_path / "nvidia"
+    nvidia_dir.mkdir()
+    nvidia_smi = nvidia_dir / "nvidia-smi"
+    nvidia_cli = nvidia_dir / "nvidia-container-cli"
+    nvidia_runtime = nvidia_dir / "nvidia-container-runtime"
+    for path in (nvidia_smi, nvidia_cli, nvidia_runtime):
+        path.write_text("#!/bin/sh\n", encoding="utf-8")
+        path.chmod(0o755)
+    runtime_config = nvidia_dir / "config"
+    runtime_config.mkdir()
+    monkeypatch.setattr(
+        K1sEdgeLinkRunner,
+        "_detect_nvidia",
+        lambda _self: {
+            "present": True,
+            "nvidia_smi": str(nvidia_smi),
+            "nvidia_container_cli": str(nvidia_cli),
+            "nvidia_container_runtime": str(nvidia_runtime),
+            "runtime_config_dir": str(runtime_config),
+            "summary": "GPU 0: Test GPU",
+        },
+    )
+
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):  # noqa: ANN001
+        commands.append([str(part) for part in cmd])
+        if "network" in cmd and "inspect" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", "missing")
+        if "run" in cmd:
+            name = cmd[cmd.index("--name") + 1]
+            return subprocess.CompletedProcess(cmd, 0, f"{name}-id\n", "")
+        if "ps" in cmd:
+            name_filters = [
+                str(cmd[index + 1]).removeprefix("name=")
+                for index, value in enumerate(cmd[:-1])
+                if value == "--filter" and str(cmd[index + 1]).startswith("name=")
+            ]
+            return subprocess.CompletedProcess(cmd, 0, "\n".join(name_filters), "")
+        return subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+
+    monkeypatch.setattr("workerbee.edge_link.subprocess.run", fake_run)
+
+    k1s_root = tmp_path / "k1s"
+    (k1s_root / "ops" / "dev").mkdir(parents=True)
+    (k1s_root / "ops" / "images").mkdir(parents=True)
+    (k1s_root / "ops" / "dev" / "nats-edge.conf").write_text(
+        'server_name: "edge-sfo-01"\nport: 4223\nhttp: 8223\n'
+        'leafnodes { remotes = [{ url: "nats://site-sfo-edge-01-uplink:dev@nats-hub:7422" }] }\n',
+        encoding="utf-8",
+    )
+
+    runner = K1sEdgeLinkRunner(
+        project="Edge Demo",
+        state_root=tmp_path,
+        runtime="containerd",
+        k1s_root=k1s_root,
+    )
+    result = runner.start(bundle=_bundle(), node_id="edge-node-1", timeout=0.01)
+
+    assert result["ok"] is True
+    edge = result["edge_link"]
+    assert edge["profile"] == "k1s-edge-link"
+    assert edge["agent_token"] == MASKED_VALUE
+    assert edge["rathole_token"] == MASKED_VALUE
+    assert edge["nats_leaf_url"] == MASKED_VALUE
+    assert edge["bootstrap"]["nats_leaf_url"] == MASKED_VALUE
+    assert edge["bootstrap"]["suggested_edge_env"]["K1S_NATS_LEAF_URL"] == MASKED_VALUE
+    assert edge["agent_endpoint"] == "http://192.168.29.111:19109"
+    assert S_IMODE((runner.edge_dir / "bootstrap.json").stat().st_mode) == 0o600
+
+    run_commands = [cmd for cmd in commands if "run" in cmd]
+    assert [cmd[cmd.index("--name") + 1].rsplit("-", 1)[-1] for cmd in run_commands] == [
+        "nats",
+        "rathole",
+        "gateway",
+        "node",
+    ]
+    for cmd in run_commands:
+        assert "--restart" in cmd
+        assert cmd[cmd.index("--restart") + 1] == "unless-stopped"
+    node_cmd = next(cmd for cmd in run_commands if cmd[cmd.index("--name") + 1].endswith("-node"))
+    assert "0.0.0.0:19109:9109" in node_cmd
+    assert f"AE_NVIDIA_SMI_BIN={nvidia_smi}" in node_cmd
+    assert f"{nvidia_smi}:{nvidia_smi}:ro" in node_cmd
+    assert "AE_AGENT_ENDPOINT=http://192.168.29.111:19109" in node_cmd
+    assert "AE_RUNTIME_BACKEND=containerd" in node_cmd
+
+    nats_conf = runner.edge_dir / "config" / "nats-edge.conf"
+    assert "workerbee-edge" in nats_conf.read_text(encoding="utf-8")
+    assert "leaf-secret" in nats_conf.read_text(encoding="utf-8")
+    info = json.loads(runner.info_file.read_text(encoding="utf-8"))
+    assert info["agent_token"] == _bundle()["agent_token"]
+
+
+def test_edge_link_node_check_requires_fresh_heartbeat(tmp_path: Path, monkeypatch) -> None:
+    runner = K1sEdgeLinkRunner(project="demo", state_root=tmp_path, runtime="containerd")
+    info = K1sEdgeLinkInfo(
+        project="demo",
+        profile="k1s-edge-link",
+        state_root=str(tmp_path),
+        edge_dir=str(tmp_path / "edge-link"),
+        k1s_root=str(tmp_path / "k1s"),
+        runtime="containerd",
+        network="demo",
+        namespace="demo",
+        started_at=1779135542.0,
+        site_id="workerbee-edge",
+        node_id="edge-node-1",
+        controller_url="http://127.0.0.1:9110",
+        agent_token=MASKED_VALUE,
+        nats_leaf_addr="127.0.0.1:7422",
+    )
+    old = {
+        "node_id": "edge-node-1",
+        "seen_at": "2026-05-18T20:18:39+00:00",
+    }
+    fresh = {
+        "node_id": "edge-node-1",
+        "seen_at": "2026-05-18T20:19:05+00:00",
+    }
+    records = [old, fresh]
+
+    monkeypatch.setattr(K1sEdgeLinkRunner, "_node_record", lambda *_args: records.pop(0))
+    monkeypatch.setattr("workerbee.edge_link.time.sleep", lambda _seconds: None)
+
+    result = runner._wait_node_check(info, timeout=1.0, fresh_after=info.started_at)
+
+    assert result["ok"] is True
+    assert result["node"] == fresh
+
+
+def test_daemon_profile_start_delegates_edge_link(tmp_path: Path, monkeypatch) -> None:
+    daemon = WorkerBeeDaemon(
+        state_root=tmp_path,
+        runtime="containerd",
+        default_project="demo",
+        cwd=tmp_path,
+    )
+    calls: list[dict[str, Any]] = []
+
+    class FakeEdgeRunner:
+        def start(self, **kwargs):  # noqa: ANN001
+            calls.append(kwargs)
+            return {"ok": True, "edge_link": {"profile": "k1s-edge-link"}}
+
+    monkeypatch.setattr(daemon, "_edge_link_runner", lambda *_args, **_kwargs: FakeEdgeRunner())
+    monkeypatch.setattr(daemon, "_sync_ingress_projects_result", lambda: {"synced": False})
+
+    result = daemon.profile_start(
+        profile="k1s-edge-link",
+        project="demo",
+        from_microk8s=True,
+        release="k1s-dev-a",
+        namespace="k1s-dev-a",
+        k1s_root=tmp_path / "k1s",
+        timeout=12,
+        build_images=False,
+    )
+
+    assert result["ok"] is True
+    assert calls[0]["from_microk8s"] is True
+    assert calls[0]["release"] == "k1s-dev-a"
+    assert calls[0]["timeout"] == 12
+    assert calls[0]["build_images"] is False

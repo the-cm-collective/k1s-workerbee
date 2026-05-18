@@ -22,11 +22,20 @@ def test_builtin_profiles_are_direct_containerd_only() -> None:
         "k1s-dev-etcd-labs",
         "k1s-single-etcd-containerd",
         "k1s-ha-min",
+        "k1s-edge-link",
     }
+    edge = next(item for item in result["profiles"] if item["name"] == "k1s-edge-link")
+    assert edge["advanced"] is True
+    assert edge["external_core"] is True
+    assert edge["requires_bootstrap"] is True
     assert "workerbee_v1_profile_start" in MCP_TOOL_NAMES
     assert "workerbee_v1_profile_validate" in MCP_TOOL_NAMES
     assert "workerbee_v1_profile_workload_status" in MCP_TOOL_NAMES
     assert "workerbee_v1_profile_workload_validate" in MCP_TOOL_NAMES
+    assert "workerbee_v1_edge_link_start" in MCP_TOOL_NAMES
+    assert "workerbee_v1_edge_link_validate" in MCP_TOOL_NAMES
+    assert "workerbee_v1_edge_link_status" in MCP_TOOL_NAMES
+    assert "workerbee_v1_edge_link_stop" in MCP_TOOL_NAMES
 
 
 def test_profile_runner_rejects_non_containerd_runtime(tmp_path: Path, monkeypatch) -> None:
