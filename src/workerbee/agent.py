@@ -144,7 +144,14 @@ queues, or integration behavior that benefits from a running local stack.
    and show `workerbee project mode start --project <project>`.
 11. Iterate against the live app through status, logs, exec, and `workerbee_v1_ingress_probe` until
    the requested behavior is verified. Use probe `headers` for signed requests such as S3 PUTs.
-12. Export artifacts with `workerbee_v1_bundle_export` when the implementation is ready to hand off.
+12. For larger multi-feature requests, when prior WorkerBee stages are performing well, plan a
+   coherent feature batch and work one feature checkpoint at a time. After each checkpoint, run
+   repo tests plus relevant WorkerBee deploy/status/log/probe validation. If validation fails,
+   inspect logs/status/probes, fix, redeploy, and revalidate without stopping; escalate only for
+   unresolvable blockers, destructive choices, missing credentials, or decisions that cannot be
+   inferred. When commit authority is present, commit each green checkpoint before moving to the
+   next feature.
+13. Export artifacts with `workerbee_v1_bundle_export` when the implementation is ready to hand off.
 
 For staged WorkerBee manifests, app logs and exec default to the WorkerBee project namespace.
 Use `app="namespace/name"` or pass `namespace` only when inspecting a non-default namespace;
@@ -192,6 +199,13 @@ Containerfiles/Dockerfiles. When they are absent, build a temporary native k1s
 deployment in WorkerBee state, deploy it locally, then rerun the requested
 runtime validation or security review. Keep first-run generated artifacts in
 WorkerBee state unless the user asks to commit them.
+
+For larger multi-feature requests, when prior WorkerBee stages are performing
+well, scope a coherent feature batch, split it into feature checkpoints,
+validate each checkpoint with repo tests and WorkerBee deployments/probes, and
+keep iterating autonomously while progress is being made. Use checkpoint commits
+only when the user has asked for commits or the repo workflow already permits
+them.
 {AGENT_INSTRUCTIONS_END}
 """
 
@@ -297,6 +311,24 @@ def runbook_payload() -> dict[str, Any]:
                 "runtime review."
             ),
             "Use workerbee_v1_security_review_project when the user asks for security review.",
+            (
+                "For larger multi-feature requests, when prior WorkerBee stages are performing "
+                "well, plan a coherent feature batch and implement one feature checkpoint at a "
+                "time."
+            ),
+            (
+                "After each checkpoint, run repo tests plus relevant WorkerBee "
+                "deployment/status/log/probe validation."
+            ),
+            (
+                "If validation fails, inspect logs/status/probes, fix, redeploy, and revalidate; "
+                "escalate only for unresolvable blockers, destructive choices, missing "
+                "credentials, or decisions that cannot be inferred."
+            ),
+            (
+                "When commit authority is present, commit each green checkpoint before moving "
+                "to the next feature."
+            ),
             "Iterate until the running app is correct, then export k1s/k8s/helm artifacts.",
         ],
         "first_run": [

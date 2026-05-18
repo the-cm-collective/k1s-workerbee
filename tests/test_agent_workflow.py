@@ -100,6 +100,9 @@ def test_agent_instructions_include_first_run_security_review_guidance() -> None
     assert "running app workload" in instructions
     assert "workerbee_v1_manifest_deploy_local" in instructions
     assert "Do not stop after" in instructions
+    assert "feature checkpoints" in instructions
+    assert "WorkerBee deployments/probes" in instructions
+    assert "checkpoint commits" in instructions
 
 
 def test_runbook_treats_bring_project_up_as_app_deploy() -> None:
@@ -116,6 +119,22 @@ def test_runbook_treats_bring_project_up_as_app_deploy() -> None:
     assert "Treat bring/run/start the project up in WorkerBee" in loop
     assert "workerbee_v1_project_start" in loop
     assert "map services to separate one-container workloads" in first_run
+
+
+def test_runbook_includes_feature_checkpoint_loop() -> None:
+    markdown = runbook_markdown()
+    payload = runbook_payload()
+    loop = "\n".join(payload["loop"])
+
+    assert "feature checkpoint" in markdown
+    assert "repo tests plus relevant WorkerBee deploy/status/log/probe validation" in markdown
+    assert "fix, redeploy, and revalidate without stopping" in markdown
+    assert "commit each green checkpoint" in markdown
+    assert "feature checkpoint" in loop
+    assert "deployment/status/log/probe validation" in loop
+    assert "fix, redeploy, and revalidate" in loop
+    assert "commit each green checkpoint" in loop
+    assert "unresolvable blockers" in loop
 
 
 def test_runbook_includes_tandem_k1s_dev_workflow() -> None:

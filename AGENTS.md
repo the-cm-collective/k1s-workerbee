@@ -26,4 +26,11 @@ Containerfiles/Dockerfiles. When they are absent, build a temporary native k1s
 deployment in WorkerBee state, deploy it locally, then rerun the requested
 runtime validation or security review. Keep first-run generated artifacts in
 WorkerBee state unless the user asks to commit them.
+
+For larger multi-feature requests, when prior WorkerBee stages are performing
+well, scope a coherent feature batch, split it into feature checkpoints,
+validate each checkpoint with repo tests and WorkerBee deployments/probes, and
+keep iterating autonomously while progress is being made. Use checkpoint commits
+only when the user has asked for commits or the repo workflow already permits
+them.
 <!-- workerbee-agent-instructions:v1 end -->
