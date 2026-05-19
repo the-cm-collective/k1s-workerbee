@@ -339,6 +339,7 @@ def serve_mcp(
         stack_domain: str | None = None,
         wildcard_apps_domain: str | None = None,
         advertise_host: str | None = None,
+        edge_local_addr: str | None = None,
         build_images: bool = True,
     ) -> dict[str, Any]:
         """Start a containerized k1s profile. Requires WorkerBee direct containerd."""
@@ -367,6 +368,7 @@ def serve_mcp(
                 stack_domain=stack_domain,
                 wildcard_apps_domain=wildcard_apps_domain,
                 advertise_host=advertise_host,
+                edge_local_addr=edge_local_addr,
                 build_images=build_images,
             ),
         )
@@ -419,6 +421,7 @@ def serve_mcp(
         stack_domain: str | None = None,
         wildcard_apps_domain: str | None = None,
         advertise_host: str | None = None,
+        edge_local_addr: str | None = None,
         build_images: bool = True,
         require_gpu_smoke: bool = True,
     ) -> dict[str, Any]:
@@ -448,6 +451,7 @@ def serve_mcp(
                 stack_domain=stack_domain,
                 wildcard_apps_domain=wildcard_apps_domain,
                 advertise_host=advertise_host,
+                edge_local_addr=edge_local_addr,
                 build_images=build_images,
                 require_gpu_smoke=require_gpu_smoke,
             ),
@@ -474,6 +478,7 @@ def serve_mcp(
         stack_domain: str | None = None,
         wildcard_apps_domain: str | None = None,
         advertise_host: str | None = None,
+        edge_local_addr: str | None = None,
         timeout: float = 180.0,
         build_images: bool = True,
     ) -> dict[str, Any]:
@@ -501,6 +506,7 @@ def serve_mcp(
                 stack_domain=stack_domain,
                 wildcard_apps_domain=wildcard_apps_domain,
                 advertise_host=advertise_host,
+                edge_local_addr=edge_local_addr,
                 timeout=timeout,
                 build_images=build_images,
             ),
@@ -539,6 +545,7 @@ def serve_mcp(
         stack_domain: str | None = None,
         wildcard_apps_domain: str | None = None,
         advertise_host: str | None = None,
+        edge_local_addr: str | None = None,
         timeout: float = 180.0,
         build_images: bool = True,
         require_gpu_smoke: bool = True,
@@ -567,6 +574,7 @@ def serve_mcp(
                 stack_domain=stack_domain,
                 wildcard_apps_domain=wildcard_apps_domain,
                 advertise_host=advertise_host,
+                edge_local_addr=edge_local_addr,
                 timeout=timeout,
                 build_images=build_images,
                 require_gpu_smoke=require_gpu_smoke,

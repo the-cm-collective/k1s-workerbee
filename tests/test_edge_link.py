@@ -134,7 +134,12 @@ def test_edge_link_start_writes_masked_state_and_container_commands(
         runtime="containerd",
         k1s_root=k1s_root,
     )
-    result = runner.start(bundle=_bundle(), node_id="edge-node-1", timeout=0.01)
+    result = runner.start(
+        bundle=_bundle(),
+        node_id="edge-node-1",
+        edge_local_addr="192.168.29.111:8081",
+        timeout=0.01,
+    )
 
     assert result["ok"] is True
     edge = result["edge_link"]
@@ -145,6 +150,7 @@ def test_edge_link_start_writes_masked_state_and_container_commands(
     assert edge["bootstrap"]["nats_leaf_url"] == MASKED_VALUE
     assert edge["bootstrap"]["suggested_edge_env"]["K1S_NATS_LEAF_URL"] == MASKED_VALUE
     assert edge["agent_endpoint"] == "http://192.168.29.111:19109"
+    assert edge["edge_local_addr"] == "192.168.29.111:8081"
     assert S_IMODE((runner.edge_dir / "bootstrap.json").stat().st_mode) == 0o600
 
     run_commands = [cmd for cmd in commands if "run" in cmd]
@@ -157,6 +163,10 @@ def test_edge_link_start_writes_masked_state_and_container_commands(
     for cmd in run_commands:
         assert "--restart" in cmd
         assert cmd[cmd.index("--restart") + 1] == "unless-stopped"
+    rathole_cmd = next(
+        cmd for cmd in run_commands if cmd[cmd.index("--name") + 1].endswith("-rathole")
+    )
+    assert rathole_cmd[rathole_cmd.index("--network") + 1] == "host"
     node_cmd = next(cmd for cmd in run_commands if cmd[cmd.index("--name") + 1].endswith("-node"))
     assert "0.0.0.0:19109:9109" in node_cmd
     assert f"AE_NVIDIA_SMI_BIN={nvidia_smi}" in node_cmd
@@ -167,6 +177,8 @@ def test_edge_link_start_writes_masked_state_and_container_commands(
     nats_conf = runner.edge_dir / "config" / "nats-edge.conf"
     assert "workerbee-edge" in nats_conf.read_text(encoding="utf-8")
     assert "leaf-secret" in nats_conf.read_text(encoding="utf-8")
+    rathole_conf = runner.edge_dir / "config" / "rathole-client.toml"
+    assert 'local_addr = "192.168.29.111:8081"' in rathole_conf.read_text(encoding="utf-8")
     info = json.loads(runner.info_file.read_text(encoding="utf-8"))
     assert info["agent_token"] == _bundle()["agent_token"]
 

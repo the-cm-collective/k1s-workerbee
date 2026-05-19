@@ -84,6 +84,11 @@ def _add_edge_link_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--wildcard-apps-domain", default=None)
     parser.add_argument("--advertise-host", default=None)
     parser.add_argument(
+        "--edge-local-addr",
+        default=None,
+        help="Address the rathole client should dial for edge-local HTTP traffic",
+    )
+    parser.add_argument(
         "--skip-build",
         action="store_true",
         help="Use existing gateway/node images",
@@ -113,6 +118,7 @@ def _edge_link_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "stack_domain": getattr(args, "stack_domain", None),
         "wildcard_apps_domain": getattr(args, "wildcard_apps_domain", None),
         "advertise_host": getattr(args, "advertise_host", None),
+        "edge_local_addr": getattr(args, "edge_local_addr", None),
         "build_images": not bool(getattr(args, "skip_build", False)),
     }
 

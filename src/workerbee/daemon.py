@@ -628,6 +628,7 @@ class WorkerBeeDaemon:
         stack_domain: str | None = None,
         wildcard_apps_domain: str | None = None,
         advertise_host: str | None = None,
+        edge_local_addr: str | None = None,
         build_images: bool = True,
     ) -> dict[str, Any]:
         name = project_slug(project or self.default_project)
@@ -654,6 +655,7 @@ class WorkerBeeDaemon:
                         stack_domain=stack_domain,
                         wildcard_apps_domain=wildcard_apps_domain,
                         advertise_host=advertise_host,
+                        edge_local_addr=edge_local_addr,
                         timeout=timeout,
                         build_images=build_images,
                     )
@@ -738,6 +740,7 @@ class WorkerBeeDaemon:
         stack_domain: str | None = None,
         wildcard_apps_domain: str | None = None,
         advertise_host: str | None = None,
+        edge_local_addr: str | None = None,
         build_images: bool = True,
         require_gpu_smoke: bool = True,
     ) -> dict[str, Any]:
@@ -765,6 +768,7 @@ class WorkerBeeDaemon:
                         stack_domain=stack_domain,
                         wildcard_apps_domain=wildcard_apps_domain,
                         advertise_host=advertise_host,
+                        edge_local_addr=edge_local_addr,
                         timeout=timeout,
                         build_images=build_images,
                         require_gpu_smoke=require_gpu_smoke,
@@ -803,6 +807,7 @@ class WorkerBeeDaemon:
         stack_domain: str | None = None,
         wildcard_apps_domain: str | None = None,
         advertise_host: str | None = None,
+        edge_local_addr: str | None = None,
         timeout: float = 180.0,
         build_images: bool = True,
     ) -> dict[str, Any]:
@@ -828,6 +833,7 @@ class WorkerBeeDaemon:
             stack_domain=stack_domain,
             wildcard_apps_domain=wildcard_apps_domain,
             advertise_host=advertise_host,
+            edge_local_addr=edge_local_addr,
             build_images=build_images,
         )
 
@@ -878,6 +884,7 @@ class WorkerBeeDaemon:
         stack_domain: str | None = None,
         wildcard_apps_domain: str | None = None,
         advertise_host: str | None = None,
+        edge_local_addr: str | None = None,
         timeout: float = 180.0,
         build_images: bool = True,
         require_gpu_smoke: bool = True,
@@ -904,6 +911,7 @@ class WorkerBeeDaemon:
             stack_domain=stack_domain,
             wildcard_apps_domain=wildcard_apps_domain,
             advertise_host=advertise_host,
+            edge_local_addr=edge_local_addr,
             build_images=build_images,
             require_gpu_smoke=require_gpu_smoke,
         )
@@ -1515,6 +1523,7 @@ class WorkerBeeDaemon:
                 "advanced": True,
                 "external_core": True,
                 "bootstrap_sources": ["microk8s", "bundle", "manual"],
+                "edge_local_addr_override": True,
                 "components": ["edge-nats", "rathole-client", "gateway", "node"],
                 "gpu_validation": True,
             },

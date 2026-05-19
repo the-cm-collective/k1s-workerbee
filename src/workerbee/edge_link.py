@@ -49,6 +49,7 @@ DEFAULT_NATS_IMAGE = "docker.io/library/nats:2.10.18-alpine"
 DEFAULT_RATHOLE_IMAGE = "docker.io/rapiz1/rathole:v0.5.0"
 DEFAULT_GPU_SMOKE_IMAGE = "docker.io/nvidia/cuda:12.4.1-base-ubuntu22.04"
 DEFAULT_K1S_PYTHON_IMAGE = "docker.io/library/python:3.12-slim"
+DEFAULT_EDGE_LOCAL_ADDR = "127.0.0.1:18081"
 
 
 @dataclass(slots=True)
@@ -83,12 +84,14 @@ class K1sEdgeLinkInfo:
     nats_leaf_addr: str
     nats_leaf_url: str = ""
     rathole_server_addr: str = ""
+    rathole_server_addrs: list[str] = field(default_factory=list)
     rathole_token: str = ""
     registry_host: str = ""
     stack_domain: str = ""
     wildcard_apps_domain: str = ""
     advertise_host: str = ""
     agent_endpoint: str = ""
+    edge_local_addr: str = DEFAULT_EDGE_LOCAL_ADDR
     agent_host_port: int | None = None
     gateway_image: str = ""
     node_image: str = ""
@@ -147,6 +150,7 @@ class K1sEdgeLinkRunner:
         stack_domain: str | None = None,
         wildcard_apps_domain: str | None = None,
         advertise_host: str | None = None,
+        edge_local_addr: str | None = None,
         timeout: float = 180.0,
         build_images: bool = True,
     ) -> dict[str, Any]:
@@ -167,14 +171,19 @@ class K1sEdgeLinkRunner:
             registry_host=registry_host,
             stack_domain=stack_domain,
             wildcard_apps_domain=wildcard_apps_domain,
+            edge_local_addr=edge_local_addr,
         )
         site = str(bootstrap.get("site_id") or site_id or DEFAULT_EDGE_SITE_ID)
         node = str(node_id or bootstrap.get("node_id") or DEFAULT_EDGE_NODE_ID)
+        edge_local = _edge_local_addr(edge_local_addr, bootstrap)
+        rathole_addrs = _rathole_server_addrs(bootstrap)
         info = self.load()
         if (
             info
             and info.site_id == site
             and info.node_id == node
+            and info.edge_local_addr == edge_local
+            and info.rathole_server_addrs == rathole_addrs
             and self._all_components_running(info)
         ):
             return {"ok": True, "started": False, "edge_link": info.public_dict()}
@@ -215,12 +224,22 @@ class K1sEdgeLinkRunner:
                 host_port=nats_port,
                 http_port=nats_http_port,
             ),
-            self._start_rathole_client(
+            *[
+                self._start_rathole_client(
+                    site_id=site,
+                    server_addr=addr,
+                    token=str(bootstrap.get("rathole_token") or ""),
+                    edge_local_addr=edge_local,
+                    index=(idx if len(rathole_addrs) > 1 else None),
+                )
+                for idx, addr in enumerate(rathole_addrs, start=1)
+            ],
+            self._start_gateway(
                 site_id=site,
-                server_addr=str(bootstrap.get("rathole_server_addr") or ""),
-                token=str(bootstrap.get("rathole_token") or ""),
+                node_id=node,
+                bootstrap=bootstrap,
+                edge_local_addr=edge_local,
             ),
-            self._start_gateway(site_id=site, node_id=node, bootstrap=bootstrap),
             self._start_node(
                 site_id=site,
                 node_id=node,
@@ -247,12 +266,14 @@ class K1sEdgeLinkRunner:
             nats_leaf_addr=str(bootstrap.get("nats_leaf_addr") or ""),
             nats_leaf_url=str(bootstrap.get("nats_leaf_url") or ""),
             rathole_server_addr=str(bootstrap.get("rathole_server_addr") or ""),
+            rathole_server_addrs=rathole_addrs,
             rathole_token=str(bootstrap.get("rathole_token") or ""),
             registry_host=str(bootstrap.get("registry_host") or ""),
             stack_domain=str(bootstrap.get("stack_domain") or ""),
             wildcard_apps_domain=str(bootstrap.get("wildcard_apps_domain") or ""),
             advertise_host=host,
             agent_endpoint=agent_endpoint,
+            edge_local_addr=edge_local,
             agent_host_port=agent_port,
             gateway_image=self.gateway_image,
             node_image=self.node_image,
@@ -517,6 +538,7 @@ class K1sEdgeLinkRunner:
         registry_host: str | None,
         stack_domain: str | None,
         wildcard_apps_domain: str | None,
+        edge_local_addr: str | None,
     ) -> dict[str, Any]:
         data: dict[str, Any] = {}
         if from_microk8s:
@@ -542,6 +564,7 @@ class K1sEdgeLinkRunner:
             "stack_domain": stack_domain,
             "wildcard_apps_domain": wildcard_apps_domain,
             "site_id": site_id,
+            "edge_local_addr": edge_local_addr,
         }
         data.update({key: value for key, value in manual.items() if value not in (None, "")})
         edge_env = data.get("suggested_edge_env")
@@ -556,6 +579,7 @@ class K1sEdgeLinkRunner:
             data.setdefault("registry_host", edge_env.get("AE_REGISTRY_HOST"))
             data.setdefault("stack_domain", edge_env.get("K1S_STACK_DOMAIN"))
             data.setdefault("wildcard_apps_domain", edge_env.get("K1S_WILDCARD_APPS_DOMAIN"))
+            data.setdefault("edge_local_addr", edge_env.get("AE_EDGE_INGRESS_LOCAL_ADDR"))
         required = ("controller_url", "agent_token", "nats_leaf_addr", "rathole_server_addr")
         missing = sorted(key for key in required if not str(data.get(key) or "").strip())
         if missing:
@@ -602,7 +626,63 @@ class K1sEdgeLinkRunner:
                 details={"returncode": proc.returncode, "stdout": proc.stdout},
                 retryable=True,
             )
-        return json.loads(proc.stdout)
+        data = json.loads(proc.stdout)
+        endpoints = self._microk8s_rathole_server_addrs(
+            kubectl_bin=os.getenv("KUBECTL_BIN", "kubectl"),
+            release=release,
+            namespace=namespace,
+            port=_port_from_addr(str(data.get("rathole_server_addr") or ""), 2333),
+        )
+        if endpoints:
+            data["rathole_server_addrs"] = endpoints
+        return data
+
+    def _microk8s_rathole_server_addrs(
+        self,
+        *,
+        kubectl_bin: str,
+        release: str,
+        namespace: str,
+        port: int,
+    ) -> list[str]:
+        service_name = f"{release}-k1s-core-ha-rathole"
+        proc = subprocess.run(
+            [
+                kubectl_bin,
+                "-n",
+                namespace,
+                "get",
+                "endpointslice",
+                "-l",
+                f"kubernetes.io/service-name={service_name}",
+                "-o",
+                "json",
+            ],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+        )
+        if proc.returncode != 0:
+            return []
+        try:
+            payload = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            return []
+        addrs: list[str] = []
+        for item in payload.get("items") or []:
+            for endpoint in item.get("endpoints") or []:
+                conditions = endpoint.get("conditions") or {}
+                if conditions.get("ready") is False:
+                    continue
+                addresses = endpoint.get("addresses") or []
+                if not addresses:
+                    continue
+                host = str(addresses[0] or "").strip()
+                if host:
+                    addrs.append(f"{host}:{int(port)}")
+        return _dedupe(addrs)
 
     def _start_edge_nats(
         self,
@@ -662,12 +742,17 @@ class K1sEdgeLinkRunner:
         site_id: str,
         server_addr: str,
         token: str,
+        edge_local_addr: str,
+        index: int | None = None,
     ) -> K1sEdgeLinkComponent:
-        name = self._component_name("rathole")
+        component = "rathole" if index is None else f"rathole-{index}"
+        name = self._component_name(component)
         config = self._write_rathole_config(
             site_id=site_id,
             server_addr=server_addr,
             token=token,
+            edge_local_addr=edge_local_addr,
+            index=index,
         )
         self._rm_container(name)
         image = os.getenv("WORKERBEE_EDGE_LINK_RATHOLE_IMAGE", DEFAULT_RATHOLE_IMAGE)
@@ -678,7 +763,7 @@ class K1sEdgeLinkRunner:
             name,
             *self._restart_policy_args(),
             "--network",
-            self.network,
+            os.getenv("WORKERBEE_EDGE_LINK_RATHOLE_NETWORK", "host"),
             "-v",
             f"{config}:/etc/rathole/client.toml:ro",
             *self._external_host_args({"rathole_server_addr": server_addr}),
@@ -695,12 +780,18 @@ class K1sEdgeLinkRunner:
         site_id: str,
         node_id: str,
         bootstrap: dict[str, Any],
+        edge_local_addr: str,
     ) -> K1sEdgeLinkComponent:
         name = self._component_name("gateway")
         self._rm_container(name)
         data = self.edge_dir / "data" / "gateway"
         data.mkdir(parents=True, exist_ok=True)
-        env = self._gateway_env(site_id=site_id, node_id=node_id, bootstrap=bootstrap)
+        env = self._gateway_env(
+            site_id=site_id,
+            node_id=node_id,
+            bootstrap=bootstrap,
+            edge_local_addr=edge_local_addr,
+        )
         command = (
             "cd /workspace && "
             "python -m pip install --no-cache-dir -r /workspace/requirements.txt "
@@ -802,6 +893,7 @@ class K1sEdgeLinkRunner:
         site_id: str,
         node_id: str,
         bootstrap: dict[str, Any],
+        edge_local_addr: str,
     ) -> dict[str, str]:
         env = self._bootstrap_env(bootstrap)
         env.update(
@@ -818,7 +910,7 @@ class K1sEdgeLinkRunner:
                 "AE_JS_DOMAIN": "K1S",
                 "AE_NATS_URL": f"nats://gateway:dev@{self._component_name('edge-nats')}:4223",
                 "AE_GATEWAY_SPOOL_PATH": "/var/lib/ae/gateway.db",
-                "AE_EDGE_INGRESS_LOCAL_ADDR": "127.0.0.1:18081",
+                "AE_EDGE_INGRESS_LOCAL_ADDR": edge_local_addr,
                 "EDGE_START_WORKER": "0",
             }
         )
@@ -957,8 +1049,17 @@ class K1sEdgeLinkRunner:
         path.write_text(text, encoding="utf-8")
         return path
 
-    def _write_rathole_config(self, *, site_id: str, server_addr: str, token: str) -> Path:
-        path = self.edge_dir / "config" / "rathole-client.toml"
+    def _write_rathole_config(
+        self,
+        *,
+        site_id: str,
+        server_addr: str,
+        token: str,
+        edge_local_addr: str,
+        index: int | None = None,
+    ) -> Path:
+        name = "rathole-client" if index is None else f"rathole-client-{index}"
+        path = self.edge_dir / "config" / f"{name}.toml"
         path.parent.mkdir(parents=True, exist_ok=True)
         content = textwrap.dedent(
             f"""\
@@ -968,7 +1069,7 @@ class K1sEdgeLinkRunner:
 
             [client.services]
             [client.services."{site_id}"]
-            local_addr = "127.0.0.1:18081"
+            local_addr = "{edge_local_addr}"
             """
         )
         path.write_text(content, encoding="utf-8")
@@ -1540,6 +1641,52 @@ def _split_host_port(value: str) -> str:
         return ""
     parsed = urlsplit(raw if "://" in raw else f"tcp://{raw}")
     return parsed.hostname or ""
+
+
+def _port_from_addr(value: str, default_port: int) -> int:
+    raw = str(value or "").strip()
+    if not raw:
+        return int(default_port)
+    parsed = urlsplit(raw if "://" in raw else f"tcp://{raw}")
+    return int(parsed.port or default_port)
+
+
+def _rathole_server_addrs(bootstrap: dict[str, Any]) -> list[str]:
+    raw = bootstrap.get("rathole_server_addrs")
+    if isinstance(raw, str):
+        values = [item.strip() for item in raw.split(",")]
+    elif isinstance(raw, list):
+        values = [str(item or "").strip() for item in raw]
+    else:
+        values = []
+    fallback = str(bootstrap.get("rathole_server_addr") or "").strip()
+    if fallback and not any(values):
+        values.append(fallback)
+    return _dedupe([item for item in values if item])
+
+
+def _edge_local_addr(explicit: str | None, bootstrap: dict[str, Any]) -> str:
+    for value in (
+        explicit,
+        bootstrap.get("edge_local_addr"),
+        os.getenv("WORKERBEE_EDGE_LINK_LOCAL_ADDR"),
+        DEFAULT_EDGE_LOCAL_ADDR,
+    ):
+        text = str(value or "").strip()
+        if text:
+            return text
+    return DEFAULT_EDGE_LOCAL_ADDR
+
+
+def _dedupe(values: list[str]) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value in seen:
+            continue
+        seen.add(value)
+        result.append(value)
+    return result
 
 
 def _parse_iso_timestamp(value: Any) -> float | None:
