@@ -169,6 +169,9 @@ only when the user has asked for commits or the repo workflow already permits
 them.
 ```
 
+For the reasoning behind this agent workflow, see
+[`docs/workerbee-codex-state-reconciliation.md`](docs/workerbee-codex-state-reconciliation.md).
+
 Use `workerbee agent install --check` to inspect whether the block is present.
 Use `workerbee agent install --append --target AGENTS.md` to append it to an
 existing repo file, or add `--allow-create` when you explicitly want WorkerBee
