@@ -254,6 +254,7 @@ class GlobalIngress:
         self.caddy_data.mkdir(parents=True, exist_ok=True)
         self._write_caddyfile(projects or [])
         self._ensure_caddy_container()
+        self._ensure_project_network_attachments(projects or [])
         self._wait_ready()
         self._export_ca_bundle()
         verification = self._verified_dashboard_health_probe()
@@ -267,6 +268,7 @@ class GlobalIngress:
 
     def sync_projects(self, projects: list[str]) -> None:
         self._write_caddyfile(projects)
+        self._ensure_project_network_attachments(projects)
         self.reload()
 
     def reload(self) -> dict[str, Any]:
@@ -635,6 +637,97 @@ https://{self.dashboard_host} {{
 
     def _container_running(self) -> bool:
         return _caddy_container_running(self.state_root, self.runtime, self.container)
+
+    def _ensure_project_network_attachments(self, projects: list[str]) -> dict[str, Any]:
+        if self.runtime == CONTAINERD_RUNTIME:
+            return {"ok": True, "runtime": self.runtime, "connected": [], "skipped": ["containerd"]}
+        if not projects:
+            return {"ok": True, "runtime": self.runtime, "connected": [], "skipped": ["no-projects"]}
+        inspect = subprocess.run(
+            runtime_command_args(
+                self.runtime,
+                state_root=self.state_root,
+                project=None,
+                system=True,
+                args=["inspect", "--format", "{{json .NetworkSettings.Networks}}", self.container],
+            ),
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=15,
+        )
+        if inspect.returncode != 0:
+            return {
+                "ok": False,
+                "runtime": self.runtime,
+                "container": self.container,
+                "reason": "inspect-failed",
+                "stdout": inspect.stdout.strip(),
+            }
+        try:
+            network_map = json.loads(inspect.stdout.strip() or "{}")
+        except json.JSONDecodeError:
+            network_map = {}
+        attached = set(network_map) if isinstance(network_map, dict) else set()
+        targets = [f"workerbee-{project}" for project in sorted(set(projects)) if str(project).strip()]
+        connected: list[str] = []
+        skipped: list[str] = []
+        errors: list[dict[str, Any]] = []
+        for network in targets:
+            if network in attached:
+                skipped.append(network)
+                continue
+            exists = subprocess.run(
+                runtime_command_args(
+                    self.runtime,
+                    state_root=self.state_root,
+                    project=None,
+                    system=True,
+                    args=["network", "inspect", network],
+                ),
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=15,
+            )
+            if exists.returncode != 0:
+                skipped.append(network)
+                continue
+            connect = subprocess.run(
+                runtime_command_args(
+                    self.runtime,
+                    state_root=self.state_root,
+                    project=None,
+                    system=True,
+                    args=["network", "connect", network, self.container],
+                ),
+                check=False,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                timeout=30,
+            )
+            if connect.returncode == 0:
+                connected.append(network)
+                attached.add(network)
+            else:
+                errors.append(
+                    {
+                        "network": network,
+                        "returncode": connect.returncode,
+                        "stdout": connect.stdout.strip(),
+                    }
+                )
+        return {
+            "ok": not errors,
+            "runtime": self.runtime,
+            "container": self.container,
+            "connected": connected,
+            "skipped": skipped,
+            "errors": errors,
+        }
 
 
 def _wait_for_tcp(host: str, port: int, *, timeout_seconds: float) -> None:

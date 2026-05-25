@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import signal
 import socket
 import subprocess
 import sys
 import time
+from errno import EPERM
 from contextlib import suppress
 from dataclasses import dataclass
 from ipaddress import ip_address
@@ -434,14 +436,28 @@ def mcp_daemon_status(config: MCPDaemonConfig) -> dict[str, Any]:
     metadata = _read_metadata(config.metadata_file)
     status = _base_status(config)
     if not metadata:
+        orphan_pids = _orphan_mcp_pids(config)
+        orphan_pid = orphan_pids[0] if len(orphan_pids) == 1 else None
+        runtime = config.runtime
+        ingress = global_ingress_status(config.state_root, runtime=runtime)
         return {
             **status,
-            "running": False,
+            "running": bool(orphan_pids),
             "stale": False,
+            "pid": orphan_pid,
+            "metadata_missing": bool(orphan_pids),
+            "orphan_pids": orphan_pids,
+            "dashboard_url": ingress.get("dashboard_url"),
+            "ca_download_url": ingress.get("ca_download_url"),
+            "dashboard_ca_download_url": ingress.get("dashboard_ca_download_url"),
+            "dashboard_ca_sha256_url": ingress.get("dashboard_ca_sha256_url"),
+            "ca_commands": ingress.get("ca_commands") or {},
+            "dns": ingress.get("dns") or {},
+            "global_dashboard": ingress,
             "containerd_privilege": containerd_privilege_summary(
                 containerd_privilege_status(
                     state_root=config.state_root,
-                    runtime=config.runtime,
+                    runtime=runtime,
                     mode=config.containerd_privilege,
                 )
             ),
@@ -788,6 +804,8 @@ def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
+    except PermissionError as exc:
+        return getattr(exc, "errno", None) == EPERM
     except OSError:
         return False
 
@@ -810,7 +828,7 @@ def _pid_matches_metadata(pid: int, config: MCPDaemonConfig, metadata: dict[str,
 def _orphan_mcp_pids(config: MCPDaemonConfig) -> list[int]:
     proc_root = Path("/proc")
     if not proc_root.is_dir():
-        return []
+        return _fallback_orphan_mcp_pids(config)
     pids: list[int] = []
     for entry in proc_root.iterdir():
         if not entry.name.isdigit():
@@ -819,6 +837,35 @@ def _orphan_mcp_pids(config: MCPDaemonConfig) -> list[int]:
         if pid == os.getpid():
             continue
         parts = _proc_cmdline_parts(pid)
+        if parts and _argv_matches_mcp_config(parts, config):
+            pids.append(pid)
+    return pids
+
+
+def _fallback_orphan_mcp_pids(config: MCPDaemonConfig) -> list[int]:
+    try:
+        proc = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+    except Exception:
+        return []
+    pids: list[int] = []
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        pid_text, _, command = line.partition(" ")
+        if not pid_text.isdigit() or not command:
+            continue
+        pid = int(pid_text)
+        if pid == os.getpid():
+            continue
+        parts = _split_command_line(command)
         if parts and _argv_matches_mcp_config(parts, config):
             pids.append(pid)
     return pids
@@ -877,6 +924,13 @@ def _argv_option(parts: list[str], name: str) -> str | None:
     if index >= len(parts):
         return None
     return parts[index]
+
+
+def _split_command_line(command: str) -> list[str]:
+    try:
+        return [part for part in shlex.split(command, posix=True) if part]
+    except Exception:
+        return command.split()
 
 
 def _terminate_process_group(pid: int, *, timeout: float) -> None:

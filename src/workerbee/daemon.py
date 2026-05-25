@@ -577,7 +577,11 @@ class WorkerBeeDaemon:
             "state_root": str(self.state_root),
             "global_dashboard": global_dashboard,
             "projects": items,
-            "summary": _dashboard_summary(items, global_dashboard=global_dashboard),
+            "summary": _dashboard_summary(
+                items,
+                global_dashboard=global_dashboard,
+                mcp_running=bool(self._dashboard_thread and self._dashboard_thread.is_alive()),
+            ),
             "action_jobs": self.dashboard_action_jobs(),
             "ingress_sync": ingress_sync,
             "updated_at": time.time(),
@@ -2780,6 +2784,7 @@ def _dashboard_summary(
     projects: list[dict[str, Any]],
     *,
     global_dashboard: dict[str, Any],
+    mcp_running: bool,
 ) -> dict[str, Any]:
     errors = [item for item in projects if item.get("error")]
     running = [item for item in projects if item.get("running")]
@@ -2807,7 +2812,7 @@ def _dashboard_summary(
     health_ok = bool(health_probe.get("ok")) if isinstance(health_probe, dict) else False
     dns = global_dashboard.get("dns") if isinstance(global_dashboard.get("dns"), dict) else {}
     return {
-        "mcp_running": True,
+        "mcp_running": mcp_running,
         "global_ingress_running": bool(global_dashboard.get("running")),
         "https_health": health_ok,
         "dns_enabled": bool(dns.get("enabled")),

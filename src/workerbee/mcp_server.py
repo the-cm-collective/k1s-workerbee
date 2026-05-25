@@ -1089,8 +1089,6 @@ def _serve_exec_argv(
 
 
 def _request_mcp_shutdown(metadata_file: Path) -> None:
-    with suppress(OSError):
-        metadata_file.unlink()
     os.kill(os.getpid(), signal.SIGINT)
 
 
