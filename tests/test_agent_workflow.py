@@ -93,16 +93,31 @@ def test_agent_instructions_include_first_run_security_review_guidance() -> None
     instructions = agent_instructions_markdown()
 
     assert "workerbee_v1_session_start" in instructions
+    assert "Respect the returned project" in instructions
+    assert "`lazy` waits until deploy/start is needed" in instructions
+    assert "workerbee_v1_project_status" in instructions
     assert "security review" in instructions
+    assert "secret policy checks" in instructions
     assert "first time WorkerBee is coming up" in instructions
     assert "temporary native k1s" in instructions
     assert "bring, run, or start the project up in WorkerBee" in instructions
     assert "running app workload" in instructions
     assert "workerbee_v1_manifest_deploy_local" in instructions
     assert "Do not stop after" in instructions
+    assert "do not guess generated runtime container names" in instructions
     assert "feature checkpoints" in instructions
     assert "WorkerBee deployments/probes" in instructions
     assert "checkpoint commits" in instructions
+    assert "workerbee_v1_profile_start" in instructions
+    assert "workerbee_v1_profile_workload_validate" in instructions
+    assert "workerbee_v1_edge_link_start" in instructions
+    assert "workerbee_v1_edge_link_validate" in instructions
+
+
+def test_repo_agents_file_contains_generated_workerbee_block() -> None:
+    text = Path("AGENTS.md").read_text(encoding="utf-8")
+
+    assert agent_instructions_markdown() in text
 
 
 def test_runbook_treats_bring_project_up_as_app_deploy() -> None:
