@@ -3,6 +3,20 @@
 All notable WorkerBee changes are documented here. Earlier entries are best
 effort summaries reconstructed from release notes and git history.
 
+## v0.1.6.dev1 - 2026-05-31
+
+- Added the k1s edge-link runner and HA-aware external-core targets.
+- Added MCP/API support for edge-link validation, start, status, and stop
+  workflows.
+- Improved global dashboard load behavior for large local WorkerBee project
+  sets by avoiding eager k1s runtime resolution during project listing.
+- Changed the global dashboard shell to load first and refresh project data
+  asynchronously with single-flight polling.
+- Fixed stale generated dashboard routes for stopped profile and project
+  dashboards.
+- Published as a development-channel build pinned to
+  `k1s-workerbee-runtime==0.1.6.dev1`.
+
 ## v0.1.4 - 2026-05-12
 
 - Added explicit LAN ingress DNS forwarding so local devices can resolve
