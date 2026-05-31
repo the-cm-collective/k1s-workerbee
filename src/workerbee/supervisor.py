@@ -25,7 +25,7 @@ from workerbee.containerd_helper import remove_containerd_helper_tree
 from workerbee.contract import WorkerBeeError
 from workerbee.http import request, wait_for_http
 from workerbee.ingress import ProjectIngressConfig
-from workerbee.k1s_runtime import resolve_k1s_runtime
+from workerbee.k1s_runtime import K1sRuntime, resolve_k1s_runtime
 from workerbee.paths import default_state_dir
 from workerbee.poc import (
     POC_APPS,
@@ -99,12 +99,28 @@ class WorkerBeeSupervisor:
         self.project = _slug(project)
         self.cwd = (cwd or Path.cwd()).resolve()
         self.state_dir = (state_dir or default_state_dir(self.project, cwd=self.cwd)).resolve()
-        self.k1s_runtime = resolve_k1s_runtime(cwd=self.cwd, k1s_root=k1s_root)
-        self.k1s_root = self.k1s_runtime.k1s_root
-        self.python_executable = self.k1s_runtime.python_executable
+        self._requested_k1s_root = k1s_root
+        self._k1s_runtime: K1sRuntime | None = None
         self.runtime_requested = runtime
         self.ingress = ingress
         self.stack_file = self.state_dir / "stack.json"
+
+    @property
+    def k1s_runtime(self) -> K1sRuntime:
+        if self._k1s_runtime is None:
+            self._k1s_runtime = resolve_k1s_runtime(
+                cwd=self.cwd,
+                k1s_root=self._requested_k1s_root,
+            )
+        return self._k1s_runtime
+
+    @property
+    def k1s_root(self) -> Path | None:
+        return self.k1s_runtime.k1s_root
+
+    @property
+    def python_executable(self) -> str:
+        return self.k1s_runtime.python_executable
 
     # Lifecycle -----------------------------------------------------
     def start(self) -> StackInfo:
@@ -1026,9 +1042,9 @@ https://{api_host} {{
             if not self.stack_file.exists():
                 return None
             data = json.loads(self.stack_file.read_text(encoding="utf-8"))
-            data.setdefault("k1s_runtime_source", self.k1s_runtime.source)
-            data.setdefault("python_executable", self.python_executable)
-            data.setdefault("ae_origin", self.k1s_runtime.ae_origin)
+            data.setdefault("k1s_runtime_source", "unknown")
+            data.setdefault("python_executable", "")
+            data.setdefault("ae_origin", None)
             data.setdefault("ingress", {"enabled": False})
             data.setdefault("ingress_urls", {})
             return StackInfo(**data)
