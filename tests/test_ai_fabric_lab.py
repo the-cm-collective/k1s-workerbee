@@ -42,7 +42,7 @@ def test_ai_fabric_lab_stage_is_workerbee_valid() -> None:
     validation = validate_stage(EXAMPLE_ROOT / "stage")
 
     assert validation["ok"] is True
-    assert validation["input_kinds"] == ["kubernetes"]
+    assert validation["input_kinds"] == ["native-k1s"]
     assert "workerbee-ai-fabric-models:dev" in validation["images"]
     assert "ai-fabric-lab/ai-models" in validation["required_controller_scopes"]
     assert "ai-fabric-lab/ai-router" in validation["required_controller_scopes"]

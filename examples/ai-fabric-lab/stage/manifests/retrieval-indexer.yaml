@@ -1,5 +1,5 @@
-apiVersion: batch/v1
-kind: Job
+apiVersion: ae.dev/v1alpha1
+kind: Deployment
 metadata:
   name: retrieval-indexer
   namespace: ai-fabric-lab
@@ -7,42 +7,36 @@ metadata:
     app: retrieval-indexer
     workerbee.k1s.dev/project: ai-fabric-lab
 spec:
-  template:
-    metadata:
-      labels:
-        app: retrieval-indexer
-    spec:
-      restartPolicy: OnFailure
-      containers:
-        - name: retrieval-indexer
-          image: workerbee-ai-fabric-retrieval-indexer:dev
-          imagePullPolicy: Never
-          env:
-            - name: QDRANT_URL
-              value: http://qdrant.ai-fabric-lab.svc.cluster.local:6333
-            - name: CORPUS_ROOT
-              value: /corpus
-            - name: ARTIFACTS_ROOT
-              value: /artifacts
-          resources:
-            requests:
-              cpu: 0.25
-              memory: 256Mi
-            limits:
-              cpu: 2
-              memory: 4Gi
-          volumeMounts:
-            - name: corpus
-              mountPath: /corpus
-              readOnly: true
-            - name: artifacts
-              mountPath: /artifacts
-      volumes:
-        - name: corpus
-          hostPath:
-            path: /srv/storage/k1s/ai-fabric-lab/corpus
-            type: DirectoryOrCreate
-        - name: artifacts
-          hostPath:
-            path: /srv/storage/k1s/ai-fabric-lab/artifacts/indexes
-            type: DirectoryOrCreate
+  image: workerbee-ai-fabric-retrieval-indexer:dev
+  imagePullPolicy: Never
+  replicas: 1
+  env:
+    - name: AI_INDEXER_SERVE
+      value: "1"
+    - name: QDRANT_URL
+      value: http://qdrant.ai-fabric-lab.svc.cluster.local:6333
+    - name: CORPUS_ROOT
+      value: /corpus
+    - name: ARTIFACTS_ROOT
+      value: /artifacts
+  ports:
+    - name: http
+      containerPort: 8082
+  health:
+    readiness:
+      httpGet: { path: /healthz, port: 8082 }
+      initialDelaySeconds: 1
+      periodSeconds: 5
+  resources:
+    requests:
+      cpu: 0.25
+      memory: 256Mi
+    limits:
+      cpu: 2
+      memory: 4Gi
+  volumes:
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/corpus
+      mountPath: /corpus
+      readOnly: true
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/artifacts/indexes
+      mountPath: /artifacts

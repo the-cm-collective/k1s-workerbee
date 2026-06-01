@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+apiVersion: ae.dev/v1alpha1
 kind: Deployment
 metadata:
   name: das-bridge
@@ -7,60 +7,34 @@ metadata:
     app: das-bridge
     workerbee.k1s.dev/project: ai-fabric-lab
 spec:
+  image: workerbee-ai-fabric-das-bridge:dev
+  imagePullPolicy: Never
   replicas: 1
-  selector:
-    matchLabels:
-      app: das-bridge
-  template:
-    metadata:
-      labels:
-        app: das-bridge
-    spec:
-      containers:
-        - name: das-bridge
-          image: workerbee-ai-fabric-das-bridge:dev
-          imagePullPolicy: Never
-          env:
-            - name: MONGO_URL
-              value: mongodb://mongo.ai-fabric-lab.svc.cluster.local:27017/ai_fabric
-            - name: REDIS_URL
-              value: redis://redis.ai-fabric-lab.svc.cluster.local:6379/0
-            - name: DAS_DATA_DIR
-              value: /data/das
-          ports:
-            - name: http
-              containerPort: 8081
-          readinessProbe:
-            httpGet:
-              path: /healthz
-              port: 8081
-            initialDelaySeconds: 2
-            periodSeconds: 5
-          resources:
-            requests:
-              cpu: 0.1
-              memory: 128Mi
-            limits:
-              cpu: 2
-              memory: 4Gi
-          volumeMounts:
-            - name: das-data
-              mountPath: /data/das
-      volumes:
-        - name: das-data
-          hostPath:
-            path: /srv/storage/k1s/ai-fabric-lab/das
-            type: DirectoryOrCreate
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: das-bridge
-  namespace: ai-fabric-lab
-spec:
-  selector:
-    app: das-bridge
+  env:
+    - name: MONGO_URL
+      value: mongodb://mongo.ai-fabric-lab.svc.cluster.local:27017/ai_fabric
+    - name: REDIS_URL
+      value: redis://redis.ai-fabric-lab.svc.cluster.local:6379/0
+    - name: DAS_DATA_DIR
+      value: /data/das
   ports:
     - name: http
-      port: 8081
-      targetPort: 8081
+      containerPort: 8081
+  service:
+    port: 8081
+    targetPort: 8081
+  health:
+    readiness:
+      httpGet: { path: /healthz, port: 8081 }
+      initialDelaySeconds: 2
+      periodSeconds: 5
+  resources:
+    requests:
+      cpu: 0.1
+      memory: 128Mi
+    limits:
+      cpu: 2
+      memory: 4Gi
+  volumes:
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/das
+      mountPath: /data/das

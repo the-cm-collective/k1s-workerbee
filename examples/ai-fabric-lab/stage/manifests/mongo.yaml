@@ -1,5 +1,5 @@
-apiVersion: apps/v1
-kind: StatefulSet
+apiVersion: ae.dev/v1alpha1
+kind: Deployment
 metadata:
   name: mongo
   namespace: ai-fabric-lab
@@ -7,47 +7,21 @@ metadata:
     app: mongo
     workerbee.k1s.dev/project: ai-fabric-lab
 spec:
-  serviceName: mongo
+  image: mongo:7.0
   replicas: 1
-  selector:
-    matchLabels:
-      app: mongo
-  template:
-    metadata:
-      labels:
-        app: mongo
-    spec:
-      containers:
-        - name: mongo
-          image: mongo:7.0
-          ports:
-            - name: mongo
-              containerPort: 27017
-          resources:
-            requests:
-              cpu: 0.5
-              memory: 2Gi
-            limits:
-              cpu: 4
-              memory: 32Gi
-          volumeMounts:
-            - name: mongo-data
-              mountPath: /data/db
-      volumes:
-        - name: mongo-data
-          hostPath:
-            path: /srv/storage/k1s/ai-fabric-lab/mongo
-            type: DirectoryOrCreate
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: mongo
-  namespace: ai-fabric-lab
-spec:
-  selector:
-    app: mongo
   ports:
     - name: mongo
-      port: 27017
-      targetPort: 27017
+      containerPort: 27017
+  service:
+    port: 27017
+    targetPort: 27017
+  resources:
+    requests:
+      cpu: 0.5
+      memory: 2Gi
+    limits:
+      cpu: 4
+      memory: 32Gi
+  volumes:
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/mongo
+      mountPath: /data/db

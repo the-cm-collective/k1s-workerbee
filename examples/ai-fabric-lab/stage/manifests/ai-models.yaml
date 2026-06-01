@@ -1,4 +1,4 @@
-apiVersion: apps/v1
+apiVersion: ae.dev/v1alpha1
 kind: Deployment
 metadata:
   name: ai-models
@@ -7,85 +7,50 @@ metadata:
     app: ai-models
     workerbee.k1s.dev/project: ai-fabric-lab
 spec:
+  image: workerbee-ai-fabric-models:dev
+  imagePullPolicy: Never
   replicas: 1
-  selector:
-    matchLabels:
-      app: ai-models
-  template:
-    metadata:
-      labels:
-        app: ai-models
-    spec:
-      runtimeClassName: nvidia
-      containers:
-        - name: ai-models
-          image: workerbee-ai-fabric-models:dev
-          imagePullPolicy: Never
-          env:
-            - name: AI_FABRIC_TRACK
-              value: baseline
-            - name: AI_FABRIC_CONFIG
-              value: /etc/ai-fabric/model-tracks.json
-            - name: HF_HOME
-              value: /models/hf-cache
-            - name: TRANSFORMERS_CACHE
-              value: /models/hf-cache
-            - name: VLLM_WORKER_MULTIPROC_METHOD
-              value: spawn
-          ports:
-            - name: coordinator
-              containerPort: 8001
-            - name: expert
-              containerPort: 8002
-          resources:
-            requests:
-              cpu: 6
-              memory: 32Gi
-              nvidia.com/gpu: "1"
-            limits:
-              cpu: 16
-              memory: 96Gi
-              nvidia.com/gpu: "1"
-          volumeMounts:
-            - name: lab-config
-              mountPath: /etc/ai-fabric
-              readOnly: true
-            - name: models
-              mountPath: /models
-            - name: adapters
-              mountPath: /adapters
-            - name: runs
-              mountPath: /runs
-      volumes:
-        - name: lab-config
-          hostPath:
-            path: /srv/storage/k1s/ai-fabric-lab/config
-            type: DirectoryOrCreate
-        - name: models
-          hostPath:
-            path: /srv/storage/k1s/ai-fabric-lab/models
-            type: DirectoryOrCreate
-        - name: adapters
-          hostPath:
-            path: /srv/storage/k1s/ai-fabric-lab/adapters
-            type: DirectoryOrCreate
-        - name: runs
-          hostPath:
-            path: /srv/storage/k1s/ai-fabric-lab/runs
-            type: DirectoryOrCreate
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: ai-models
-  namespace: ai-fabric-lab
-spec:
-  selector:
-    app: ai-models
+  runtimeClassName: nvidia
+  env:
+    - name: AI_FABRIC_TRACK
+      value: smoke
+    - name: AI_FABRIC_CONFIG
+      value: /etc/ai-fabric/model-tracks.json
+    - name: HF_HOME
+      value: /models/hf-cache
+    - name: TRANSFORMERS_CACHE
+      value: /models/hf-cache
+    - name: VLLM_WORKER_MULTIPROC_METHOD
+      value: spawn
   ports:
     - name: coordinator
-      port: 8001
-      targetPort: 8001
+      containerPort: 8001
     - name: expert
-      port: 8002
-      targetPort: 8002
+      containerPort: 8002
+  service:
+    ports:
+      - name: coordinator
+        port: 8001
+        targetPort: 8001
+      - name: expert
+        port: 8002
+        targetPort: 8002
+  resources:
+    requests:
+      cpu: 6
+      memory: 32Gi
+      nvidia.com/gpu: "1"
+    limits:
+      cpu: 16
+      memory: 96Gi
+      nvidia.com/gpu: "1"
+  volumes:
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/config
+      mountPath: /etc/ai-fabric
+      readOnly: true
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/models
+      mountPath: /models
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/adapters
+      mountPath: /adapters
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/runs
+      mountPath: /runs

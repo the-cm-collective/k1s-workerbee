@@ -1,5 +1,5 @@
-apiVersion: apps/v1
-kind: StatefulSet
+apiVersion: ae.dev/v1alpha1
+kind: Deployment
 metadata:
   name: redis
   namespace: ai-fabric-lab
@@ -7,47 +7,21 @@ metadata:
     app: redis
     workerbee.k1s.dev/project: ai-fabric-lab
 spec:
-  serviceName: redis
+  image: redis:7.4-alpine
   replicas: 1
-  selector:
-    matchLabels:
-      app: redis
-  template:
-    metadata:
-      labels:
-        app: redis
-    spec:
-      containers:
-        - name: redis
-          image: redis:7.4-alpine
-          ports:
-            - name: redis
-              containerPort: 6379
-          resources:
-            requests:
-              cpu: 0.25
-              memory: 512Mi
-            limits:
-              cpu: 2
-              memory: 16Gi
-          volumeMounts:
-            - name: redis-data
-              mountPath: /data
-      volumes:
-        - name: redis-data
-          hostPath:
-            path: /srv/storage/k1s/ai-fabric-lab/redis
-            type: DirectoryOrCreate
----
-apiVersion: v1
-kind: Service
-metadata:
-  name: redis
-  namespace: ai-fabric-lab
-spec:
-  selector:
-    app: redis
   ports:
     - name: redis
-      port: 6379
-      targetPort: 6379
+      containerPort: 6379
+  service:
+    port: 6379
+    targetPort: 6379
+  resources:
+    requests:
+      cpu: 0.25
+      memory: 512Mi
+    limits:
+      cpu: 2
+      memory: 16Gi
+  volumes:
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/redis
+      mountPath: /data
