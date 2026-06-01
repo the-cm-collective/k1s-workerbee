@@ -93,7 +93,18 @@ def main(argv: list[str] | None = None) -> int:
     runtime_facts.add_argument("--project", default="")
     runtime_facts.add_argument("--track", default="")
     runtime_facts.add_argument("--k1s-root", type=Path, default=REPO_ROOT.parent / "k1s")
+    runtime_facts.add_argument(
+        "--phase-report",
+        type=Path,
+        default=None,
+        help="Optional k1s fabric phase assurance JSON report to import with runtime facts.",
+    )
     runtime_facts.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+
+    phase_facts = sub.add_parser("import-phase-facts", help="Import k1s F-phase facts into DAS")
+    phase_facts.add_argument("--phase-report", type=Path, required=True)
+    phase_facts.add_argument("--das-url", default="http://127.0.0.1:8081")
+    phase_facts.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
 
     args = parser.parse_args(argv)
     root = args.root.expanduser().resolve()
@@ -124,6 +135,13 @@ def main(argv: list[str] | None = None) -> int:
             project=args.project,
             track=args.track or None,
             k1s_root=args.k1s_root,
+            phase_report=args.phase_report,
+        )
+        return _emit(result, json_out=args.json)
+    if args.cmd == "import-phase-facts":
+        result = import_phase_facts(
+            phase_report=args.phase_report,
+            das_url=args.das_url,
         )
         return _emit(result, json_out=args.json)
     return 2
@@ -273,6 +291,7 @@ def import_runtime_facts(
     project: str,
     track: str | None,
     k1s_root: Path,
+    phase_report: Path | None = None,
 ) -> dict[str, Any]:
     model_tracks = _load_json(root / "model-tracks.json")
     stage_dir = (stage or root / "stage").expanduser().resolve()
@@ -296,18 +315,35 @@ def import_runtime_facts(
         config=config,
         k1s_root=k1s_root,
     )
-    posted = []
-    findings = []
-    for fact in facts:
+    findings: list[dict[str, str]] = []
+    if phase_report is not None:
         try:
-            posted.append(_post_das_fact(das_url, fact))
-        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
-            findings.append(_finding("error", "DAS_IMPORT_FAILED", str(exc)))
-            break
+            facts.extend(_phase_report_facts(_load_json(phase_report)))
+        except ValueError as exc:
+            findings.append(_finding("error", "PHASE_REPORT_INVALID", str(exc)))
+    posted = [] if findings else _post_facts(das_url, facts, findings)
     return {
         "ok": not [item for item in findings if item["level"] == "error"],
         "das_url": das_url,
         "track": selected_track,
+        "facts": facts,
+        "posted": posted,
+        "findings": findings,
+    }
+
+
+def import_phase_facts(*, phase_report: Path, das_url: str) -> dict[str, Any]:
+    findings: list[dict[str, str]] = []
+    try:
+        facts = _phase_report_facts(_load_json(phase_report))
+    except ValueError as exc:
+        findings.append(_finding("error", "PHASE_REPORT_INVALID", str(exc)))
+        facts = []
+    posted = [] if findings else _post_facts(das_url, facts, findings)
+    return {
+        "ok": not [item for item in findings if item["level"] == "error"],
+        "das_url": das_url,
+        "phase_report": str(phase_report.expanduser().resolve()),
         "facts": facts,
         "posted": posted,
         "findings": findings,
@@ -356,13 +392,111 @@ def _runtime_facts(
     return facts
 
 
-def _runtime_fact(subject: str, predicate: str, obj: Any) -> dict[str, Any]:
+def _phase_report_facts(report: dict[str, Any]) -> list[dict[str, Any]]:
+    source = "k1s.fabric.phase-assurance/v1"
+    if report.get("api_version") != source:
+        raise ValueError("unexpected phase report api_version")
+    phases = report.get("phases")
+    if not isinstance(phases, dict):
+        raise ValueError("phase report must include phases object")
+    phase_order = report.get("phase_order")
+    if not isinstance(phase_order, list):
+        phase_order = sorted(phases)
+
+    facts = [
+        _runtime_fact("k1s.fabric.phase_report", "api_version", source, source=source),
+        _runtime_fact(
+            "k1s.fabric.phase_report",
+            "kind",
+            str(report.get("kind") or ""),
+            source=source,
+        ),
+    ]
+    ready_phases = report.get("ready_phases")
+    if isinstance(ready_phases, list):
+        for phase_id in ready_phases:
+            if isinstance(phase_id, str):
+                facts.append(
+                    _runtime_fact(
+                        "k1s.fabric.phase_report",
+                        "ready_phase",
+                        phase_id,
+                        source=source,
+                    )
+                )
+
+    for phase_id in phase_order:
+        if not isinstance(phase_id, str):
+            continue
+        phase = phases.get(phase_id)
+        if not isinstance(phase, dict):
+            continue
+        subject = f"k1s.fabric.phase.{phase_id}"
+        facts.append(_runtime_fact(subject, "status", phase.get("status"), source=source))
+        gate = phase.get("gate") if isinstance(phase.get("gate"), dict) else {}
+        facts.append(
+            _runtime_fact(subject, "gate_ready", bool(gate.get("ready")), source=source)
+        )
+        blocked_by = gate.get("blocked_by") if isinstance(gate, dict) else []
+        if isinstance(blocked_by, list):
+            for blocker in blocked_by:
+                if isinstance(blocker, str):
+                    facts.append(_runtime_fact(subject, "blocked_by", blocker, source=source))
+        facts.extend(
+            _phase_evidence_facts(
+                phase_id,
+                phase.get("present"),
+                present=True,
+                source=source,
+            )
+        )
+        facts.extend(
+            _phase_evidence_facts(
+                phase_id,
+                phase.get("missing"),
+                present=False,
+                source=source,
+            )
+        )
+    return facts
+
+
+def _phase_evidence_facts(
+    phase_id: str,
+    values: Any,
+    *,
+    present: bool,
+    source: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        return []
+    facts = []
+    for value in values:
+        if isinstance(value, str):
+            facts.append(
+                _runtime_fact(
+                    f"k1s.fabric.phase.{phase_id}.evidence.{value}",
+                    "present",
+                    present,
+                    source=source,
+                )
+            )
+    return facts
+
+
+def _runtime_fact(
+    subject: str,
+    predicate: str,
+    obj: Any,
+    *,
+    source: str = "ai_fabric_lab.py",
+) -> dict[str, Any]:
     return {
         "namespace": "runtime",
         "subject": subject,
         "predicate": predicate,
         "object": obj,
-        "source": "ai_fabric_lab.py",
+        "source": source,
     }
 
 
@@ -405,6 +539,21 @@ def _post_das_fact(das_url: str, fact: dict[str, Any]) -> dict[str, Any]:
     with urlopen(request, timeout=10) as response:  # noqa: S310
         payload = json.loads(response.read().decode("utf-8"))
     return payload if isinstance(payload, dict) else {}
+
+
+def _post_facts(
+    das_url: str,
+    facts: list[dict[str, Any]],
+    findings: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    posted = []
+    for fact in facts:
+        try:
+            posted.append(_post_das_fact(das_url, fact))
+        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+            findings.append(_finding("error", "DAS_IMPORT_FAILED", str(exc)))
+            break
+    return posted
 
 
 def _load_json(path: Path) -> dict[str, Any]:

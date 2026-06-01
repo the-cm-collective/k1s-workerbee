@@ -120,6 +120,104 @@ def test_ai_fabric_lab_sync_corpus_can_target_temp_root(tmp_path: Path) -> None:
     assert (tmp_path / "lab" / "corpus" / "workerbee").is_dir()
 
 
+def test_ai_fabric_phase_report_facts_reflect_k1s_gate() -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_phase_report_test")
+    report = {
+        "api_version": "k1s.fabric.phase-assurance/v1",
+        "kind": "FabricPhaseAssuranceReport",
+        "phase_order": ["F0", "F1", "F2", "F3"],
+        "ready_phases": ["F0"],
+        "phases": {
+            "F0": {
+                "status": "present",
+                "present": ["inference_cell_ready"],
+                "missing": [],
+                "gate": {"ready": True, "blocked_by": []},
+            },
+            "F1": {
+                "status": "missing",
+                "present": ["typed_accelerators"],
+                "missing": ["typed_link_topology"],
+                "gate": {"ready": False, "blocked_by": []},
+            },
+            "F2": {
+                "status": "missing",
+                "present": [],
+                "missing": ["content_addressed_chunks"],
+                "gate": {"ready": False, "blocked_by": ["F1"]},
+            },
+            "F3": {
+                "status": "present",
+                "present": ["advisory_contract"],
+                "missing": [],
+                "gate": {"ready": False, "blocked_by": ["F1", "F2"]},
+            },
+        },
+    }
+
+    facts = lab._phase_report_facts(report)
+
+    assert {
+        "namespace": "runtime",
+        "subject": "k1s.fabric.phase.F3",
+        "predicate": "blocked_by",
+        "object": "F2",
+        "source": "k1s.fabric.phase-assurance/v1",
+    } in facts
+    assert {
+        "namespace": "runtime",
+        "subject": "k1s.fabric.phase.F1.evidence.typed_link_topology",
+        "predicate": "present",
+        "object": False,
+        "source": "k1s.fabric.phase-assurance/v1",
+    } in facts
+    assert {
+        "namespace": "runtime",
+        "subject": "k1s.fabric.phase_report",
+        "predicate": "ready_phase",
+        "object": "F0",
+        "source": "k1s.fabric.phase-assurance/v1",
+    } in facts
+
+
+def test_ai_fabric_import_phase_facts_posts_report_facts(tmp_path: Path, monkeypatch) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_phase_import_test")
+    phase_report = tmp_path / "phase-report.json"
+    phase_report.write_text(
+        json.dumps(
+            {
+                "api_version": "k1s.fabric.phase-assurance/v1",
+                "kind": "FabricPhaseAssuranceReport",
+                "phase_order": ["F0"],
+                "ready_phases": ["F0"],
+                "phases": {
+                    "F0": {
+                        "status": "present",
+                        "present": ["inference_cell_ready"],
+                        "missing": [],
+                        "gate": {"ready": True, "blocked_by": []},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    posted: list[dict[str, object]] = []
+
+    def fake_post(_das_url: str, fact: dict[str, object]) -> dict[str, object]:
+        posted.append(fact)
+        return {"ok": True}
+
+    monkeypatch.setattr(lab, "_post_das_fact", fake_post)
+
+    result = lab.import_phase_facts(phase_report=phase_report, das_url="http://das.local")
+
+    assert result["ok"] is True
+    assert result["posted"] == [{"ok": True} for _ in posted]
+    assert posted
+    assert posted[0]["source"] == "k1s.fabric.phase-assurance/v1"
+
+
 def test_ai_fabric_retrieval_indexer_serves_local_results(tmp_path: Path, monkeypatch) -> None:
     indexer = _load_module(
         EXAMPLE_ROOT / "images" / "retrieval-indexer" / "indexer.py",

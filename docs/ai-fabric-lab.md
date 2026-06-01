@@ -145,6 +145,24 @@ python3 scripts/dev/ai_fabric_lab.py import-runtime-facts \
   --project k1s-workerbee-dev-2592c13f5e
 ```
 
+When the advisory run references k1s roadmap state, generate the authoritative
+phase report from the sibling `../k1s` checkout and import it as DAS facts:
+
+```bash
+cd ../k1s
+python3 scripts/dev/fabric_phase_assurance.py \
+  --evidence /srv/storage/k1s/ai-fabric-lab/runs/fabric-evidence.json \
+  --json > /srv/storage/k1s/ai-fabric-lab/runs/fabric-phase-report.json
+
+cd ../k1s-workerbee
+python3 scripts/dev/ai_fabric_lab.py import-phase-facts \
+  --phase-report /srv/storage/k1s/ai-fabric-lab/runs/fabric-phase-report.json \
+  --das-url http://das-bridge.ai-fabric-lab.svc.cluster.local:8081
+```
+
+`import-runtime-facts` also accepts `--phase-report` when a run should seed
+model, repo, project, and k1s phase facts in one pass.
+
 The router queries `/v1/query` on the DAS bridge for advisory requests and
 passes symbolic facts to the selected model alongside retrieval evidence.
 
@@ -173,6 +191,7 @@ Each run should record:
 
 - storage and GPU preflight output
 - serving image digest and model revisions
+- imported `k1s.fabric.phase-assurance/v1` report and DAS facts
 - per-lane health, latency, and VRAM samples
 - retrieval traces and DAS fact snapshots
 - advisory request/response transcripts
