@@ -1,0 +1,6 @@
+ARG VLLM_IMAGE=vllm/vllm-openai:v0.22.0-x86_64-cu129-ubuntu2404
+FROM ${VLLM_IMAGE}
+
+COPY run_two_vllm.py /opt/ai-fabric/run_two_vllm.py
+
+ENTRYPOINT ["python3", "/opt/ai-fabric/run_two_vllm.py"]

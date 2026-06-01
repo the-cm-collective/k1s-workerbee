@@ -1,0 +1,78 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-router
+  namespace: ai-fabric-lab
+  labels:
+    app: ai-router
+    workerbee.k1s.dev/project: ai-fabric-lab
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-router
+  template:
+    metadata:
+      labels:
+        app: ai-router
+    spec:
+      containers:
+        - name: ai-router
+          image: workerbee-ai-fabric-router:dev
+          imagePullPolicy: Never
+          env:
+            - name: COORDINATOR_URL
+              value: http://ai-models.ai-fabric-lab.svc.cluster.local:8001/v1/chat/completions
+            - name: EXPERT_URL
+              value: http://ai-models.ai-fabric-lab.svc.cluster.local:8002/v1/chat/completions
+            - name: DAS_URL
+              value: http://das-bridge.ai-fabric-lab.svc.cluster.local:8081
+            - name: QDRANT_URL
+              value: http://qdrant.ai-fabric-lab.svc.cluster.local:6333
+          ports:
+            - name: http
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: 8080
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-router
+  namespace: ai-fabric-lab
+spec:
+  selector:
+    app: ai-router
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-router
+  namespace: ai-fabric-lab
+spec:
+  rules:
+    - host: ai-router.ai-fabric-lab.workerbee.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: ai-router
+                port:
+                  number: 8080

@@ -1,0 +1,28 @@
+{
+  "api_version": "ai-fabric.storage-layout/v1",
+  "root": "/srv/storage/k1s/ai-fabric-lab",
+  "directories": [
+    "config",
+    "models/hf-cache",
+    "models/coordinator",
+    "models/expert",
+    "adapters/expert",
+    "corpus/k1s",
+    "corpus/workerbee",
+    "corpus/python",
+    "corpus/hyperon",
+    "qdrant",
+    "mongo",
+    "redis",
+    "das",
+    "runs",
+    "artifacts/indexes",
+    "artifacts/prompts"
+  ],
+  "minimum_free_gib": 500,
+  "notes": [
+    "Keep broad web ingestion out of this first milestone.",
+    "Copy pinned model-tracks.json into config/ before deployment.",
+    "Use runs/<run-id>/ for GPU samples, prompt transcripts, DAS snapshots, and fabric evidence."
+  ]
+}

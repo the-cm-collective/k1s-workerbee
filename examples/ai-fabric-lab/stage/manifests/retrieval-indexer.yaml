@@ -1,0 +1,48 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: retrieval-indexer
+  namespace: ai-fabric-lab
+  labels:
+    app: retrieval-indexer
+    workerbee.k1s.dev/project: ai-fabric-lab
+spec:
+  template:
+    metadata:
+      labels:
+        app: retrieval-indexer
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: retrieval-indexer
+          image: workerbee-ai-fabric-retrieval-indexer:dev
+          imagePullPolicy: Never
+          env:
+            - name: QDRANT_URL
+              value: http://qdrant.ai-fabric-lab.svc.cluster.local:6333
+            - name: CORPUS_ROOT
+              value: /corpus
+            - name: ARTIFACTS_ROOT
+              value: /artifacts
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: "2"
+              memory: 4Gi
+          volumeMounts:
+            - name: corpus
+              mountPath: /corpus
+              readOnly: true
+            - name: artifacts
+              mountPath: /artifacts
+      volumes:
+        - name: corpus
+          hostPath:
+            path: /srv/storage/k1s/ai-fabric-lab/corpus
+            type: DirectoryOrCreate
+        - name: artifacts
+          hostPath:
+            path: /srv/storage/k1s/ai-fabric-lab/artifacts/indexes
+            type: DirectoryOrCreate
