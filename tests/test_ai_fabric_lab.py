@@ -23,7 +23,7 @@ def test_ai_fabric_lab_static_bundle_validates() -> None:
 
     assert payload["ok"] is True
     assert payload["default_track"] == "baseline"
-    assert payload["tracks"] == ["baseline", "quality", "smoke"]
+    assert payload["tracks"] == ["baseline", "legacy-smollm-smoke", "quality", "smoke"]
     assert payload["stage"]["ok"] is True
 
 
@@ -32,6 +32,7 @@ def test_ai_fabric_lab_has_quality_track_with_qwen_coordinator() -> None:
     smoke = model_tracks["tracks"]["smoke"]
     baseline = model_tracks["tracks"]["baseline"]
     quality = model_tracks["tracks"]["quality"]
+    legacy = model_tracks["tracks"]["legacy-smollm-smoke"]
 
     assert model_tracks["run_defaults"]["attention_backend"] == "TRITON_ATTN"
     assert smoke["coordinator"]["model"] == "Qwen/Qwen2.5-7B-Instruct-AWQ"
@@ -40,6 +41,7 @@ def test_ai_fabric_lab_has_quality_track_with_qwen_coordinator() -> None:
     assert baseline["expert"]["model"] == "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ"
     assert quality["coordinator"]["model"] == "Qwen/Qwen2.5-7B-Instruct-AWQ"
     assert quality["expert"]["model"] == "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ"
+    assert legacy["coordinator"]["model"] == "HuggingFaceTB/SmolLM3-3B"
     for track in model_tracks["tracks"].values():
         for lane in ("coordinator", "expert"):
             assert len(track[lane]["revision"]) == 40

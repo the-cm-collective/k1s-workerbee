@@ -76,9 +76,34 @@
         "quantization": "awq",
         "enable_lora": false
       }
+    },
+    "legacy-smollm-smoke": {
+      "description": "Legacy plumbing profile retained only for fast non-baseline runtime checks.",
+      "coordinator": {
+        "alias": "coordinator-smollm3-3b",
+        "model": "HuggingFaceTB/SmolLM3-3B",
+        "revision": "a07cc9a04f16550a088caea529712d1d335b0ac1",
+        "port": 8001,
+        "served_model_name": "general-coordinator",
+        "max_model_len": 8192,
+        "gpu_memory_utilization": 0.3,
+        "quantization": null,
+        "enable_lora": false
+      },
+      "expert": {
+        "alias": "expert-qwen25-coder-7b-awq",
+        "model": "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ",
+        "revision": "8e8ed243bbe6f9a5aff549a0924562fc719b2b8a",
+        "port": 8002,
+        "served_model_name": "python-k1s-hyperon-expert",
+        "max_model_len": 8192,
+        "gpu_memory_utilization": 0.28,
+        "quantization": "awq",
+        "enable_lora": false
+      }
     }
   },
-  "expected_tracks": ["smoke", "baseline", "quality"],
+  "expected_tracks": ["smoke", "baseline", "quality", "legacy-smollm-smoke"],
   "run_defaults": {
     "download_dir": "/models/hf-cache",
     "startup_stagger_seconds": 20,

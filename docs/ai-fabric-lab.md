@@ -26,6 +26,7 @@ All models are pinned to Hugging Face revision SHAs as of the lab definition.
 | `smoke` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-7B-Instruct-AWQ` | All-Qwen fallback path with lower expert VRAM pressure. |
 | `baseline` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | Primary all-Qwen development baseline. |
 | `quality` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | Compare coordinator quality versus the baseline. |
+| `legacy-smollm-smoke` | `HuggingFaceTB/SmolLM3-3B` | `Qwen/Qwen2.5-Coder-7B-Instruct-AWQ` | Legacy plumbing-only track, not a baseline. |
 
 The default runtime track is `baseline`. Start with `smoke` before downloading
 the larger expert model, then run `baseline`, then run `quality` against the
@@ -73,7 +74,8 @@ server per container:
 - expert: `http://ai-expert:8002/v1/chat/completions`
 
 Set `AI_FABRIC_TRACK=smoke`, `baseline`, or `quality` on both model
-deployments before each run.
+deployments before each serious run. Use `legacy-smollm-smoke` only for
+plumbing checks that do not measure the intended two-Qwen architecture.
 
 The WorkerBee smoke manifests also set
 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`. On the RTX 8000 development host,
