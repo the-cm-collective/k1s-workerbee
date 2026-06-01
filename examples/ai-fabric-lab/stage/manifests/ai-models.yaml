@@ -39,11 +39,11 @@ spec:
               containerPort: 8002
           resources:
             requests:
-              cpu: "6"
+              cpu: 6
               memory: 32Gi
               nvidia.com/gpu: "1"
             limits:
-              cpu: "16"
+              cpu: 16
               memory: 96Gi
               nvidia.com/gpu: "1"
           volumeMounts:

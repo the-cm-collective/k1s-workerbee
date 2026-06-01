@@ -26,10 +26,10 @@ spec:
               value: /artifacts
           resources:
             requests:
-              cpu: 250m
+              cpu: 0.25
               memory: 256Mi
             limits:
-              cpu: "2"
+              cpu: 2
               memory: 4Gi
           volumeMounts:
             - name: corpus
