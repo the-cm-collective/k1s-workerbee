@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import json
 import os
+import uuid
+from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 from urllib.error import URLError
 from urllib.parse import urlparse
@@ -28,6 +31,7 @@ PROXY_TIMEOUT = float(os.getenv("AI_ROUTER_PROXY_TIMEOUT", "120"))
 ADVISORY_MODEL_TIMEOUT = float(os.getenv("AI_ROUTER_ADVISORY_MODEL_TIMEOUT", "45"))
 RETRIEVAL_TIMEOUT = float(os.getenv("AI_ROUTER_RETRIEVAL_TIMEOUT", "8"))
 SYMBOLIC_TIMEOUT = float(os.getenv("AI_ROUTER_SYMBOLIC_TIMEOUT", "8"))
+TRACE_DIR = Path(os.getenv("AI_ROUTER_TRACE_DIR", "/data/traces"))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -128,23 +132,29 @@ def _advisory_response(payload: dict[str, Any]) -> dict[str, Any]:
     symbolic = _query_symbolic_evidence(query, limit=5)
     model = _call_advisory_model(lane, payload, retrieval, symbolic)
     answer = model.get("content") if model.get("ok") else None
+    trace = _advisory_trace(
+        payload=payload,
+        lane=lane,
+        query=query,
+        retrieval=retrieval,
+        symbolic=symbolic,
+        model=model,
+        answer=answer,
+    )
+    trace_path = _persist_advisory_trace(trace)
     return {
         "ok": True,
         "lane": lane,
         "authoritative": False,
+        "trace_id": trace["trace_id"],
+        "trace_path": str(trace_path) if trace_path else None,
         "answer": answer,
         "model": model,
         "evidence": {
             "retrieval": retrieval,
             "symbolic": symbolic,
         },
-        "decision_trace": {
-            "controller_authority": "k1s",
-            "retrieval_url": RETRIEVAL_URL,
-            "qdrant_url": QDRANT_URL,
-            "symbolic_memory_url": DAS_URL,
-            "selected_lane": lane,
-        },
+        "decision_trace": trace,
         "next_actions": [
             "treat this as advisory only; k1s remains authoritative",
             "verify retrieved evidence against live controller state before acting",
@@ -152,6 +162,110 @@ def _advisory_response(payload: dict[str, Any]) -> dict[str, Any]:
         ],
         "request": payload,
     }
+
+
+def _advisory_trace(
+    *,
+    payload: dict[str, Any],
+    lane: str,
+    query: str,
+    retrieval: dict[str, Any],
+    symbolic: dict[str, Any],
+    model: dict[str, Any],
+    answer: Any,
+) -> dict[str, Any]:
+    trace_id = str(payload.get("trace_id") or f"trace-{uuid.uuid4().hex}")
+    request_id = str(payload.get("request_id") or trace_id)
+    retrieval_results = (
+        retrieval.get("results") if isinstance(retrieval.get("results"), list) else []
+    )
+    symbolic_results = (
+        symbolic.get("results") if isinstance(symbolic.get("results"), list) else []
+    )
+    now = datetime.now(UTC).isoformat()
+    return {
+        "trace_id": trace_id,
+        "request_id": request_id,
+        "api_version": "workerbee.ai-fabric.advisory-trace/v1",
+        "created_at": now,
+        "authoritative": False,
+        "controller_authority": "k1s",
+        "selected_lane": lane,
+        "query": query,
+        "request": payload,
+        "request_contract": {
+            "subject_type": str(payload.get("subject_type") or "advisory_query"),
+            "subject_id": str(payload.get("subject_id") or query[:120]),
+            "intent": str(payload.get("intent") or "advise"),
+            "facts_ref": str(payload.get("facts_ref") or DAS_URL),
+            "locality_snapshot_ref": str(payload.get("locality_snapshot_ref") or RETRIEVAL_URL),
+            "max_candidates": int(payload.get("max_candidates") or 5),
+            "time_budget_ms": int(
+                payload.get("time_budget_ms") or int(ADVISORY_MODEL_TIMEOUT * 1000)
+            ),
+            "policy_mode": str(payload.get("policy_mode") or "advisory_only"),
+        },
+        "response_contract": {
+            "provider": str(model.get("upstream") or lane),
+            "status": "ok" if model.get("ok") else "model_unavailable",
+            "recommendation": str(answer or model.get("error") or ""),
+            "confidence": None,
+            "evidence_refs": [
+                *[
+                    item.get("path")
+                    for item in retrieval_results
+                    if isinstance(item, dict) and item.get("path")
+                ],
+                *[
+                    item.get("id")
+                    for item in symbolic_results
+                    if isinstance(item, dict) and item.get("id")
+                ],
+            ],
+            "authoritative": False,
+        },
+        "deterministic_baseline": {
+            "selected_lane": lane,
+            "route_rule": "explicit_lane_or_keyword",
+            "retrieval_limit": 5,
+            "symbolic_limit": 5,
+        },
+        "retrieval": retrieval,
+        "symbolic": symbolic,
+        "model": model,
+        "accepted": None,
+        "divergence_reason": "pending_operator_review",
+        "replay_status": "recorded",
+        "continuity_signals": {
+            "request_id": request_id,
+            "retrieval_backend": retrieval.get("backend"),
+            "symbolic_backend": symbolic.get("backend"),
+        },
+        "coherence_signals": {
+            "retrieval_result_count": len(retrieval_results),
+            "symbolic_result_count": len(symbolic_results),
+            "model_ok": bool(model.get("ok")),
+            "authoritative": False,
+        },
+        "upstreams": {
+            "retrieval_url": RETRIEVAL_URL,
+            "qdrant_url": QDRANT_URL,
+            "symbolic_memory_url": DAS_URL,
+            "coordinator_url": COORDINATOR_URL,
+            "expert_url": EXPERT_URL,
+        },
+    }
+
+
+def _persist_advisory_trace(trace: dict[str, Any]) -> Path | None:
+    try:
+        TRACE_DIR.mkdir(parents=True, exist_ok=True)
+        trace_id = str(trace.get("trace_id") or f"trace-{uuid.uuid4().hex}")
+        path = TRACE_DIR / f"{trace_id}.json"
+        path.write_text(json.dumps(trace, indent=2, sort_keys=True), encoding="utf-8")
+        return path
+    except OSError:
+        return None
 
 
 def _retrieve_evidence(query: str, *, limit: int) -> dict[str, Any]:

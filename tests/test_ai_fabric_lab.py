@@ -138,6 +138,10 @@ def test_ai_fabric_phase_report_facts_reflect_k1s_gate() -> None:
                 "status": "missing",
                 "present": ["typed_accelerators"],
                 "missing": ["typed_link_topology"],
+                "evidence": {
+                    "typed_accelerators": {"accelerator_count": 2},
+                    "typed_link_topology": False,
+                },
                 "gate": {"ready": False, "blocked_by": []},
             },
             "F2": {
@@ -176,6 +180,13 @@ def test_ai_fabric_phase_report_facts_reflect_k1s_gate() -> None:
         "subject": "k1s.fabric.phase_report",
         "predicate": "ready_phase",
         "object": "F0",
+        "source": "k1s.fabric.phase-assurance/v1",
+    } in facts
+    assert {
+        "namespace": "runtime",
+        "subject": "k1s.fabric.phase.F1.evidence.typed_accelerators",
+        "predicate": "detail.accelerator_count",
+        "object": 2,
         "source": "k1s.fabric.phase-assurance/v1",
     } in facts
 
@@ -248,7 +259,9 @@ def test_ai_fabric_retrieval_indexer_serves_local_results(tmp_path: Path, monkey
     assert search["results"][0]["path"] == "workerbee/notes.md"
 
 
-def test_ai_fabric_router_advisory_includes_retrieval_and_lane_override(monkeypatch) -> None:
+def test_ai_fabric_router_advisory_includes_retrieval_and_lane_override(
+    tmp_path: Path, monkeypatch
+) -> None:
     router = _load_module(
         EXAMPLE_ROOT / "images" / "router" / "app.py",
         "ai_fabric_router_test",
@@ -285,17 +298,29 @@ def test_ai_fabric_router_advisory_includes_retrieval_and_lane_override(monkeypa
         lambda query, *, limit: {"ok": True, "results": [{"subject": query, "limit": limit}]},
     )
     monkeypatch.setattr(router, "_call_advisory_model", fake_model)
+    monkeypatch.setattr(router, "TRACE_DIR", tmp_path)
 
     response = router._advisory_response(
         {"lane": "coordinator", "query": "python k1s traceback should not force expert"}
     )
+    trace_path = tmp_path / f"{response['trace_id']}.json"
+    trace = json.loads(trace_path.read_text(encoding="utf-8"))
 
     assert response["ok"] is True
     assert response["authoritative"] is False
     assert response["lane"] == "coordinator"
+    assert response["trace_path"] == str(trace_path)
     assert response["evidence"]["retrieval"]["results"][0]["path"] == "workerbee/notes.md"
     assert response["evidence"]["symbolic"]["results"][0]["limit"] == 5
     assert response["model"]["lane"] == "coordinator"
+    assert trace["authoritative"] is False
+    assert trace["controller_authority"] == "k1s"
+    assert trace["request_contract"]["max_candidates"] == 5
+    assert trace["response_contract"]["authoritative"] is False
+    assert trace["retrieval"]["results"][0]["path"] == "workerbee/notes.md"
+    assert trace["symbolic"]["results"][0]["subject"] == trace["query"]
+    assert trace["replay_status"] == "recorded"
+    assert trace["divergence_reason"] == "pending_operator_review"
 
 
 def test_ai_fabric_das_bridge_records_and_queries_facts(tmp_path: Path, monkeypatch) -> None:

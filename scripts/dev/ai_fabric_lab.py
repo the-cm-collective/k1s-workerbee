@@ -458,6 +458,35 @@ def _phase_report_facts(report: dict[str, Any]) -> list[dict[str, Any]]:
                 source=source,
             )
         )
+        facts.extend(_phase_evidence_value_facts(phase_id, phase.get("evidence"), source=source))
+    return facts
+
+
+def _phase_evidence_value_facts(
+    phase_id: str,
+    evidence: Any,
+    *,
+    source: str,
+) -> list[dict[str, Any]]:
+    if not isinstance(evidence, dict):
+        return []
+    facts: list[dict[str, Any]] = []
+    for key, value in sorted(evidence.items(), key=lambda item: str(item[0])):
+        if not isinstance(key, str):
+            continue
+        subject = f"k1s.fabric.phase.{phase_id}.evidence.{key}"
+        facts.append(_runtime_fact(subject, "value", value, source=source))
+        if isinstance(value, dict):
+            for detail_key, detail_value in sorted(value.items(), key=lambda item: str(item[0])):
+                if isinstance(detail_key, str):
+                    facts.append(
+                        _runtime_fact(
+                            subject,
+                            f"detail.{detail_key}",
+                            detail_value,
+                            source=source,
+                        )
+                    )
     return facts
 
 
