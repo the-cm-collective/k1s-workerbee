@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Start the two vLLM lanes for the AI fabric lab."""
+"""Start one or both vLLM lanes for the AI fabric lab."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 CONFIG_PATH = Path(os.getenv("AI_FABRIC_CONFIG", "/etc/ai-fabric/model-tracks.json"))
+LANES = ("coordinator", "expert")
 
 
 def main() -> int:
@@ -51,15 +52,21 @@ def main() -> int:
     signal.signal(signal.SIGTERM, stop_children)
     signal.signal(signal.SIGINT, stop_children)
 
-    for lane in ("coordinator", "expert"):
+    requested_lane = os.getenv("AI_FABRIC_LANE")
+    if requested_lane and requested_lane not in LANES:
+        print(f"unknown AI_FABRIC_LANE={requested_lane!r}", file=sys.stderr, flush=True)
+        return 2
+    lanes = (requested_lane,) if requested_lane else LANES
+
+    for lane in lanes:
         lane_config = track.get(lane)
         if not isinstance(lane_config, dict):
             print(f"track {track_name!r} is missing lane {lane!r}", file=sys.stderr, flush=True)
             return 2
-        command = _vllm_command(lane_config, download_dir=download_dir)
+        command = _vllm_command(lane_config, defaults=defaults, download_dir=download_dir)
         print(f"starting {lane}: {' '.join(command)}", flush=True)
         processes.append(subprocess.Popen(command))
-        if lane == "coordinator":
+        if lane == "coordinator" and len(lanes) > 1:
             time.sleep(stagger)
 
     while not stopping:
@@ -82,7 +89,9 @@ def _load_config(path: Path) -> dict[str, Any]:
     return payload
 
 
-def _vllm_command(lane: dict[str, Any], *, download_dir: str) -> list[str]:
+def _vllm_command(
+    lane: dict[str, Any], *, defaults: dict[str, Any], download_dir: str
+) -> list[str]:
     command = [
         "python3",
         "-m",
@@ -107,6 +116,9 @@ def _vllm_command(lane: dict[str, Any], *, download_dir: str) -> list[str]:
     quantization = lane.get("quantization")
     if quantization:
         command.extend(["--quantization", str(quantization)])
+    attention_backend = lane.get("attention_backend") or defaults.get("attention_backend")
+    if attention_backend:
+        command.extend(["--attention-backend", str(attention_backend)])
     if lane.get("enable_lora"):
         command.append("--enable-lora")
     return command

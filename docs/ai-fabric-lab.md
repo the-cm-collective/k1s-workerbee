@@ -9,11 +9,11 @@ Hyperon/DAS-adjacent symbolic state:
 - Redis, Mongo, and Qdrant for hot state, symbolic persistence, and retrieval
 - job-style modality and indexing workers instead of resident modality services
 
-The lab intentionally runs both LLM servers from one GPU-owning workload. That
-matches the current k1s reality: `InferenceCell` scheduling is whole-GPU
-oriented, while this experiment is meant to produce evidence for future
-VRAM-aware admission fields such as `gpu_vram_gib`, `kv_cache_budget_gib`,
-`adapter_hotset`, and `context_budget_tokens`.
+The lab intentionally runs two GPU-owning LLM workloads that share the local
+development GPU. This keeps each vLLM server isolated for startup and memory
+profiling while still producing evidence for future VRAM-aware admission fields
+such as `gpu_vram_gib`, `kv_cache_budget_gib`, `adapter_hotset`, and
+`context_budget_tokens`.
 
 ## Model Tracks
 
@@ -65,14 +65,29 @@ workerbee build-image examples/ai-fabric-lab/images/retrieval-indexer \
 ```
 
 The model image wraps the pinned
-`vllm/vllm-openai:v0.22.0-x86_64-cu129-ubuntu2404` image and starts two
-OpenAI-compatible vLLM servers from one container:
+`vllm/vllm-openai:v0.22.0-x86_64-cu129-ubuntu2404` image. The stage deploys the
+same image twice with `AI_FABRIC_LANE` selecting one OpenAI-compatible vLLM
+server per container:
 
-- coordinator: `http://ai-models:8001/v1/chat/completions`
-- expert: `http://ai-models:8002/v1/chat/completions`
+- coordinator: `http://ai-coordinator:8001/v1/chat/completions`
+- expert: `http://ai-expert:8002/v1/chat/completions`
 
-Set `AI_FABRIC_TRACK=smoke`, `baseline`, or `quality` on the `ai-models`
-deployment before each run.
+Set `AI_FABRIC_TRACK=smoke`, `baseline`, or `quality` on both model
+deployments before each run.
+
+The WorkerBee smoke manifests also set
+`VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`. On the RTX 8000 development host,
+vLLM 0.22's CUDA graph memory estimate can otherwise consume the small smoke
+track's KV-cache budget before either lane accepts requests.
+The smoke and baseline SmolLM3 coordinator cap is `0.30` so it retains
+KV-cache headroom while the Qwen expert is resident on the same RTX 8000.
+The model launcher passes `--attention-backend TRITON_ATTN` from
+`run_defaults.attention_backend`; FlashInfer initialized on the RTX 8000 but
+failed during prefill in the smoke test.
+
+WorkerBee service alias refresh is intentionally short, so the model manifests
+do not gate deployment readiness on vLLM cold start. Treat `/v1/models` on both
+model services as the runtime readiness signal for this lab.
 
 ## Deployment
 

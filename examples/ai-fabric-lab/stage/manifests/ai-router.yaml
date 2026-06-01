@@ -12,9 +12,9 @@ spec:
   replicas: 1
   env:
     - name: COORDINATOR_URL
-      value: http://ai-models.ai-fabric-lab.svc.cluster.local:8001/v1/chat/completions
+      value: http://ai-coordinator.ai-fabric-lab.svc.cluster.local:8001/v1/chat/completions
     - name: EXPERT_URL
-      value: http://ai-models.ai-fabric-lab.svc.cluster.local:8002/v1/chat/completions
+      value: http://ai-expert.ai-fabric-lab.svc.cluster.local:8002/v1/chat/completions
     - name: DAS_URL
       value: http://das-bridge.ai-fabric-lab.svc.cluster.local:8081
     - name: QDRANT_URL

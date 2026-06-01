@@ -11,7 +11,7 @@
         "port": 8001,
         "served_model_name": "general-coordinator",
         "max_model_len": 8192,
-        "gpu_memory_utilization": 0.18,
+        "gpu_memory_utilization": 0.3,
         "quantization": null,
         "enable_lora": false
       },
@@ -36,7 +36,7 @@
         "port": 8001,
         "served_model_name": "general-coordinator",
         "max_model_len": 8192,
-        "gpu_memory_utilization": 0.18,
+        "gpu_memory_utilization": 0.3,
         "quantization": null,
         "enable_lora": false
       },
@@ -83,6 +83,7 @@
     "download_dir": "/models/hf-cache",
     "startup_stagger_seconds": 20,
     "cuda_visible_devices": "0",
-    "vllm_worker_multiproc_method": "spawn"
+    "vllm_worker_multiproc_method": "spawn",
+    "attention_backend": "TRITON_ATTN"
   }
 }

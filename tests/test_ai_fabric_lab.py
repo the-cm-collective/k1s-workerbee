@@ -31,6 +31,7 @@ def test_ai_fabric_lab_has_quality_track_with_qwen_coordinator() -> None:
     model_tracks = json.loads((EXAMPLE_ROOT / "model-tracks.json").read_text(encoding="utf-8"))
     quality = model_tracks["tracks"]["quality"]
 
+    assert model_tracks["run_defaults"]["attention_backend"] == "TRITON_ATTN"
     assert quality["coordinator"]["model"] == "Qwen/Qwen2.5-7B-Instruct-AWQ"
     assert quality["expert"]["model"] == "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ"
     for track in model_tracks["tracks"].values():
@@ -44,7 +45,8 @@ def test_ai_fabric_lab_stage_is_workerbee_valid() -> None:
     assert validation["ok"] is True
     assert validation["input_kinds"] == ["native-k1s"]
     assert "workerbee-ai-fabric-models:dev" in validation["images"]
-    assert "ai-fabric-lab/ai-models" in validation["required_controller_scopes"]
+    assert "ai-fabric-lab/ai-coordinator" in validation["required_controller_scopes"]
+    assert "ai-fabric-lab/ai-expert" in validation["required_controller_scopes"]
     assert "ai-fabric-lab/ai-router" in validation["required_controller_scopes"]
 
 
