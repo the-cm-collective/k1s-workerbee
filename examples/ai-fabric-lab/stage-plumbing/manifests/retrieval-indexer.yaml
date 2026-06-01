@@ -12,7 +12,7 @@ spec:
   replicas: 1
   env:
     - name: AI_INDEXER_CONFIG_REV
-      value: retrieval-v1
+      value: plumbing-retrieval-v1
     - name: AI_INDEXER_SERVE
       value: "1"
     - name: QDRANT_URL

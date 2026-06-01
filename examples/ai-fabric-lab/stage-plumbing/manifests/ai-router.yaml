@@ -12,11 +12,15 @@ spec:
   replicas: 1
   env:
     - name: AI_ROUTER_CONFIG_REV
-      value: symbolic-v1
+      value: plumbing-smoke-v1
     - name: COORDINATOR_URL
-      value: http://ai-coordinator.ai-fabric-lab.svc.cluster.local:8001/v1/chat/completions
+      value: http://fake-model.ai-fabric-lab.svc.cluster.local:8090/v1/chat/completions
     - name: EXPERT_URL
-      value: http://ai-expert.ai-fabric-lab.svc.cluster.local:8002/v1/chat/completions
+      value: http://fake-model.ai-fabric-lab.svc.cluster.local:8090/v1/chat/completions
+    - name: COORDINATOR_MODEL
+      value: fake-coordinator
+    - name: EXPERT_MODEL
+      value: fake-expert
     - name: RETRIEVAL_URL
       value: http://retrieval-indexer.ai-fabric-lab.svc.cluster.local:8082
     - name: DAS_URL
@@ -26,6 +30,9 @@ spec:
   ports:
     - name: http
       containerPort: 8080
+  service:
+    port: 18080
+    targetPort: 8080
   health:
     readiness:
       httpGet: { path: /healthz, port: 8080 }

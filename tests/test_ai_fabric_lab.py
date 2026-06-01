@@ -63,10 +63,24 @@ def test_ai_fabric_lab_stage_is_workerbee_valid() -> None:
 
     assert validation["ok"] is True
     assert validation["input_kinds"] == ["native-k1s"]
-    assert "workerbee-ai-fabric-models:dev" in validation["images"]
+    assert "localhost/workerbee-ai-fabric-models:dev" in validation["images"]
     assert "ai-fabric-lab/ai-coordinator" in validation["required_controller_scopes"]
     assert "ai-fabric-lab/ai-expert" in validation["required_controller_scopes"]
     assert "ai-fabric-lab/ai-router" in validation["required_controller_scopes"]
+
+
+def test_ai_fabric_lab_plumbing_stage_is_workerbee_valid() -> None:
+    validation = validate_stage(EXAMPLE_ROOT / "stage-plumbing")
+
+    assert validation["ok"] is True
+    assert validation["input_kinds"] == ["native-k1s"]
+    assert "localhost/workerbee-ai-fabric-fake-model:dev" in validation["images"]
+    assert "localhost/workerbee-ai-fabric-models:dev" not in validation["images"]
+    assert "ai-fabric-lab/fake-model" in validation["required_controller_scopes"]
+    assert "ai-fabric-lab/ai-router" in validation["required_controller_scopes"]
+    assert "ai-fabric-lab/das-bridge" in validation["required_controller_scopes"]
+    assert "ai-fabric-lab/ai-coordinator" not in validation["required_controller_scopes"]
+    assert "ai-fabric-lab/ai-expert" not in validation["required_controller_scopes"]
 
 
 def test_ai_fabric_lab_init_storage_can_target_temp_root(tmp_path: Path) -> None:
@@ -351,6 +365,31 @@ def test_ai_fabric_router_advisory_includes_retrieval_and_lane_override(
     assert trace["symbolic"]["results"][0]["subject"] == trace["query"]
     assert trace["replay_status"] == "recorded"
     assert trace["divergence_reason"] == "pending_operator_review"
+
+
+def test_ai_fabric_fake_model_returns_openai_chat_completion() -> None:
+    fake_model = _load_module(
+        EXAMPLE_ROOT / "images" / "fake-model" / "app.py",
+        "ai_fabric_fake_model_test",
+    )
+
+    response = fake_model._chat_completion(
+        {
+            "model": "fake-expert",
+            "messages": [
+                {"role": "system", "content": "You are a test model."},
+                {"role": "user", "content": "Explain k1s Hyperon advisory routing."},
+            ],
+        }
+    )
+
+    assert response["object"] == "chat.completion"
+    assert response["model"] == "fake-expert"
+    assert response["choices"][0]["message"]["role"] == "assistant"
+    assert "router, retrieval, DAS, and trace plumbing" in response["choices"][0]["message"][
+        "content"
+    ]
+    assert response["usage"]["total_tokens"] > 0
 
 
 def test_ai_fabric_das_bridge_records_and_queries_facts(tmp_path: Path, monkeypatch) -> None:

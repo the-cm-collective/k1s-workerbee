@@ -15,6 +15,9 @@ Then build the four local images documented in `docs/ai-fabric-lab.md` and
 deploy `examples/ai-fabric-lab/stage` through WorkerBee. The shared model image
 is deployed as separate coordinator and expert workloads so each vLLM server has
 isolated startup and memory profiling.
+For the first GPU-free integration check, build the router, DAS bridge,
+retrieval indexer, and fake model images, then deploy
+`examples/ai-fabric-lab/stage-plumbing`.
 The shared launcher reads `run_defaults.attention_backend` and passes it as
 vLLM's `--attention-backend` argument; the smoke default uses Triton attention
 for RTX 8000 compatibility.

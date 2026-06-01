@@ -1,0 +1,33 @@
+apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: fake-model
+  namespace: ai-fabric-lab
+  labels:
+    app: fake-model
+    workerbee.k1s.dev/project: ai-fabric-lab
+spec:
+  image: localhost/workerbee-ai-fabric-fake-model:dev
+  imagePullPolicy: Never
+  replicas: 1
+  env:
+    - name: AI_FAKE_MODEL_ID
+      value: ai-fabric-plumbing-fake
+  ports:
+    - name: http
+      containerPort: 8090
+  service:
+    port: 8090
+    targetPort: 8090
+  health:
+    readiness:
+      httpGet: { path: /healthz, port: 8090 }
+      initialDelaySeconds: 1
+      periodSeconds: 5
+  resources:
+    requests:
+      cpu: 0.05
+      memory: 64Mi
+    limits:
+      cpu: 0.5
+      memory: 256Mi

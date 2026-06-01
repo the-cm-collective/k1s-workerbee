@@ -55,6 +55,7 @@ Validate the static lab bundle without starting workloads:
 
 ```bash
 python3 scripts/dev/ai_fabric_lab.py validate
+python3 scripts/dev/ai_fabric_lab.py validate --stage examples/ai-fabric-lab/stage-plumbing
 ```
 
 ## Images
@@ -63,13 +64,22 @@ Build the local development images before deploying the stage:
 
 ```bash
 workerbee build-image examples/ai-fabric-lab/images/ai-models \
-  --tag workerbee-ai-fabric-models:dev
+  --tag localhost/workerbee-ai-fabric-models:dev
 workerbee build-image examples/ai-fabric-lab/images/router \
-  --tag workerbee-ai-fabric-router:dev
+  --tag localhost/workerbee-ai-fabric-router:dev
 workerbee build-image examples/ai-fabric-lab/images/das-bridge \
-  --tag workerbee-ai-fabric-das-bridge:dev
+  --tag localhost/workerbee-ai-fabric-das-bridge:dev
 workerbee build-image examples/ai-fabric-lab/images/retrieval-indexer \
-  --tag workerbee-ai-fabric-retrieval-indexer:dev
+  --tag localhost/workerbee-ai-fabric-retrieval-indexer:dev
+```
+
+For the GPU-free advisor plumbing smoke, build the fake OpenAI-compatible model
+instead of the vLLM image and deploy `examples/ai-fabric-lab/stage-plumbing`:
+
+```bash
+workerbee build-image examples/ai-fabric-lab/images/fake-model \
+  --tag localhost/workerbee-ai-fabric-fake-model:dev
+workerbee manifest deploy-local --stage examples/ai-fabric-lab/stage-plumbing
 ```
 
 The model image wraps the pinned
