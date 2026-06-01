@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minimal advisory router for the AI fabric lab."""
+"""Advisory router for the AI fabric lab."""
 
 from __future__ import annotations
 
@@ -13,23 +13,35 @@ from urllib.request import Request, urlopen
 
 COORDINATOR_URL = os.getenv(
     "COORDINATOR_URL",
-    "http://ai-models:8001/v1/chat/completions",
+    "http://ai-coordinator:8001/v1/chat/completions",
 )
 EXPERT_URL = os.getenv(
     "EXPERT_URL",
-    "http://ai-models:8002/v1/chat/completions",
+    "http://ai-expert:8002/v1/chat/completions",
 )
+RETRIEVAL_URL = os.getenv("RETRIEVAL_URL", "http://retrieval-indexer:8082")
 DAS_URL = os.getenv("DAS_URL", "http://das-bridge:8081")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://qdrant:6333")
+COORDINATOR_MODEL = os.getenv("COORDINATOR_MODEL", "general-coordinator")
+EXPERT_MODEL = os.getenv("EXPERT_MODEL", "python-k1s-hyperon-expert")
 PROXY_TIMEOUT = float(os.getenv("AI_ROUTER_PROXY_TIMEOUT", "120"))
+ADVISORY_MODEL_TIMEOUT = float(os.getenv("AI_ROUTER_ADVISORY_MODEL_TIMEOUT", "45"))
+RETRIEVAL_TIMEOUT = float(os.getenv("AI_ROUTER_RETRIEVAL_TIMEOUT", "8"))
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ai-fabric-router/0.1"
+    server_version = "ai-fabric-router/0.2"
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path == "/healthz":
-            self._json({"ok": True, "service": "ai-router"})
+            self._json(
+                {
+                    "ok": True,
+                    "service": "ai-router",
+                    "retrieval_url": RETRIEVAL_URL,
+                    "symbolic_memory_url": DAS_URL,
+                }
+            )
             return
         if self.path == "/metrics":
             self._text("ai_fabric_router_up 1\n")
@@ -49,6 +61,7 @@ class Handler(BaseHTTPRequestHandler):
     def _proxy_chat(self, payload: dict[str, Any]) -> None:
         lane = _select_lane(payload)
         upstream = EXPERT_URL if lane == "expert" else COORDINATOR_URL
+        upstream_payload = _openai_payload(payload, lane=lane)
         if not _allowed_upstream(upstream):
             self._json(
                 {
@@ -60,14 +73,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
         try:
-            body = json.dumps(payload).encode("utf-8")
-            request = Request(  # noqa: S310 - upstream is restricted to http/https above.
-                upstream,
-                data=body,
-                headers={"Content-Type": "application/json"},
-                method="POST",
-            )
-            with urlopen(request, timeout=PROXY_TIMEOUT) as response:  # noqa: S310
+            with _post_json(upstream, upstream_payload, timeout=PROXY_TIMEOUT) as response:
                 self.send_response(response.status)
                 self.send_header(
                     "Content-Type",
@@ -116,30 +122,176 @@ class Handler(BaseHTTPRequestHandler):
 
 def _advisory_response(payload: dict[str, Any]) -> dict[str, Any]:
     lane = _select_lane(payload)
+    query = _query_text(payload)
+    retrieval = _retrieve_evidence(query, limit=5)
+    model = _call_advisory_model(lane, payload, retrieval)
+    answer = model.get("content") if model.get("ok") else None
     return {
         "ok": True,
         "lane": lane,
         "authoritative": False,
+        "answer": answer,
+        "model": model,
+        "evidence": {
+            "retrieval": retrieval,
+            "symbolic": {
+                "ok": False,
+                "url": DAS_URL,
+                "results": [],
+                "error": "symbolic_bridge_pending",
+            },
+        },
         "decision_trace": {
             "controller_authority": "k1s",
-            "retrieval_url": QDRANT_URL,
+            "retrieval_url": RETRIEVAL_URL,
+            "qdrant_url": QDRANT_URL,
             "symbolic_memory_url": DAS_URL,
             "selected_lane": lane,
         },
         "next_actions": [
-            "retrieve local k1s, WorkerBee, Python, and Hyperon context",
-            "query DAS facts for runtime state",
-            "ask the selected model lane for an advisory answer",
+            "treat this as advisory only; k1s remains authoritative",
+            "verify retrieved evidence against live controller state before acting",
             "record accept/reject reason outside the model response",
         ],
         "request": payload,
     }
 
 
+def _retrieve_evidence(query: str, *, limit: int) -> dict[str, Any]:
+    if not _allowed_upstream(RETRIEVAL_URL):
+        return {"ok": False, "url": RETRIEVAL_URL, "results": [], "error": "invalid_retrieval_url"}
+    try:
+        with _post_json(
+            f"{RETRIEVAL_URL.rstrip('/')}/v1/search",
+            {"query": query, "limit": limit},
+            timeout=RETRIEVAL_TIMEOUT,
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return {"ok": False, "url": RETRIEVAL_URL, "results": [], "error": str(exc)}
+    if not isinstance(payload, dict):
+        return {"ok": False, "url": RETRIEVAL_URL, "results": [], "error": "invalid_response"}
+    results = payload.get("results") if isinstance(payload.get("results"), list) else []
+    return {
+        "ok": bool(payload.get("ok")),
+        "url": RETRIEVAL_URL,
+        "backend": payload.get("backend"),
+        "query": query,
+        "results": results,
+        "error": payload.get("error") or payload.get("qdrant_error"),
+    }
+
+
+def _call_advisory_model(
+    lane: str,
+    payload: dict[str, Any],
+    retrieval: dict[str, Any],
+) -> dict[str, Any]:
+    upstream = EXPERT_URL if lane == "expert" else COORDINATOR_URL
+    if not _allowed_upstream(upstream):
+        return {"ok": False, "lane": lane, "upstream": upstream, "error": "invalid_upstream"}
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "You are an advisory assistant for a k1s/WorkerBee development lab. "
+                "Do not claim authority over controller state. Summarize the answer, cite "
+                "retrieved paths when useful, and call out verification steps."
+            ),
+        },
+        {
+            "role": "user",
+            "content": json.dumps(
+                {
+                    "request": payload,
+                    "retrieval_evidence": retrieval.get("results") or [],
+                    "controller_authority": "k1s",
+                },
+                indent=2,
+                sort_keys=True,
+            ),
+        },
+    ]
+    model_payload = {
+        "model": EXPERT_MODEL if lane == "expert" else COORDINATOR_MODEL,
+        "messages": messages,
+        "temperature": 0.1,
+        "max_tokens": 512,
+    }
+    try:
+        with _post_json(upstream, model_payload, timeout=ADVISORY_MODEL_TIMEOUT) as response:
+            raw = response.read().decode("utf-8")
+    except (URLError, TimeoutError) as exc:
+        return {"ok": False, "lane": lane, "upstream": upstream, "error": str(exc)}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {"ok": False, "lane": lane, "upstream": upstream, "error": "invalid_model_json"}
+    return {
+        "ok": True,
+        "lane": lane,
+        "upstream": upstream,
+        "content": _chat_content(data),
+        "raw": data,
+    }
+
+
+def _chat_content(payload: dict[str, Any]) -> str | None:
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices:
+        return None
+    first = choices[0]
+    if not isinstance(first, dict):
+        return None
+    message = first.get("message")
+    if isinstance(message, dict) and isinstance(message.get("content"), str):
+        return message["content"]
+    return None
+
+
+def _query_text(payload: dict[str, Any]) -> str:
+    for key in ("query", "question", "prompt", "input"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    messages = payload.get("messages")
+    if isinstance(messages, list):
+        text = "\n".join(
+            str(item.get("content"))
+            for item in messages
+            if isinstance(item, dict) and item.get("content")
+        )
+        if text.strip():
+            return text.strip()
+    return json.dumps(payload, sort_keys=True)
+
+
 def _select_lane(payload: dict[str, Any]) -> str:
+    explicit = payload.get("lane") or payload.get("target_lane") or payload.get("route_lane")
+    if isinstance(explicit, str) and explicit.lower() in {"coordinator", "expert"}:
+        return explicit.lower()
     text = json.dumps(payload, sort_keys=True).lower()
     expert_terms = ("python", "k1s", "workerbee", "hyperon", "das", "inferencecell", "traceback")
     return "expert" if any(term in text for term in expert_terms) else "coordinator"
+
+
+def _openai_payload(payload: dict[str, Any], *, lane: str) -> dict[str, Any]:
+    upstream_payload = dict(payload)
+    for key in ("lane", "target_lane", "route_lane"):
+        upstream_payload.pop(key, None)
+    upstream_payload.setdefault("model", EXPERT_MODEL if lane == "expert" else COORDINATOR_MODEL)
+    return upstream_payload
+
+
+def _post_json(url: str, payload: dict[str, Any], *, timeout: float):
+    body = json.dumps(payload).encode("utf-8")
+    request = Request(  # noqa: S310 - lab service URLs are constrained by configuration.
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    return urlopen(request, timeout=timeout)  # noqa: S310
 
 
 def _allowed_upstream(value: str) -> bool:

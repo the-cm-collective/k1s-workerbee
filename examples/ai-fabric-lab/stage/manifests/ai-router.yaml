@@ -11,10 +11,14 @@ spec:
   imagePullPolicy: Never
   replicas: 1
   env:
+    - name: AI_ROUTER_CONFIG_REV
+      value: evidence-v1
     - name: COORDINATOR_URL
       value: http://ai-coordinator.ai-fabric-lab.svc.cluster.local:8001/v1/chat/completions
     - name: EXPERT_URL
       value: http://ai-expert.ai-fabric-lab.svc.cluster.local:8002/v1/chat/completions
+    - name: RETRIEVAL_URL
+      value: http://retrieval-indexer.ai-fabric-lab.svc.cluster.local:8082
     - name: DAS_URL
       value: http://das-bridge.ai-fabric-lab.svc.cluster.local:8081
     - name: QDRANT_URL
@@ -22,9 +26,6 @@ spec:
   ports:
     - name: http
       containerPort: 8080
-  service:
-    port: 8080
-    targetPort: 8080
   health:
     readiness:
       httpGet: { path: /healthz, port: 8080 }

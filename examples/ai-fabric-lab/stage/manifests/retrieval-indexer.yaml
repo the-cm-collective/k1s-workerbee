@@ -11,6 +11,8 @@ spec:
   imagePullPolicy: Never
   replicas: 1
   env:
+    - name: AI_INDEXER_CONFIG_REV
+      value: retrieval-v1
     - name: AI_INDEXER_SERVE
       value: "1"
     - name: QDRANT_URL
@@ -22,6 +24,9 @@ spec:
   ports:
     - name: http
       containerPort: 8082
+  service:
+    port: 8082
+    targetPort: 8082
   health:
     readiness:
       httpGet: { path: /healthz, port: 8082 }

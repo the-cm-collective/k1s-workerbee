@@ -44,6 +44,13 @@ Prepare the layout and copy the pinned lab config into `/srv/storage`:
 python3 scripts/dev/ai_fabric_lab.py init-storage
 ```
 
+Seed a bounded corpus snapshot from this repo and the sibling `../k1s`
+checkout before starting the retrieval lane:
+
+```bash
+python3 scripts/dev/ai_fabric_lab.py sync-corpus
+```
+
 Validate the static lab bundle without starting workloads:
 
 ```bash
@@ -93,6 +100,36 @@ failed during prefill in the smoke test.
 WorkerBee service alias refresh is intentionally short, so the model manifests
 do not gate deployment readiness on vLLM cold start. Treat `/v1/models` on both
 model services as the runtime readiness signal for this lab.
+
+## Retrieval Evidence
+
+The retrieval indexer scans `/srv/storage/k1s/ai-fabric-lab/corpus`, writes
+`artifacts/indexes/corpus-manifest.json`, and upserts deterministic hashed
+vectors into the `ai_fabric_corpus` Qdrant collection. If Qdrant is temporarily
+unavailable, the indexer still serves a local in-memory fallback so advisory
+requests can show which corpus chunks were considered.
+
+Probe retrieval from inside the stage:
+
+```bash
+python3 - <<'PY'
+import json
+from urllib.request import Request, urlopen
+
+body = json.dumps({"query": "WorkerBee k1s GPU fabric", "limit": 3}).encode()
+request = Request(
+    "http://retrieval-indexer.ai-fabric-lab.svc.cluster.local:8082/v1/search",
+    data=body,
+    headers={"Content-Type": "application/json"},
+    method="POST",
+)
+print(urlopen(request, timeout=10).read().decode())
+PY
+```
+
+The router calls the same search endpoint for `/v1/advisory/query` and
+`/v1/advisory/evaluate`, includes the retrieval evidence in the response, and
+keeps `authoritative: false` with `controller_authority: k1s`.
 
 ## Deployment
 

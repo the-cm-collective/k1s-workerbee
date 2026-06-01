@@ -20,6 +20,39 @@ if str(SRC_ROOT) not in sys.path:
 
 from workerbee.manifests import validate_stage  # noqa: E402
 
+CORPUS_SUFFIXES = {".md", ".py", ".txt", ".yaml", ".yml", ".json", ".toml"}
+CORPUS_IGNORE_DIRS = {
+    ".git",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    "__pycache__",
+    "build",
+    "dist",
+    "node_modules",
+}
+CORPUS_SOURCE_PATHS = {
+    "workerbee": [
+        "AGENTS.md",
+        "README.md",
+        "docs",
+        "examples/ai-fabric-lab",
+        "pyproject.toml",
+        "scripts/dev/ai_fabric_lab.py",
+        "src",
+        "tests/test_ai_fabric_lab.py",
+    ],
+    "k1s": [
+        "AGENTS.md",
+        "README.md",
+        "docs",
+        "examples",
+        "pyproject.toml",
+        "src",
+    ],
+}
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="ai_fabric_lab.py")
@@ -35,6 +68,18 @@ def main(argv: list[str] | None = None) -> int:
     init_storage.add_argument("--storage-root", type=Path, default=None)
     init_storage.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
 
+    sync_corpus_parser = sub.add_parser(
+        "sync-corpus",
+        help="Copy selected WorkerBee and k1s docs/source snapshots into /srv/storage",
+    )
+    sync_corpus_parser.add_argument("--storage-root", type=Path, default=None)
+    sync_corpus_parser.add_argument("--workerbee-root", type=Path, default=REPO_ROOT)
+    sync_corpus_parser.add_argument("--k1s-root", type=Path, default=REPO_ROOT.parent / "k1s")
+    sync_corpus_parser.add_argument("--max-files", type=int, default=1500)
+    sync_corpus_parser.add_argument("--reset", dest="reset", action="store_true", default=True)
+    sync_corpus_parser.add_argument("--no-reset", dest="reset", action="store_false")
+    sync_corpus_parser.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+
     track = sub.add_parser("print-track", help="Print one model track")
     track.add_argument("track")
     track.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
@@ -46,6 +91,16 @@ def main(argv: list[str] | None = None) -> int:
         return _emit(result, json_out=args.json)
     if args.cmd == "init-storage":
         result = init_storage_layout(root, storage_root=args.storage_root)
+        return _emit(result, json_out=args.json)
+    if args.cmd == "sync-corpus":
+        result = sync_corpus(
+            root,
+            storage_root=args.storage_root,
+            workerbee_root=args.workerbee_root,
+            k1s_root=args.k1s_root,
+            max_files=args.max_files,
+            reset=args.reset,
+        )
         return _emit(result, json_out=args.json)
     if args.cmd == "print-track":
         result = print_track(root, args.track)
@@ -111,6 +166,66 @@ def init_storage_layout(root: Path, *, storage_root: Path | None = None) -> dict
     }
 
 
+def sync_corpus(
+    root: Path,
+    *,
+    storage_root: Path | None = None,
+    workerbee_root: Path = REPO_ROOT,
+    k1s_root: Path = REPO_ROOT.parent / "k1s",
+    max_files: int = 1500,
+    reset: bool = True,
+) -> dict[str, Any]:
+    init_result = init_storage_layout(root, storage_root=storage_root)
+    if not init_result.get("ok"):
+        return init_result
+    target_root = Path(str(init_result["root"]))
+    corpus_root = target_root / "corpus"
+    copied: dict[str, int] = {}
+    skipped_sources: list[str] = []
+    findings: list[dict[str, str]] = []
+    source_roots = {
+        "workerbee": workerbee_root.expanduser().resolve(),
+        "k1s": k1s_root.expanduser().resolve(),
+    }
+    total = 0
+    for source_name, source_root in source_roots.items():
+        target_dir = corpus_root / source_name
+        if reset and target_dir.exists():
+            shutil.rmtree(target_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        if not source_root.exists():
+            skipped_sources.append(f"{source_name}:{source_root}")
+            copied[source_name] = 0
+            continue
+        source_count = 0
+        for path in _iter_corpus_files(source_root, source_name):
+            if source_count >= max_files:
+                findings.append(
+                    _finding(
+                        "warning",
+                        "CORPUS_MAX_FILES",
+                        f"stopped {source_name} after copying {max_files} files",
+                    )
+                )
+                break
+            relative = path.relative_to(source_root)
+            destination = target_dir / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(path, destination)
+            total += 1
+            source_count += 1
+        copied[source_name] = source_count
+    return {
+        "ok": True,
+        "root": str(target_root),
+        "corpus_root": str(corpus_root),
+        "copied": copied,
+        "total_files": total,
+        "skipped_sources": skipped_sources,
+        "findings": findings,
+    }
+
+
 def print_track(root: Path, track_name: str) -> dict[str, Any]:
     model_tracks = _load_json(root / "model-tracks.json")
     tracks = model_tracks.get("tracks") if isinstance(model_tracks.get("tracks"), dict) else {}
@@ -127,6 +242,25 @@ def print_track(root: Path, track_name: str) -> dict[str, Any]:
             ],
         }
     return {"ok": True, "track": track_name, "config": track}
+
+
+def _iter_corpus_files(source_root: Path, source_name: str):
+    seen: set[Path] = set()
+    for relative_name in CORPUS_SOURCE_PATHS[source_name]:
+        base = source_root / relative_name
+        if not base.exists():
+            continue
+        candidates = [base] if base.is_file() else sorted(base.rglob("*"))
+        for candidate in candidates:
+            if not candidate.is_file() or candidate.suffix.lower() not in CORPUS_SUFFIXES:
+                continue
+            relative = candidate.relative_to(source_root)
+            if any(part in CORPUS_IGNORE_DIRS for part in relative.parts):
+                continue
+            if relative in seen:
+                continue
+            seen.add(relative)
+            yield candidate
 
 
 def _load_json(path: Path) -> dict[str, Any]:
