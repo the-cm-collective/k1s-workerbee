@@ -18,5 +18,5 @@ The shared launcher reads `run_defaults.attention_backend` and passes it as
 vLLM's `--attention-backend` argument; the smoke default uses Triton attention
 for RTX 8000 compatibility.
 
-The default model track is `baseline`. Use `smoke` before downloading the
-larger expert model, and use `quality` for the Qwen coordinator comparison.
+The default model track is the all-Qwen `baseline`. Use `smoke` before
+downloading the larger expert model, and use `quality` for comparison runs.

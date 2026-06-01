@@ -24,7 +24,7 @@ All models are pinned to Hugging Face revision SHAs as of the lab definition.
 | Track | Coordinator | Expert | Purpose |
 | --- | --- | --- | --- |
 | `smoke` | `HuggingFaceTB/SmolLM3-3B` | `Qwen/Qwen2.5-Coder-7B-Instruct-AWQ` | Prove the full path with maximum VRAM headroom. |
-| `baseline` | `HuggingFaceTB/SmolLM3-3B` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | Primary development baseline. |
+| `baseline` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | Primary all-Qwen development baseline. |
 | `quality` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | Compare coordinator quality versus the baseline. |
 
 The default runtime track is `baseline`. Start with `smoke` for image/runtime
