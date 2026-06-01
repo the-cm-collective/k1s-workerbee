@@ -27,7 +27,7 @@ spec:
     - name: VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
       value: "0"
     - name: AI_FABRIC_CONFIG_REV
-      value: smoke-v4
+      value: qwen-smoke-v4
   ports:
     - name: http
       containerPort: 8001

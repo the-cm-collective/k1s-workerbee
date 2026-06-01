@@ -23,7 +23,7 @@ All models are pinned to Hugging Face revision SHAs as of the lab definition.
 
 | Track | Coordinator | Expert | Purpose |
 | --- | --- | --- | --- |
-| `smoke` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-7B-Instruct-AWQ` | All-Qwen fallback path with lower expert VRAM pressure. |
+| `smoke` | `Qwen/Qwen2.5-3B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-7B-Instruct-AWQ` | All-Qwen fallback path with smaller coordinator and lower expert VRAM pressure. |
 | `baseline` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | Primary all-Qwen development baseline. |
 | `quality` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | Compare coordinator quality versus the baseline. |
 | `legacy-smollm-smoke` | `HuggingFaceTB/SmolLM3-3B` | `Qwen/Qwen2.5-Coder-7B-Instruct-AWQ` | Legacy plumbing-only track, not a baseline. |
@@ -82,8 +82,10 @@ The WorkerBee smoke manifests also set
 vLLM 0.22's CUDA graph memory estimate can otherwise consume the small smoke
 track's KV-cache budget before either lane accepts requests.
 The smoke coordinator and expert use Qwen AWQ models so the fallback still
-matches the intended two-Qwen architecture while preserving expert VRAM
-headroom.
+matches the intended two-Qwen architecture while preserving VRAM headroom. The
+baseline keeps the stronger 7B coordinator target for quality validation.
+The smoke coordinator cap is higher than the expert cap because vLLM 0.22
+reported a larger CUDA graph reservation for the smaller general Qwen model.
 The model launcher passes `--attention-backend TRITON_ATTN` from
 `run_defaults.attention_backend`; FlashInfer initialized on the RTX 8000 but
 failed during prefill in the smoke test.
@@ -101,6 +103,10 @@ The WorkerBee stage is rooted at
 workerbee manifest validate examples/ai-fabric-lab/stage
 workerbee manifest deploy-local --stage examples/ai-fabric-lab/stage
 ```
+
+The committed WorkerBee stage currently deploys the all-Qwen `smoke` track so
+runtime validation can proceed with a smaller coordinator and coder expert while
+the all-Qwen `baseline` remains the target profile to validate separately.
 
 For k1s controller/fabric validation, keep this co-resident LLM workload
 separate from existing `InferenceCell` examples. Run the single-node GPU

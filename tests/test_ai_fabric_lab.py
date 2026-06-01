@@ -35,7 +35,7 @@ def test_ai_fabric_lab_has_quality_track_with_qwen_coordinator() -> None:
     legacy = model_tracks["tracks"]["legacy-smollm-smoke"]
 
     assert model_tracks["run_defaults"]["attention_backend"] == "TRITON_ATTN"
-    assert smoke["coordinator"]["model"] == "Qwen/Qwen2.5-7B-Instruct-AWQ"
+    assert smoke["coordinator"]["model"] == "Qwen/Qwen2.5-3B-Instruct-AWQ"
     assert smoke["expert"]["model"] == "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ"
     assert baseline["coordinator"]["model"] == "Qwen/Qwen2.5-7B-Instruct-AWQ"
     assert baseline["expert"]["model"] == "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ"
