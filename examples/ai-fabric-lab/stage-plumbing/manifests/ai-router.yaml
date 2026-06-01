@@ -31,7 +31,7 @@ spec:
     - name: http
       containerPort: 8080
   service:
-    port: 18080
+    port: 18180
     targetPort: 8080
   health:
     readiness:

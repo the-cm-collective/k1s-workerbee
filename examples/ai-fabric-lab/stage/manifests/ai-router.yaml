@@ -26,6 +26,9 @@ spec:
   ports:
     - name: http
       containerPort: 8080
+  service:
+    port: 18180
+    targetPort: 8080
   health:
     readiness:
       httpGet: { path: /healthz, port: 8080 }

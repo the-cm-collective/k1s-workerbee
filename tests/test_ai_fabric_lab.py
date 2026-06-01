@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-from workerbee.manifests import validate_stage
+from workerbee.manifests import _load_yaml_documents, validate_stage
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_ROOT = REPO_ROOT / "examples" / "ai-fabric-lab"
@@ -19,6 +19,21 @@ def _load_module(path: Path, name: str) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _deployment(path: Path) -> dict[str, object]:
+    docs = _load_yaml_documents(path.read_text(encoding="utf-8"))
+    assert len(docs) == 1
+    return docs[0]
+
+
+def _service_port(path: Path) -> int:
+    deployment = _deployment(path)
+    spec = deployment["spec"]
+    assert isinstance(spec, dict)
+    service = spec["service"]
+    assert isinstance(service, dict)
+    return int(service["port"])
 
 
 def test_ai_fabric_lab_static_bundle_validates() -> None:
@@ -81,6 +96,15 @@ def test_ai_fabric_lab_plumbing_stage_is_workerbee_valid() -> None:
     assert "ai-fabric-lab/das-bridge" in validation["required_controller_scopes"]
     assert "ai-fabric-lab/ai-coordinator" not in validation["required_controller_scopes"]
     assert "ai-fabric-lab/ai-expert" not in validation["required_controller_scopes"]
+
+
+def test_ai_fabric_lab_stages_use_dedicated_workerbee_service_ports() -> None:
+    for stage in ("stage", "stage-plumbing"):
+        manifests = EXAMPLE_ROOT / stage / "manifests"
+
+        assert _service_port(manifests / "ai-router.yaml") == 18180
+        assert _service_port(manifests / "das-bridge.yaml") == 18181
+        assert _service_port(manifests / "retrieval-indexer.yaml") == 18182
 
 
 def test_ai_fabric_lab_init_storage_can_target_temp_root(tmp_path: Path) -> None:

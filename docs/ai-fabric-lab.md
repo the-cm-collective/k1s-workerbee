@@ -110,6 +110,9 @@ failed during prefill in the smoke test.
 WorkerBee service alias refresh is intentionally short, so the model manifests
 do not gate deployment readiness on vLLM cold start. Treat `/v1/models` on both
 model services as the runtime readiness signal for this lab.
+The router, DAS bridge, and retrieval indexer expose host service ports
+`18180`, `18181`, and `18182` respectively to avoid colliding with other
+WorkerBee development services.
 
 ## Retrieval Evidence
 

@@ -25,7 +25,7 @@ spec:
     - name: http
       containerPort: 8082
   service:
-    port: 18082
+    port: 18182
     targetPort: 8082
   health:
     readiness:
