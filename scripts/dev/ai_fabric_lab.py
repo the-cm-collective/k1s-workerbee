@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
@@ -106,6 +108,15 @@ def main(argv: list[str] | None = None) -> int:
     phase_facts.add_argument("--das-url", default="http://127.0.0.1:8081")
     phase_facts.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
 
+    f5_evidence = sub.add_parser("emit-f5-evidence", help="Emit WorkerBee F5 lab evidence")
+    f5_evidence.add_argument("--storage-root", type=Path, default=None)
+    f5_evidence.add_argument("--site-id", default="site-a")
+    f5_evidence.add_argument("--peer-site-id", default="site-b")
+    f5_evidence.add_argument("--project", default="")
+    f5_evidence.add_argument("--track", default="")
+    f5_evidence.add_argument("--query-id", default="ai-fabric-local-first-smoke")
+    f5_evidence.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+
     args = parser.parse_args(argv)
     root = args.root.expanduser().resolve()
     if args.cmd == "validate":
@@ -142,6 +153,17 @@ def main(argv: list[str] | None = None) -> int:
         result = import_phase_facts(
             phase_report=args.phase_report,
             das_url=args.das_url,
+        )
+        return _emit(result, json_out=args.json)
+    if args.cmd == "emit-f5-evidence":
+        result = emit_f5_evidence(
+            root,
+            storage_root=args.storage_root,
+            site_id=args.site_id,
+            peer_site_id=args.peer_site_id,
+            project=args.project,
+            track=args.track or None,
+            query_id=args.query_id,
         )
         return _emit(result, json_out=args.json)
     return 2
@@ -350,6 +372,44 @@ def import_phase_facts(*, phase_report: Path, das_url: str) -> dict[str, Any]:
     }
 
 
+def emit_f5_evidence(
+    root: Path,
+    *,
+    storage_root: Path | None = None,
+    site_id: str,
+    peer_site_id: str,
+    project: str,
+    track: str | None,
+    query_id: str,
+) -> dict[str, Any]:
+    init_result = init_storage_layout(root, storage_root=storage_root)
+    if not init_result.get("ok"):
+        return init_result
+    model_tracks = _load_json(root / "model-tracks.json")
+    selected_track = track or str(model_tracks.get("default_track") or "")
+    target_root = Path(str(init_result["root"]))
+    payload = _f5_evidence_payload(
+        storage_root=target_root,
+        site_id=site_id,
+        peer_site_id=peer_site_id,
+        project=project,
+        track=selected_track,
+        query_id=query_id,
+    )
+    runs_dir = target_root / "runs"
+    runs_dir.mkdir(parents=True, exist_ok=True)
+    evidence_path = runs_dir / "f5-evidence.json"
+    evidence_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    return {
+        "ok": True,
+        "root": str(target_root),
+        "evidence_path": str(evidence_path),
+        "evidence": payload,
+        "facts": _f5_evidence_facts(payload),
+        "findings": [],
+    }
+
+
 def _iter_corpus_files(source_root: Path, source_name: str):
     seen: set[Path] = set()
     for relative_name in CORPUS_SOURCE_PATHS[source_name]:
@@ -513,6 +573,133 @@ def _phase_evidence_facts(
     return facts
 
 
+def _f5_evidence_payload(
+    *,
+    storage_root: Path,
+    site_id: str,
+    peer_site_id: str,
+    project: str,
+    track: str,
+    query_id: str,
+) -> dict[str, Any]:
+    now = _utc_now()
+    bundle_id = _stable_id("das-bundle", [site_id, project or "workerbee", track])
+    trace_id = _stable_id("das-query", [bundle_id, query_id, track])
+    replication_id = _stable_id("das-replication", [bundle_id, site_id, peer_site_id])
+    signal_id = _stable_id("cognitive-signal", [bundle_id, trace_id])
+    facts_ref = f"das://{site_id}/runtime/facts.jsonl"
+    records = {
+        "das_cell_bundles": [
+            {
+                "bundle_id": bundle_id,
+                "site_id": site_id,
+                "cell_id": "runtime",
+                "version": now[:10],
+                "storage_ref": str(storage_root / "das"),
+                "facts_ref": facts_ref,
+                "status": "ready",
+                "labels": {"project": project, "track": track, "workerbee_lab": "ai-fabric"},
+                "created_at": now,
+                "updated_at": now,
+            }
+        ],
+        "das_query_traces": [
+            {
+                "trace_id": trace_id,
+                "bundle_id": bundle_id,
+                "site_id": site_id,
+                "query_id": query_id,
+                "query_kind": "advisory",
+                "local_first": True,
+                "warmed_refs": [facts_ref],
+                "promoted_refs": [f"qdrant://ai_fabric_corpus/{track or 'default'}"],
+                "fallback_sites": [],
+                "result_ref": f"workerbee://runs/f5/{trace_id}",
+                "created_at": now,
+            }
+        ],
+        "das_replications": [
+            {
+                "replication_id": replication_id,
+                "bundle_id": bundle_id,
+                "source_site_id": site_id,
+                "target_site_id": peer_site_id,
+                "mode": "controlled",
+                "status": "planned",
+                "approved_by": "operator",
+                "reason": "warm peer DAS cell without making WAN a hot query path",
+                "created_at": now,
+                "updated_at": now,
+            }
+        ],
+        "cognitive_signals": [
+            {
+                "signal_id": signal_id,
+                "subject_type": "das-cell",
+                "subject_id": bundle_id,
+                "signal_kind": "continuity",
+                "continuity_ref": f"workerbee://runs/f5/{trace_id}",
+                "coherence_score": 1.0,
+                "overload_state": "nominal",
+                "review_gate": "operator_review",
+                "advisory_trace_id": trace_id,
+                "created_at": now,
+            }
+        ],
+    }
+    return {
+        "api_version": "workerbee.ai-fabric.f5-evidence/v1",
+        "kind": "AIFabricF5Evidence",
+        "generated_at": now,
+        "records": records,
+    }
+
+
+def _f5_evidence_facts(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    source = "workerbee.ai-fabric.f5-evidence/v1"
+    records = payload.get("records") if isinstance(payload.get("records"), dict) else {}
+    facts = [
+        _runtime_fact("workerbee.ai_fabric.f5_evidence", "api_version", source, source=source)
+    ]
+    evidence_keys = {
+        "das_cell_bundles": "das_cell_bundles",
+        "das_query_traces": "local_first_query_warming_promotion",
+        "das_replications": "controlled_cross_site_replication",
+        "cognitive_signals": "cognitive_fabric_substrate",
+    }
+    for record_group, evidence_key in evidence_keys.items():
+        items = records.get(record_group)
+        if not isinstance(items, list):
+            continue
+        facts.append(
+            _runtime_fact(
+                f"k1s.fabric.phase.F5.evidence.{evidence_key}",
+                "workerbee_record_count",
+                len(items),
+                source=source,
+            )
+        )
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            record_id = (
+                item.get("bundle_id")
+                or item.get("trace_id")
+                or item.get("replication_id")
+                or item.get("signal_id")
+            )
+            if record_id:
+                facts.append(
+                    _runtime_fact(
+                        f"k1s.fabric.phase.F5.evidence.{evidence_key}",
+                        "workerbee_record",
+                        str(record_id),
+                        source=source,
+                    )
+                )
+    return facts
+
+
 def _runtime_fact(
     subject: str,
     predicate: str,
@@ -527,6 +714,15 @@ def _runtime_fact(
         "object": obj,
         "source": source,
     }
+
+
+def _utc_now() -> str:
+    return datetime.now(UTC).isoformat()
+
+
+def _stable_id(prefix: str, parts: list[str]) -> str:
+    digest = hashlib.sha256("\n".join(str(part) for part in parts).encode()).hexdigest()[:16]
+    return f"{prefix}-{digest}"
 
 
 def _git_rev(path: Path) -> str | None:

@@ -32,3 +32,6 @@ The DAS bridge runs Hyperon DAS when the runtime image is built and keeps a
 JSONL fact audit under `/srv/storage/k1s/ai-fabric-lab/das`. Use
 `scripts/dev/ai_fabric_lab.py import-runtime-facts` from inside the lab network
 or with a reachable DAS URL to seed track, model, project, and repo facts.
+Use `scripts/dev/ai_fabric_lab.py emit-f5-evidence` to generate the first
+k1s-compatible DAS-cell, query-warming, replication-intent, and cognitive-signal
+records under `/srv/storage/k1s/ai-fabric-lab/runs/f5-evidence.json`.

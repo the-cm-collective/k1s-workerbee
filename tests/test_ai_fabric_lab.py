@@ -229,6 +229,36 @@ def test_ai_fabric_import_phase_facts_posts_report_facts(tmp_path: Path, monkeyp
     assert posted[0]["source"] == "k1s.fabric.phase-assurance/v1"
 
 
+def test_ai_fabric_emit_f5_evidence_writes_k1s_compatible_records(tmp_path: Path) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_f5_evidence_test")
+
+    result = lab.emit_f5_evidence(
+        EXAMPLE_ROOT,
+        storage_root=tmp_path / "lab",
+        site_id="site-a",
+        peer_site_id="site-b",
+        project="k1s-workerbee-test",
+        track="smoke",
+        query_id="query-0",
+    )
+
+    payload = json.loads(Path(result["evidence_path"]).read_text(encoding="utf-8"))
+    records = payload["records"]
+    assert result["ok"] is True
+    assert payload["api_version"] == "workerbee.ai-fabric.f5-evidence/v1"
+    assert records["das_cell_bundles"][0]["site_id"] == "site-a"
+    assert records["das_query_traces"][0]["local_first"] is True
+    assert records["das_replications"][0]["mode"] == "controlled"
+    assert records["cognitive_signals"][0]["review_gate"] == "operator_review"
+    assert {
+        "namespace": "runtime",
+        "subject": "k1s.fabric.phase.F5.evidence.das_cell_bundles",
+        "predicate": "workerbee_record_count",
+        "object": 1,
+        "source": "workerbee.ai-fabric.f5-evidence/v1",
+    } in result["facts"]
+
+
 def test_ai_fabric_retrieval_indexer_serves_local_results(tmp_path: Path, monkeypatch) -> None:
     indexer = _load_module(
         EXAMPLE_ROOT / "images" / "retrieval-indexer" / "indexer.py",
@@ -367,3 +397,38 @@ def test_ai_fabric_das_bridge_records_and_queries_facts(tmp_path: Path, monkeypa
     assert results[0]["subject"] == "ai_fabric.track"
     assert results[0]["object"] == "smoke"
     assert results[1]["id"] == project["id"]
+
+
+def test_ai_fabric_das_bridge_records_f5_query_evidence(tmp_path: Path, monkeypatch) -> None:
+    das_bridge = _load_module(
+        EXAMPLE_ROOT / "images" / "das-bridge" / "app.py",
+        "ai_fabric_das_bridge_f5_test",
+    )
+    monkeypatch.setattr(das_bridge, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(das_bridge, "FACT_LOG", tmp_path / "facts.jsonl")
+    monkeypatch.setattr(das_bridge, "F5_EVIDENCE_LOG", tmp_path / "f5-evidence.jsonl")
+
+    fact = das_bridge._append_fact(
+        {
+            "namespace": "runtime",
+            "subject": "k1s.fabric.phase.F5",
+            "predicate": "status",
+            "object": "present",
+            "source": "test",
+        }
+    )
+    evidence = das_bridge._record_query_evidence(
+        {"query": "F5 DAS local first", "query_id": "query-0"},
+        [fact],
+    )
+    records = das_bridge._read_f5_evidence()
+
+    assert evidence["api_version"] == "workerbee.ai-fabric.f5-query-evidence/v1"
+    assert evidence["query_trace"]["local_first"] is True
+    assert evidence["query_trace"]["warmed_refs"] == [f"das-fact://{fact['id']}"]
+    assert evidence["cognitive_signal"]["review_gate"] == "operator_review"
+    assert [record["kind"] for record in records] == [
+        "das_cell_bundle",
+        "das_query_trace",
+        "cognitive_signal",
+    ]

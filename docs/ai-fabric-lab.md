@@ -165,6 +165,25 @@ model, repo, project, and k1s phase facts in one pass.
 
 The router queries `/v1/query` on the DAS bridge for advisory requests and
 passes symbolic facts to the selected model alongside retrieval evidence.
+Each DAS query also records F5-compatible local-first query evidence in
+`/srv/storage/k1s/ai-fabric-lab/das/f5-evidence.jsonl`, and the bridge exposes
+the recent records at `/v1/f5/evidence`.
+
+Emit a durable F5 evidence bundle for import or review without starting the
+runtime:
+
+```bash
+python3 scripts/dev/ai_fabric_lab.py emit-f5-evidence \
+  --storage-root /srv/storage/k1s/ai-fabric-lab \
+  --site-id site-a \
+  --peer-site-id site-b \
+  --project k1s-workerbee-dev-2592c13f5e \
+  --track smoke
+```
+
+The generated `runs/f5-evidence.json` contains k1s-compatible records for DAS
+cell bundles, local-first query traces, controlled replication intent, and
+cognitive-fabric signals.
 
 ## Deployment
 

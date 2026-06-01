@@ -16,7 +16,10 @@ from urllib.parse import parse_qs, urlparse
 
 DATA_DIR = Path(os.getenv("DAS_DATA_DIR", "/data/das"))
 FACT_LOG = DATA_DIR / "facts.jsonl"
+F5_EVIDENCE_LOG = DATA_DIR / "f5-evidence.jsonl"
 BACKEND_NAME = os.getenv("AI_DAS_BACKEND", "hyperon-das")
+SITE_ID = os.getenv("AI_FABRIC_SITE_ID", "site-a")
+CELL_ID = os.getenv("AI_FABRIC_DAS_CELL_ID", "runtime")
 FACT_NODE_TYPE = "Concept"
 PREDICATE_NODE_TYPE = "Predicate"
 FACT_LINK_TYPE = "ai-fabric:fact"
@@ -149,6 +152,7 @@ class Handler(BaseHTTPRequestHandler):
                     "service": "das-bridge",
                     "backend": BACKEND.status(),
                     "fact_count": len(_read_facts()),
+                    "f5_evidence_count": len(_read_f5_evidence()),
                 }
             )
             return
@@ -156,6 +160,11 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             limit = int((query.get("limit") or ["100"])[0])
             self._json({"ok": True, "facts": _read_facts(limit=limit)})
+            return
+        if parsed.path == "/v1/f5/evidence":
+            query = parse_qs(parsed.query)
+            limit = int((query.get("limit") or ["100"])[0])
+            self._json({"ok": True, "records": _read_f5_evidence(limit=limit)})
             return
         self.send_error(404)
 
@@ -169,12 +178,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/v1/query":
             facts = _query_facts(payload)
+            f5_evidence = _record_query_evidence(payload, facts)
             self._json(
                 {
                     "ok": True,
                     "backend": BACKEND.status(),
                     "facts": facts,
                     "results": facts,
+                    "f5_evidence": f5_evidence,
                 }
             )
             return
@@ -184,6 +195,10 @@ class Handler(BaseHTTPRequestHandler):
             for fact in imported:
                 BACKEND.add_fact(fact)
             self._json({"ok": True, "imported": len(imported), "facts": imported})
+            return
+        if parsed.path == "/v1/f5/replication-intent":
+            replication = _record_replication_intent(payload)
+            self._json({"ok": True, "replication": replication}, status=201)
             return
         self.send_error(404)
 
@@ -246,6 +261,37 @@ def _read_facts(*, limit: int | None = None) -> list[dict[str, Any]]:
     return facts
 
 
+def _append_f5_evidence(kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    record = {
+        "api_version": "workerbee.ai-fabric.f5-evidence-record/v1",
+        "kind": kind,
+        "payload": payload,
+        "recorded_at": datetime.now(timezone.utc).isoformat(),  # noqa: UP017
+    }
+    with FACT_LOCK, F5_EVIDENCE_LOG.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+    return record
+
+
+def _read_f5_evidence(*, limit: int | None = None) -> list[dict[str, Any]]:
+    if not F5_EVIDENCE_LOG.is_file():
+        return []
+    records = []
+    with FACT_LOCK:
+        lines = F5_EVIDENCE_LOG.read_text(encoding="utf-8").splitlines()
+    for line in lines:
+        try:
+            value = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(value, dict):
+            records.append(value)
+    if limit is not None:
+        return records[-max(0, limit) :]
+    return records
+
+
 def _query_facts(payload: dict[str, Any]) -> list[dict[str, Any]]:
     namespace = payload.get("namespace")
     subject = payload.get("subject")
@@ -270,6 +316,118 @@ def _query_facts(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return [fact for _, _, fact in matches[:limit]]
 
 
+def _record_query_evidence(
+    payload: dict[str, Any],
+    facts: list[dict[str, Any]],
+) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    bundle = _das_cell_bundle(now)
+    trace = _das_query_trace(payload, facts, bundle, now)
+    signal = _cognitive_signal(trace, bundle, now)
+    _append_f5_evidence("das_cell_bundle", bundle)
+    _append_f5_evidence("das_query_trace", trace)
+    _append_f5_evidence("cognitive_signal", signal)
+    return {
+        "api_version": "workerbee.ai-fabric.f5-query-evidence/v1",
+        "cell_bundle": bundle,
+        "query_trace": trace,
+        "cognitive_signal": signal,
+    }
+
+
+def _record_replication_intent(payload: dict[str, Any]) -> dict[str, Any]:
+    now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    bundle = _das_cell_bundle(now)
+    peer_site = str(payload.get("target_site_id") or payload.get("peer_site_id") or "site-b")
+    replication = {
+        "replication_id": _stable_id("das-replication", [bundle["bundle_id"], SITE_ID, peer_site]),
+        "bundle_id": bundle["bundle_id"],
+        "source_site_id": SITE_ID,
+        "target_site_id": peer_site,
+        "mode": str(payload.get("mode") or "controlled"),
+        "status": str(payload.get("status") or "planned"),
+        "approved_by": str(payload.get("approved_by") or "operator"),
+        "reason": str(
+            payload.get("reason") or "warm peer DAS cell without making WAN a hot query path"
+        ),
+        "created_at": now,
+        "updated_at": now,
+    }
+    _append_f5_evidence("das_cell_bundle", bundle)
+    _append_f5_evidence("das_replication", replication)
+    return replication
+
+
+def _das_cell_bundle(now: str) -> dict[str, Any]:
+    bundle_id = _stable_id("das-bundle", [SITE_ID, CELL_ID, str(DATA_DIR)])
+    return {
+        "bundle_id": bundle_id,
+        "site_id": SITE_ID,
+        "cell_id": CELL_ID,
+        "version": now[:10],
+        "storage_ref": str(DATA_DIR),
+        "facts_ref": f"das://{SITE_ID}/{CELL_ID}/facts.jsonl",
+        "status": "ready",
+        "labels": {"backend": BACKEND_NAME, "workerbee_lab": "ai-fabric"},
+        "created_at": now,
+        "updated_at": now,
+    }
+
+
+def _das_query_trace(
+    payload: dict[str, Any],
+    facts: list[dict[str, Any]],
+    bundle: dict[str, Any],
+    now: str,
+) -> dict[str, Any]:
+    query = str(payload.get("query") or payload.get("subject") or "")
+    query_id = str(payload.get("query_id") or _stable_id("query", [query]))
+    trace_id = str(
+        payload.get("trace_id") or _stable_id("das-query", [bundle["bundle_id"], query_id])
+    )
+    promoted_refs = (
+        payload.get("promoted_refs") if isinstance(payload.get("promoted_refs"), list) else []
+    )
+    fallback_sites = (
+        payload.get("fallback_sites") if isinstance(payload.get("fallback_sites"), list) else []
+    )
+    warmed_refs = [f"das-fact://{fact['id']}" for fact in facts[:5] if fact.get("id")]
+    if not warmed_refs:
+        warmed_refs = [str(bundle["facts_ref"])]
+    return {
+        "trace_id": trace_id,
+        "bundle_id": str(bundle["bundle_id"]),
+        "site_id": SITE_ID,
+        "query_id": query_id,
+        "query_kind": str(payload.get("query_kind") or "advisory"),
+        "local_first": True,
+        "warmed_refs": warmed_refs,
+        "promoted_refs": promoted_refs,
+        "fallback_sites": fallback_sites,
+        "result_ref": f"das://{SITE_ID}/{CELL_ID}/query/{trace_id}",
+        "created_at": now,
+    }
+
+
+def _cognitive_signal(
+    trace: dict[str, Any],
+    bundle: dict[str, Any],
+    now: str,
+) -> dict[str, Any]:
+    return {
+        "signal_id": _stable_id("cognitive-signal", [trace["trace_id"], bundle["bundle_id"]]),
+        "subject_type": "das-cell",
+        "subject_id": str(bundle["bundle_id"]),
+        "signal_kind": "continuity",
+        "continuity_ref": str(trace["result_ref"]),
+        "coherence_score": 1.0,
+        "overload_state": "nominal",
+        "review_gate": "operator_review",
+        "advisory_trace_id": str(trace["trace_id"]),
+        "created_at": now,
+    }
+
+
 def _fact_id(fact: dict[str, Any]) -> str:
     stable = {
         "namespace": fact["namespace"],
@@ -279,6 +437,11 @@ def _fact_id(fact: dict[str, Any]) -> str:
         "source": fact["source"],
     }
     return hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
+
+
+def _stable_id(prefix: str, parts: list[str]) -> str:
+    digest = hashlib.sha256("\n".join(str(part) for part in parts).encode()).hexdigest()[:16]
+    return f"{prefix}-{digest}"
 
 
 def _node_name(namespace: str, subject: str) -> str:
