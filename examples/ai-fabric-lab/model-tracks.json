@@ -3,16 +3,16 @@
   "default_track": "baseline",
   "tracks": {
     "smoke": {
-      "description": "Fast plumbing path with maximum VRAM headroom.",
+      "description": "All-Qwen fallback path with lower expert VRAM pressure.",
       "coordinator": {
-        "alias": "coordinator-smollm3-3b",
-        "model": "HuggingFaceTB/SmolLM3-3B",
-        "revision": "a07cc9a04f16550a088caea529712d1d335b0ac1",
+        "alias": "coordinator-qwen25-7b-awq",
+        "model": "Qwen/Qwen2.5-7B-Instruct-AWQ",
+        "revision": "b25037543e9394b818fdfca67ab2a00ecc7dd641",
         "port": 8001,
         "served_model_name": "general-coordinator",
         "max_model_len": 8192,
-        "gpu_memory_utilization": 0.3,
-        "quantization": null,
+        "gpu_memory_utilization": 0.28,
+        "quantization": "awq",
         "enable_lora": false
       },
       "expert": {

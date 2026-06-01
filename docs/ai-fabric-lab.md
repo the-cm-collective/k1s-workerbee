@@ -23,13 +23,13 @@ All models are pinned to Hugging Face revision SHAs as of the lab definition.
 
 | Track | Coordinator | Expert | Purpose |
 | --- | --- | --- | --- |
-| `smoke` | `HuggingFaceTB/SmolLM3-3B` | `Qwen/Qwen2.5-Coder-7B-Instruct-AWQ` | Prove the full path with maximum VRAM headroom. |
+| `smoke` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-7B-Instruct-AWQ` | All-Qwen fallback path with lower expert VRAM pressure. |
 | `baseline` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | Primary all-Qwen development baseline. |
 | `quality` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | Compare coordinator quality versus the baseline. |
 
-The default runtime track is `baseline`. Start with `smoke` for image/runtime
-plumbing, then run `baseline`, then run `quality` against the same prompt set,
-corpus snapshot, and DAS facts.
+The default runtime track is `baseline`. Start with `smoke` before downloading
+the larger expert model, then run `baseline`, then run `quality` against the
+same prompt set, corpus snapshot, and DAS facts.
 
 ## Storage
 
@@ -79,8 +79,9 @@ The WorkerBee smoke manifests also set
 `VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0`. On the RTX 8000 development host,
 vLLM 0.22's CUDA graph memory estimate can otherwise consume the small smoke
 track's KV-cache budget before either lane accepts requests.
-The smoke and baseline SmolLM3 coordinator cap is `0.30` so it retains
-KV-cache headroom while the Qwen expert is resident on the same RTX 8000.
+The smoke coordinator and expert use Qwen AWQ models so the fallback still
+matches the intended two-Qwen architecture while preserving expert VRAM
+headroom.
 The model launcher passes `--attention-backend TRITON_ATTN` from
 `run_defaults.attention_backend`; FlashInfer initialized on the RTX 8000 but
 failed during prefill in the smoke test.
