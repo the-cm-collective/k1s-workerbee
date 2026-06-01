@@ -1,4 +1,9 @@
-FROM python:3.11-slim
+FROM python:3.10-slim
+
+COPY unpack_hyperon_wheel.py /tmp/unpack_hyperon_wheel.py
+RUN python -m pip install --no-cache-dir --no-deps hyperon-das==0.10.1 \
+  && python /tmp/unpack_hyperon_wheel.py \
+  && rm /tmp/unpack_hyperon_wheel.py
 
 WORKDIR /app
 COPY app.py /app/app.py

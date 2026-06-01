@@ -131,6 +131,23 @@ The router calls the same search endpoint for `/v1/advisory/query` and
 `/v1/advisory/evaluate`, includes the retrieval evidence in the response, and
 keeps `authoritative: false` with `controller_authority: k1s`.
 
+## Symbolic Evidence
+
+The DAS bridge runs with `AI_DAS_BACKEND=hyperon-das` and imports facts into a
+local Hyperon `DistributedAtomSpace` while also appending the durable JSONL
+audit log under `/srv/storage/k1s/ai-fabric-lab/das/facts.jsonl`.
+
+Seed the initial runtime facts after deployment:
+
+```bash
+python3 scripts/dev/ai_fabric_lab.py import-runtime-facts \
+  --das-url http://das-bridge.ai-fabric-lab.svc.cluster.local:8081 \
+  --project k1s-workerbee-dev-2592c13f5e
+```
+
+The router queries `/v1/query` on the DAS bridge for advisory requests and
+passes symbolic facts to the selected model alongside retrieval evidence.
+
 ## Deployment
 
 The WorkerBee stage is rooted at

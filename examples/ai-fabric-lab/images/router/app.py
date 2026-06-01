@@ -27,6 +27,7 @@ EXPERT_MODEL = os.getenv("EXPERT_MODEL", "python-k1s-hyperon-expert")
 PROXY_TIMEOUT = float(os.getenv("AI_ROUTER_PROXY_TIMEOUT", "120"))
 ADVISORY_MODEL_TIMEOUT = float(os.getenv("AI_ROUTER_ADVISORY_MODEL_TIMEOUT", "45"))
 RETRIEVAL_TIMEOUT = float(os.getenv("AI_ROUTER_RETRIEVAL_TIMEOUT", "8"))
+SYMBOLIC_TIMEOUT = float(os.getenv("AI_ROUTER_SYMBOLIC_TIMEOUT", "8"))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -124,7 +125,8 @@ def _advisory_response(payload: dict[str, Any]) -> dict[str, Any]:
     lane = _select_lane(payload)
     query = _query_text(payload)
     retrieval = _retrieve_evidence(query, limit=5)
-    model = _call_advisory_model(lane, payload, retrieval)
+    symbolic = _query_symbolic_evidence(query, limit=5)
+    model = _call_advisory_model(lane, payload, retrieval, symbolic)
     answer = model.get("content") if model.get("ok") else None
     return {
         "ok": True,
@@ -134,12 +136,7 @@ def _advisory_response(payload: dict[str, Any]) -> dict[str, Any]:
         "model": model,
         "evidence": {
             "retrieval": retrieval,
-            "symbolic": {
-                "ok": False,
-                "url": DAS_URL,
-                "results": [],
-                "error": "symbolic_bridge_pending",
-            },
+            "symbolic": symbolic,
         },
         "decision_trace": {
             "controller_authority": "k1s",
@@ -182,10 +179,35 @@ def _retrieve_evidence(query: str, *, limit: int) -> dict[str, Any]:
     }
 
 
+def _query_symbolic_evidence(query: str, *, limit: int) -> dict[str, Any]:
+    if not _allowed_upstream(DAS_URL):
+        return {"ok": False, "url": DAS_URL, "results": [], "error": "invalid_das_url"}
+    try:
+        with _post_json(
+            f"{DAS_URL.rstrip('/')}/v1/query",
+            {"query": query, "limit": limit},
+            timeout=SYMBOLIC_TIMEOUT,
+        ) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return {"ok": False, "url": DAS_URL, "results": [], "error": str(exc)}
+    if not isinstance(payload, dict):
+        return {"ok": False, "url": DAS_URL, "results": [], "error": "invalid_response"}
+    results = payload.get("results") if isinstance(payload.get("results"), list) else []
+    return {
+        "ok": bool(payload.get("ok")),
+        "url": DAS_URL,
+        "backend": payload.get("backend"),
+        "results": results,
+        "error": payload.get("error"),
+    }
+
+
 def _call_advisory_model(
     lane: str,
     payload: dict[str, Any],
     retrieval: dict[str, Any],
+    symbolic: dict[str, Any],
 ) -> dict[str, Any]:
     upstream = EXPERT_URL if lane == "expert" else COORDINATOR_URL
     if not _allowed_upstream(upstream):
@@ -205,6 +227,7 @@ def _call_advisory_model(
                 {
                     "request": payload,
                     "retrieval_evidence": retrieval.get("results") or [],
+                    "symbolic_evidence": symbolic.get("results") or [],
                     "controller_authority": "k1s",
                 },
                 indent=2,

@@ -169,14 +169,23 @@ def test_ai_fabric_router_advisory_includes_retrieval_and_lane_override(monkeypa
         lane: str,
         payload: dict[str, object],
         retrieval: dict[str, object],
+        symbolic: dict[str, object],
     ) -> dict[str, object]:
         return {
             "ok": False,
             "lane": lane,
-            "error": f"model disabled for {payload['query']} with {len(retrieval['results'])} hit",
+            "error": (
+                f"model disabled for {payload['query']} with {len(retrieval['results'])} "
+                f"retrieval hit and {len(symbolic['results'])} symbolic hit"
+            ),
         }
 
     monkeypatch.setattr(router, "_retrieve_evidence", fake_retrieve)
+    monkeypatch.setattr(
+        router,
+        "_query_symbolic_evidence",
+        lambda query, *, limit: {"ok": True, "results": [{"subject": query, "limit": limit}]},
+    )
     monkeypatch.setattr(router, "_call_advisory_model", fake_model)
 
     response = router._advisory_response(
@@ -187,4 +196,51 @@ def test_ai_fabric_router_advisory_includes_retrieval_and_lane_override(monkeypa
     assert response["authoritative"] is False
     assert response["lane"] == "coordinator"
     assert response["evidence"]["retrieval"]["results"][0]["path"] == "workerbee/notes.md"
+    assert response["evidence"]["symbolic"]["results"][0]["limit"] == 5
     assert response["model"]["lane"] == "coordinator"
+
+
+def test_ai_fabric_das_bridge_records_and_queries_facts(tmp_path: Path, monkeypatch) -> None:
+    das_bridge = _load_module(
+        EXAMPLE_ROOT / "images" / "das-bridge" / "app.py",
+        "ai_fabric_das_bridge_test",
+    )
+    monkeypatch.setattr(das_bridge, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(das_bridge, "FACT_LOG", tmp_path / "facts.jsonl")
+
+    fact = das_bridge._append_fact(
+        {
+            "namespace": "runtime",
+            "subject": "ai_fabric.track",
+            "predicate": "configured_as",
+            "object": "smoke",
+            "source": "test",
+        }
+    )
+    das_bridge._append_fact(
+        {
+            "namespace": "runtime",
+            "subject": "ai_fabric.symbolic_bridge",
+            "predicate": "validated_by",
+            "object": "newer-noisy-probe",
+            "source": "test",
+        }
+    )
+    project = das_bridge._append_fact(
+        {
+            "namespace": "runtime",
+            "subject": "workerbee.project",
+            "predicate": "name",
+            "object": "k1s-workerbee-dev-test",
+            "source": "test",
+        }
+    )
+    results = das_bridge._query_facts(
+        {"query": "ai_fabric track smoke workerbee project", "limit": 3}
+    )
+
+    assert fact["id"]
+    assert fact["namespace"] == "runtime"
+    assert results[0]["subject"] == "ai_fabric.track"
+    assert results[0]["object"] == "smoke"
+    assert results[1]["id"] == project["id"]

@@ -27,3 +27,8 @@ The router advisory endpoints now include retrieval evidence from the local
 corpus index. The indexer writes a manifest under
 `/srv/storage/k1s/ai-fabric-lab/artifacts/indexes` and serves `/v1/search` for
 router and direct runtime probes.
+
+The DAS bridge runs Hyperon DAS when the runtime image is built and keeps a
+JSONL fact audit under `/srv/storage/k1s/ai-fabric-lab/das`. Use
+`scripts/dev/ai_fabric_lab.py import-runtime-facts` from inside the lab network
+or with a reachable DAS URL to seed track, model, project, and repo facts.

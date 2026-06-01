@@ -6,9 +6,12 @@ from __future__ import annotations
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_ROOT = REPO_ROOT / "examples" / "ai-fabric-lab"
@@ -18,7 +21,7 @@ REVISION_HEX_LEN = 40
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
 
-from workerbee.manifests import validate_stage  # noqa: E402
+from workerbee.manifests import _load_yaml_documents, validate_stage  # noqa: E402
 
 CORPUS_SUFFIXES = {".md", ".py", ".txt", ".yaml", ".yml", ".json", ".toml"}
 CORPUS_IGNORE_DIRS = {
@@ -84,6 +87,14 @@ def main(argv: list[str] | None = None) -> int:
     track.add_argument("track")
     track.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
 
+    runtime_facts = sub.add_parser("import-runtime-facts", help="Import lab facts into DAS")
+    runtime_facts.add_argument("--stage", type=Path, default=None)
+    runtime_facts.add_argument("--das-url", default="http://127.0.0.1:8081")
+    runtime_facts.add_argument("--project", default="")
+    runtime_facts.add_argument("--track", default="")
+    runtime_facts.add_argument("--k1s-root", type=Path, default=REPO_ROOT.parent / "k1s")
+    runtime_facts.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+
     args = parser.parse_args(argv)
     root = args.root.expanduser().resolve()
     if args.cmd == "validate":
@@ -104,6 +115,16 @@ def main(argv: list[str] | None = None) -> int:
         return _emit(result, json_out=args.json)
     if args.cmd == "print-track":
         result = print_track(root, args.track)
+        return _emit(result, json_out=args.json)
+    if args.cmd == "import-runtime-facts":
+        result = import_runtime_facts(
+            root,
+            stage=args.stage,
+            das_url=args.das_url,
+            project=args.project,
+            track=args.track or None,
+            k1s_root=args.k1s_root,
+        )
         return _emit(result, json_out=args.json)
     return 2
 
@@ -244,6 +265,55 @@ def print_track(root: Path, track_name: str) -> dict[str, Any]:
     return {"ok": True, "track": track_name, "config": track}
 
 
+def import_runtime_facts(
+    root: Path,
+    *,
+    stage: Path | None = None,
+    das_url: str,
+    project: str,
+    track: str | None,
+    k1s_root: Path,
+) -> dict[str, Any]:
+    model_tracks = _load_json(root / "model-tracks.json")
+    stage_dir = (stage or root / "stage").expanduser().resolve()
+    selected_track = track or _stage_env_value(
+        stage_dir / "manifests" / "ai-coordinator.yaml",
+        "AI_FABRIC_TRACK",
+    )
+    selected_track = selected_track or str(model_tracks.get("default_track") or "")
+    tracks = model_tracks.get("tracks") if isinstance(model_tracks.get("tracks"), dict) else {}
+    config = tracks.get(selected_track)
+    if not isinstance(config, dict):
+        return {
+            "ok": False,
+            "findings": [
+                _finding("error", "UNKNOWN_TRACK", f"unknown model track: {selected_track}")
+            ],
+        }
+    facts = _runtime_facts(
+        project=project,
+        track=selected_track,
+        config=config,
+        k1s_root=k1s_root,
+    )
+    posted = []
+    findings = []
+    for fact in facts:
+        try:
+            posted.append(_post_das_fact(das_url, fact))
+        except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+            findings.append(_finding("error", "DAS_IMPORT_FAILED", str(exc)))
+            break
+    return {
+        "ok": not [item for item in findings if item["level"] == "error"],
+        "das_url": das_url,
+        "track": selected_track,
+        "facts": facts,
+        "posted": posted,
+        "findings": findings,
+    }
+
+
 def _iter_corpus_files(source_root: Path, source_name: str):
     seen: set[Path] = set()
     for relative_name in CORPUS_SOURCE_PATHS[source_name]:
@@ -261,6 +331,80 @@ def _iter_corpus_files(source_root: Path, source_name: str):
                 continue
             seen.add(relative)
             yield candidate
+
+
+def _runtime_facts(
+    *,
+    project: str,
+    track: str,
+    config: dict[str, Any],
+    k1s_root: Path,
+) -> list[dict[str, Any]]:
+    facts = [
+        _runtime_fact("ai_fabric.track", "configured_as", track),
+        _runtime_fact("ai_fabric.coordinator_model", "model", config["coordinator"]["model"]),
+        _runtime_fact("ai_fabric.coordinator_model", "revision", config["coordinator"]["revision"]),
+        _runtime_fact("ai_fabric.expert_model", "model", config["expert"]["model"]),
+        _runtime_fact("ai_fabric.expert_model", "revision", config["expert"]["revision"]),
+        _runtime_fact("repo.workerbee", "commit", _git_rev(REPO_ROOT)),
+    ]
+    if project:
+        facts.append(_runtime_fact("workerbee.project", "name", project))
+    k1s_rev = _git_rev(k1s_root.expanduser().resolve())
+    if k1s_rev:
+        facts.append(_runtime_fact("repo.k1s", "commit", k1s_rev))
+    return facts
+
+
+def _runtime_fact(subject: str, predicate: str, obj: Any) -> dict[str, Any]:
+    return {
+        "namespace": "runtime",
+        "subject": subject,
+        "predicate": predicate,
+        "object": obj,
+        "source": "ai_fabric_lab.py",
+    }
+
+
+def _git_rev(path: Path) -> str | None:
+    if not path.exists():
+        return None
+    result = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=path,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def _stage_env_value(path: Path, name: str) -> str | None:
+    if not path.is_file():
+        return None
+    docs = _load_yaml_documents(path.read_text(encoding="utf-8"))
+    for doc in docs:
+        env = ((doc.get("spec") or {}).get("env") or []) if isinstance(doc, dict) else []
+        for item in env:
+            if isinstance(item, dict) and item.get("name") == name:
+                value = item.get("value")
+                return str(value) if value is not None else None
+    return None
+
+
+def _post_das_fact(das_url: str, fact: dict[str, Any]) -> dict[str, Any]:
+    body = json.dumps(fact).encode("utf-8")
+    request = Request(  # noqa: S310 - user-provided lab URL for local DAS import.
+        f"{das_url.rstrip('/')}/v1/facts",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlopen(request, timeout=10) as response:  # noqa: S310
+        payload = json.loads(response.read().decode("utf-8"))
+    return payload if isinstance(payload, dict) else {}
 
 
 def _load_json(path: Path) -> dict[str, Any]:
