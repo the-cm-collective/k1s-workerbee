@@ -35,7 +35,7 @@ TRACE_DIR = Path(os.getenv("AI_ROUTER_TRACE_DIR", "/data/traces"))
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ai-fabric-router/0.2"
+    server_version = "ai-fabric-router/0.3"
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -237,6 +237,14 @@ def _advisory_trace(
             "retrieval_limit": 5,
             "symbolic_limit": 5,
         },
+        "evidence_contract": {
+            "retrieval_required": True,
+            "symbolic_required": True,
+            "retrieval_result_count": len(retrieval_results),
+            "symbolic_result_count": len(symbolic_results),
+            "selected_model_lane": lane,
+            "model_ok": bool(model.get("ok")),
+        },
         "retrieval": retrieval,
         "symbolic": symbolic,
         "model": model,
@@ -306,7 +314,7 @@ def _query_symbolic_evidence(query: str, *, limit: int) -> dict[str, Any]:
     try:
         with _post_json(
             f"{DAS_URL.rstrip('/')}/v1/query",
-            {"query": query, "limit": limit},
+            {"query": query, "limit": limit, "query_kind": "advisory"},
             timeout=SYMBOLIC_TIMEOUT,
         ) as response:
             payload = json.loads(response.read().decode("utf-8"))

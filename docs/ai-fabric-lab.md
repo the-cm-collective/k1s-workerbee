@@ -197,6 +197,23 @@ python3 scripts/dev/ai_fabric_lab.py import-phase-facts \
 `import-runtime-facts` also accepts `--phase-report` when a run should seed
 model, repo, project, and k1s phase facts in one pass.
 
+Runtime fact import uses the DAS bridge batch endpoint,
+`POST /v1/import/runtime`, and seeds a narrow relationship graph with these
+predicates:
+
+- `owns_service`
+- `depends_on`
+- `serves_model`
+- `requires_resource`
+- `produced_artifact`
+- `supports_advisory`
+
+The generated facts cover the staged services, stable WorkerBee host ports,
+router dependencies, model lanes, LoRA adapter registrations, resource
+requests/limits, storage mounts, runtime validation output files, and the
+retrieval/DAS/router advisory evidence roles. The DAS bridge exposes the active
+predicate list at `/v1/relationships`.
+
 The router queries `/v1/query` on the DAS bridge for advisory requests and
 passes symbolic facts to the selected model alongside retrieval evidence.
 Each DAS query also records F5-compatible local-first query evidence in
@@ -282,6 +299,13 @@ modules. Invalid adapter metadata is a failing result. `lora-adapter-smoke`
 runs the same preflight first, then checks `/v1/models?lane=expert`, sends one
 base expert chat request, sends one `k1s-code-expert-lora-smoke` chat request,
 and records both model IDs without treating the result as a quality benchmark.
+
+LoRA training remains deferred for this stage. The readiness contract lives in
+`examples/ai-fabric-lab/lora-readiness.json`, and the first expert-only eval set
+lives in `examples/ai-fabric-lab/prompts/k1s-code-expert-lora-eval.jsonl`.
+Use those artifacts to shape a future corpus manifest and baseline comparison;
+do not treat the current `k1s-code-expert-lora-smoke` adapter as an ops-quality
+claim.
 
 The runner writes `summary.json`, `requests.jsonl`, `gpu-samples.jsonl`,
 `health.json`, `lane-readiness.json`, `f5-evidence.json`, and a

@@ -1,0 +1,55 @@
+{
+  "api_version": "workerbee.ai-fabric.lora-readiness/v1",
+  "kind": "K1sCodeExpertLoraReadiness",
+  "adapter_target": {
+    "name": "k1s-code-expert",
+    "served_model_name": "k1s-code-expert",
+    "validation_adapter_name": "k1s-code-expert-lora-smoke",
+    "base_models": [
+      "Qwen/Qwen2.5-Coder-7B-Instruct",
+      "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ"
+    ],
+    "max_lora_rank": 16
+  },
+  "eval_prompts": "prompts/k1s-code-expert-lora-eval.jsonl",
+  "corpus_manifest_shape": {
+    "api_version": "workerbee.ai-fabric.lora-corpus/v1",
+    "required_top_level_fields": [
+      "api_version",
+      "adapter_name",
+      "base_model",
+      "created_at",
+      "documents",
+      "examples"
+    ],
+    "document_fields": [
+      "source_repo",
+      "path",
+      "kind",
+      "revision",
+      "include_reason"
+    ],
+    "example_fields": [
+      "id",
+      "task",
+      "input",
+      "expected_behavior",
+      "evidence_refs"
+    ]
+  },
+  "training_scope": {
+    "status": "deferred",
+    "reason": "LoRA plumbing is green, but real training waits for DAS-backed symbolic evidence and eval baselines.",
+    "include": [
+      "k1s and WorkerBee ops terminology",
+      "advisory-only controller authority language",
+      "evidence-first debugging workflows",
+      "runtime fact and F-phase vocabulary"
+    ],
+    "exclude": [
+      "live controller state as memorized facts",
+      "secrets or local tokens",
+      "claims that Hyperon/DAS is authoritative"
+    ]
+  }
+}

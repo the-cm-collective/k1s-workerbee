@@ -12,7 +12,7 @@ spec:
   replicas: 1
   env:
     - name: AI_DAS_CONFIG_REV
-      value: plumbing-hyperon-das-v1
+      value: plumbing-hyperon-das-v2
     - name: AI_DAS_BACKEND
       value: hyperon-das
     - name: MONGO_URL

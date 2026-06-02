@@ -12,7 +12,7 @@ spec:
   replicas: 1
   env:
     - name: AI_ROUTER_CONFIG_REV
-      value: symbolic-lora-adapter-smoke-v1
+      value: symbolic-lora-adapter-smoke-v2
     - name: COORDINATOR_URL
       value: http://ai-coordinator.ai-fabric-lab.svc.cluster.local:8001/v1/chat/completions
     - name: EXPERT_URL

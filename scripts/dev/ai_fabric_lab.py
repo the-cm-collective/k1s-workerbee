@@ -68,6 +68,42 @@ ADAPTER_EXPECTED_BASE_MODELS = (
     "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ",
 )
 ADAPTER_MAX_LORA_RANK = 16
+RUNTIME_FACT_SOURCE = "workerbee.ai-fabric.runtime-facts/v1"
+RUNTIME_RELATIONSHIP_PREDICATES = (
+    "owns_service",
+    "depends_on",
+    "serves_model",
+    "requires_resource",
+    "produced_artifact",
+    "supports_advisory",
+)
+AI_FABRIC_SERVICE_DEPENDENCIES = {
+    "ai-router": (
+        "ai-coordinator",
+        "ai-expert",
+        "retrieval-indexer",
+        "das-bridge",
+        "qdrant",
+    ),
+    "retrieval-indexer": ("qdrant",),
+    "das-bridge": ("mongo",),
+}
+AI_FABRIC_SERVICE_ADVISORY_SUPPORT = {
+    "ai-router": ("advisory_trace", "lane_routing"),
+    "retrieval-indexer": ("retrieval_evidence", "corpus_search"),
+    "das-bridge": ("symbolic_evidence", "f5_query_evidence"),
+    "ai-coordinator": ("coordinator_advisory_lane",),
+    "ai-expert": ("expert_code_advisory_lane",),
+}
+AI_FABRIC_SERVICE_STORAGE_RESOURCES = {
+    "ai-coordinator": ("models/hf-cache", "adapters/expert", "runs"),
+    "ai-expert": ("models/hf-cache", "adapters/expert", "runs"),
+    "retrieval-indexer": ("corpus", "artifacts/indexes"),
+    "das-bridge": ("das",),
+    "qdrant": ("qdrant",),
+    "mongo": ("mongo",),
+    "redis": ("redis",),
+}
 
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
@@ -430,6 +466,7 @@ def import_runtime_facts(
         track=selected_track,
         config=config,
         k1s_root=k1s_root,
+        stage_dir=stage_dir,
     )
     findings: list[dict[str, str]] = []
     if phase_report is not None:
@@ -437,7 +474,7 @@ def import_runtime_facts(
             facts.extend(_phase_report_facts(_load_json(phase_report)))
         except ValueError as exc:
             findings.append(_finding("error", "PHASE_REPORT_INVALID", str(exc)))
-    posted = [] if findings else _post_facts(das_url, facts, findings)
+    posted = {} if findings else _post_runtime_facts(das_url, facts, findings)
     return {
         "ok": not [item for item in findings if item["level"] == "error"],
         "das_url": das_url,
@@ -1085,14 +1122,32 @@ def _advisory_prompt_record(
     symbolic_results = symbolic.get("results") if isinstance(symbolic.get("results"), list) else []
     model = data.get("model") if isinstance(data.get("model"), dict) else {}
     raw_model = model.get("raw") if isinstance(model.get("raw"), dict) else {}
+    trace = data.get("decision_trace") if isinstance(data.get("decision_trace"), dict) else {}
+    trace_retrieval = trace.get("retrieval") if isinstance(trace.get("retrieval"), dict) else {}
+    trace_symbolic = trace.get("symbolic") if isinstance(trace.get("symbolic"), dict) else {}
+    trace_retrieval_results = (
+        trace_retrieval.get("results")
+        if isinstance(trace_retrieval.get("results"), list)
+        else []
+    )
+    trace_symbolic_results = (
+        trace_symbolic.get("results")
+        if isinstance(trace_symbolic.get("results"), list)
+        else []
+    )
+    min_retrieval_hits = int(prompt.get("min_retrieval_hits") or 1)
+    min_symbolic_facts = int(prompt.get("min_symbolic_facts") or 1)
     checks = {
         "http_ok": response.get("status") == 200,
         "expected_lane": data.get("lane") == expected_lane,
         "model_ok": bool(model.get("ok")),
-        "retrieval_count": len(retrieval_results) >= int(prompt.get("min_retrieval_hits") or 1),
-        "symbolic_count": len(symbolic_results) >= int(prompt.get("min_symbolic_facts") or 1),
+        "retrieval_count": len(retrieval_results) >= min_retrieval_hits,
+        "symbolic_count": len(symbolic_results) >= min_symbolic_facts,
         "authoritative_false": data.get("authoritative") is False,
         "trace_persisted": bool(data.get("trace_id")) and bool(data.get("trace_path")),
+        "trace_selected_lane": trace.get("selected_lane") == expected_lane,
+        "trace_retrieval_packet": len(trace_retrieval_results) >= min_retrieval_hits,
+        "trace_symbolic_packet": len(trace_symbolic_results) >= min_symbolic_facts,
     }
     return {
         "id": str(prompt["id"]),
@@ -1109,6 +1164,8 @@ def _advisory_prompt_record(
         "authoritative": data.get("authoritative"),
         "trace_id": data.get("trace_id"),
         "trace_path": data.get("trace_path"),
+        "trace_retrieval_hits": len(trace_retrieval_results),
+        "trace_symbolic_facts": len(trace_symbolic_results),
         "checks": checks,
         "ok": all(checks.values()),
         "error": response.get("error"),
@@ -1842,13 +1899,49 @@ def _runtime_facts(
     track: str,
     config: dict[str, Any],
     k1s_root: Path,
+    stage_dir: Path,
 ) -> list[dict[str, Any]]:
     facts = [
-        _runtime_fact("ai_fabric.track", "configured_as", track),
-        _runtime_fact("ai_fabric.coordinator_model", "model", config["coordinator"]["model"]),
-        _runtime_fact("ai_fabric.coordinator_model", "revision", config["coordinator"]["revision"]),
-        _runtime_fact("ai_fabric.expert_model", "model", config["expert"]["model"]),
-        _runtime_fact("ai_fabric.expert_model", "revision", config["expert"]["revision"]),
+        _runtime_fact(
+            "ai_fabric.relationship_vocabulary",
+            "api_version",
+            RUNTIME_FACT_SOURCE,
+            source=RUNTIME_FACT_SOURCE,
+        ),
+        *[
+            _runtime_fact(
+                "ai_fabric.relationship_vocabulary",
+                "predicate",
+                predicate,
+                source=RUNTIME_FACT_SOURCE,
+            )
+            for predicate in RUNTIME_RELATIONSHIP_PREDICATES
+        ],
+        _runtime_fact("ai_fabric.track", "configured_as", track, source=RUNTIME_FACT_SOURCE),
+        _runtime_fact(
+            "ai_fabric.coordinator_model",
+            "model",
+            config["coordinator"]["model"],
+            source=RUNTIME_FACT_SOURCE,
+        ),
+        _runtime_fact(
+            "ai_fabric.coordinator_model",
+            "revision",
+            config["coordinator"]["revision"],
+            source=RUNTIME_FACT_SOURCE,
+        ),
+        _runtime_fact(
+            "ai_fabric.expert_model",
+            "model",
+            config["expert"]["model"],
+            source=RUNTIME_FACT_SOURCE,
+        ),
+        _runtime_fact(
+            "ai_fabric.expert_model",
+            "revision",
+            config["expert"]["revision"],
+            source=RUNTIME_FACT_SOURCE,
+        ),
         _runtime_fact("repo.workerbee", "commit", _git_rev(REPO_ROOT)),
     ]
     if project:
@@ -1856,7 +1949,290 @@ def _runtime_facts(
     k1s_rev = _git_rev(k1s_root.expanduser().resolve())
     if k1s_rev:
         facts.append(_runtime_fact("repo.k1s", "commit", k1s_rev))
+    facts.extend(
+        _stage_runtime_facts(
+            stage_dir=stage_dir,
+            project=project,
+            track=track,
+            config=config,
+        )
+    )
     return facts
+
+
+def _stage_runtime_facts(
+    *,
+    stage_dir: Path,
+    project: str,
+    track: str,
+    config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    facts: list[dict[str, Any]] = []
+    service_subjects: dict[str, str] = {}
+    for doc in _stage_deployments(stage_dir):
+        metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+        spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
+        name = str(metadata.get("name") or "")
+        if not name:
+            continue
+        namespace = str(metadata.get("namespace") or "default")
+        subject = f"ai_fabric.service.{name}"
+        service_subjects[name] = subject
+        facts.extend(
+            [
+                _runtime_fact("ai_fabric.lab", "owns_service", subject, source=RUNTIME_FACT_SOURCE),
+                _runtime_fact(subject, "name", name, source=RUNTIME_FACT_SOURCE),
+                _runtime_fact(subject, "namespace", namespace, source=RUNTIME_FACT_SOURCE),
+                _runtime_fact(subject, "kind", "Deployment", source=RUNTIME_FACT_SOURCE),
+                _runtime_fact(subject, "image", spec.get("image"), source=RUNTIME_FACT_SOURCE),
+                _runtime_fact(subject, "track", track, source=RUNTIME_FACT_SOURCE),
+            ]
+        )
+        if project:
+            facts.append(
+                _runtime_fact(
+                    "workerbee.project",
+                    "owns_service",
+                    subject,
+                    source=RUNTIME_FACT_SOURCE,
+                )
+            )
+        service = spec.get("service") if isinstance(spec.get("service"), dict) else {}
+        if service:
+            facts.extend(_service_port_facts(subject, service))
+        resources = spec.get("resources") if isinstance(spec.get("resources"), dict) else {}
+        facts.extend(_resource_facts(subject, resources))
+        for storage_resource in AI_FABRIC_SERVICE_STORAGE_RESOURCES.get(name, ()):
+            facts.append(
+                _runtime_fact(
+                    subject,
+                    "requires_resource",
+                    {"kind": "storage", "path": storage_resource},
+                    source=RUNTIME_FACT_SOURCE,
+                )
+            )
+        for advisory_capability in AI_FABRIC_SERVICE_ADVISORY_SUPPORT.get(name, ()):
+            facts.append(
+                _runtime_fact(
+                    subject,
+                    "supports_advisory",
+                    advisory_capability,
+                    source=RUNTIME_FACT_SOURCE,
+                )
+            )
+
+    for name, dependencies in AI_FABRIC_SERVICE_DEPENDENCIES.items():
+        subject = service_subjects.get(name)
+        if not subject:
+            continue
+        for dependency in dependencies:
+            dependency_subject = service_subjects.get(dependency)
+            if dependency_subject:
+                facts.append(
+                    _runtime_fact(
+                        subject,
+                        "depends_on",
+                        dependency_subject,
+                        source=RUNTIME_FACT_SOURCE,
+                    )
+                )
+
+    facts.extend(_model_runtime_facts(config=config, service_subjects=service_subjects))
+    facts.extend(_validation_artifact_facts())
+    return facts
+
+
+def _stage_deployments(stage_dir: Path) -> list[dict[str, Any]]:
+    manifests_dir = stage_dir / "manifests"
+    deployments: list[dict[str, Any]] = []
+    for path in sorted(manifests_dir.glob("*.yaml")):
+        for doc in _load_yaml_documents(path.read_text(encoding="utf-8")):
+            if isinstance(doc, dict) and doc.get("kind") == "Deployment":
+                deployments.append(doc)
+    return deployments
+
+
+def _service_port_facts(subject: str, service: dict[str, Any]) -> list[dict[str, Any]]:
+    facts: list[dict[str, Any]] = []
+    service_port = service.get("port")
+    target_port = service.get("targetPort")
+    if service_port is not None:
+        facts.append(
+            _runtime_fact(subject, "service_port", service_port, source=RUNTIME_FACT_SOURCE)
+        )
+        try:
+            port_value = int(service_port)
+        except (TypeError, ValueError):
+            port_value = 0
+        if port_value in {18180, 18181, 18182}:
+            facts.append(
+                _runtime_fact(
+                    subject,
+                    "host_alias",
+                    f"http://127.0.0.1:{port_value}",
+                    source=RUNTIME_FACT_SOURCE,
+                )
+            )
+    if target_port is not None:
+        facts.append(
+            _runtime_fact(subject, "target_port", target_port, source=RUNTIME_FACT_SOURCE)
+        )
+    return facts
+
+
+def _resource_facts(subject: str, resources: dict[str, Any]) -> list[dict[str, Any]]:
+    facts: list[dict[str, Any]] = []
+    for scope in ("requests", "limits"):
+        values = resources.get(scope)
+        if not isinstance(values, dict):
+            continue
+        for resource_name, value in sorted(values.items(), key=lambda item: str(item[0])):
+            facts.append(
+                _runtime_fact(
+                    subject,
+                    "requires_resource",
+                    {
+                        "kind": "compute",
+                        "scope": scope,
+                        "name": str(resource_name),
+                        "value": value,
+                    },
+                    source=RUNTIME_FACT_SOURCE,
+                )
+            )
+    return facts
+
+
+def _model_runtime_facts(
+    *,
+    config: dict[str, Any],
+    service_subjects: dict[str, str],
+) -> list[dict[str, Any]]:
+    lane_services = {
+        "coordinator": "ai-coordinator",
+        "expert": "ai-expert",
+    }
+    facts: list[dict[str, Any]] = []
+    for lane, service_name in lane_services.items():
+        lane_config = config.get(lane)
+        if not isinstance(lane_config, dict):
+            continue
+        model_subject = f"ai_fabric.model.{lane}"
+        service_subject = service_subjects.get(service_name)
+        facts.extend(
+            [
+                _runtime_fact(model_subject, "lane", lane, source=RUNTIME_FACT_SOURCE),
+                _runtime_fact(
+                    model_subject,
+                    "model",
+                    lane_config.get("model"),
+                    source=RUNTIME_FACT_SOURCE,
+                ),
+                _runtime_fact(
+                    model_subject,
+                    "revision",
+                    lane_config.get("revision"),
+                    source=RUNTIME_FACT_SOURCE,
+                ),
+                _runtime_fact(
+                    model_subject,
+                    "served_model_name",
+                    lane_config.get("served_model_name"),
+                    source=RUNTIME_FACT_SOURCE,
+                ),
+                _runtime_fact(
+                    model_subject,
+                    "max_model_len",
+                    lane_config.get("max_model_len"),
+                    source=RUNTIME_FACT_SOURCE,
+                ),
+            ]
+        )
+        if service_subject:
+            facts.append(
+                _runtime_fact(
+                    service_subject,
+                    "serves_model",
+                    model_subject,
+                    source=RUNTIME_FACT_SOURCE,
+                )
+            )
+        lora_modules = lane_config.get("lora_modules")
+        if isinstance(lora_modules, list):
+            for module in lora_modules:
+                if isinstance(module, dict):
+                    facts.extend(
+                        _lora_module_facts(
+                            lane=lane,
+                            module=module,
+                            model_subject=model_subject,
+                            service_subject=service_subject,
+                        )
+                    )
+    return facts
+
+
+def _lora_module_facts(
+    *,
+    lane: str,
+    module: dict[str, Any],
+    model_subject: str,
+    service_subject: str | None,
+) -> list[dict[str, Any]]:
+    name = str(module.get("name") or "")
+    if not name:
+        return []
+    adapter_subject = f"ai_fabric.adapter.{name}"
+    facts = [
+        _runtime_fact(adapter_subject, "lane", lane, source=RUNTIME_FACT_SOURCE),
+        _runtime_fact(adapter_subject, "name", name, source=RUNTIME_FACT_SOURCE),
+        _runtime_fact(
+            adapter_subject,
+            "path",
+            module.get("path"),
+            source=RUNTIME_FACT_SOURCE,
+        ),
+        _runtime_fact(
+            adapter_subject,
+            "base_model",
+            module.get("base_model_name"),
+            source=RUNTIME_FACT_SOURCE,
+        ),
+        _runtime_fact(
+            adapter_subject,
+            "depends_on",
+            model_subject,
+            source=RUNTIME_FACT_SOURCE,
+        ),
+        _runtime_fact(
+            adapter_subject,
+            "requires_resource",
+            {"kind": "adapter_path", "path": module.get("path")},
+            source=RUNTIME_FACT_SOURCE,
+        ),
+    ]
+    if service_subject:
+        facts.append(
+            _runtime_fact(
+                service_subject,
+                "serves_model",
+                adapter_subject,
+                source=RUNTIME_FACT_SOURCE,
+            )
+        )
+    return facts
+
+
+def _validation_artifact_facts() -> list[dict[str, Any]]:
+    return [
+        _runtime_fact(
+            "ai_fabric.runtime_validation",
+            "produced_artifact",
+            f"runs/<run-id>/{filename}",
+            source=RUNTIME_FACT_SOURCE,
+        )
+        for filename in RUNTIME_OUTPUT_FILES
+    ]
 
 
 def _phase_report_facts(report: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2170,6 +2546,27 @@ def _post_das_fact(das_url: str, fact: dict[str, Any]) -> dict[str, Any]:
     )
     with urlopen(request, timeout=10) as response:  # noqa: S310
         payload = json.loads(response.read().decode("utf-8"))
+    return payload if isinstance(payload, dict) else {}
+
+
+def _post_runtime_facts(
+    das_url: str,
+    facts: list[dict[str, Any]],
+    findings: list[dict[str, str]],
+) -> dict[str, Any]:
+    body = json.dumps({"facts": facts}).encode("utf-8")
+    request = Request(  # noqa: S310 - user-provided lab URL for local DAS import.
+        f"{das_url.rstrip('/')}/v1/import/runtime",
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=20) as response:  # noqa: S310
+            payload = json.loads(response.read().decode("utf-8"))
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        findings.append(_finding("error", "DAS_RUNTIME_IMPORT_FAILED", str(exc)))
+        return {}
     return payload if isinstance(payload, dict) else {}
 
 

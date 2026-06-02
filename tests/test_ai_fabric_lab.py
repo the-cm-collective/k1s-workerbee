@@ -301,6 +301,107 @@ def test_ai_fabric_lab_runtime_suite_contract() -> None:
     ) == {"duration_seconds": 900, "workers": 6, "gpu_sample_seconds": 15}
 
 
+def test_ai_fabric_runtime_relationship_vocabulary_is_stable() -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_relationship_vocabulary_test")
+
+    assert lab.RUNTIME_RELATIONSHIP_PREDICATES == (
+        "owns_service",
+        "depends_on",
+        "serves_model",
+        "requires_resource",
+        "produced_artifact",
+        "supports_advisory",
+    )
+
+
+def test_ai_fabric_runtime_facts_cover_services_dependencies_and_lora(
+    tmp_path: Path,
+) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_runtime_facts_test")
+    tracks = json.loads((EXAMPLE_ROOT / "model-tracks.json").read_text(encoding="utf-8"))[
+        "tracks"
+    ]
+
+    facts = lab._runtime_facts(
+        project="k1s-workerbee-test",
+        track="lora-adapter-smoke",
+        config=tracks["lora-adapter-smoke"],
+        k1s_root=tmp_path / "missing-k1s",
+        stage_dir=EXAMPLE_ROOT / "stage-lora-adapter-smoke",
+    )
+
+    assert {
+        "namespace": "runtime",
+        "subject": "workerbee.project",
+        "predicate": "owns_service",
+        "object": "ai_fabric.service.ai-router",
+        "source": "workerbee.ai-fabric.runtime-facts/v1",
+    } in facts
+    assert {
+        "namespace": "runtime",
+        "subject": "ai_fabric.service.ai-router",
+        "predicate": "depends_on",
+        "object": "ai_fabric.service.das-bridge",
+        "source": "workerbee.ai-fabric.runtime-facts/v1",
+    } in facts
+    assert {
+        "namespace": "runtime",
+        "subject": "ai_fabric.service.ai-expert",
+        "predicate": "serves_model",
+        "object": "ai_fabric.adapter.k1s-code-expert-lora-smoke",
+        "source": "workerbee.ai-fabric.runtime-facts/v1",
+    } in facts
+    assert {
+        "namespace": "runtime",
+        "subject": "ai_fabric.service.das-bridge",
+        "predicate": "supports_advisory",
+        "object": "symbolic_evidence",
+        "source": "workerbee.ai-fabric.runtime-facts/v1",
+    } in facts
+    assert any(
+        fact["subject"] == "ai_fabric.service.ai-router"
+        and fact["predicate"] == "host_alias"
+        and fact["object"] == "http://127.0.0.1:18180"
+        for fact in facts
+    )
+    assert any(
+        fact["subject"] == "ai_fabric.runtime_validation"
+        and fact["predicate"] == "produced_artifact"
+        and str(fact["object"]).endswith("/summary.json")
+        for fact in facts
+    )
+
+
+def test_ai_fabric_import_runtime_facts_batches_to_das(monkeypatch) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_runtime_import_batch_test")
+    posted: list[dict[str, object]] = []
+
+    def fake_post(
+        das_url: str,
+        facts: list[dict[str, object]],
+        findings: list[dict[str, str]],
+    ) -> dict[str, object]:
+        del findings
+        posted.extend(facts)
+        return {"ok": True, "url": das_url, "imported": len(facts)}
+
+    monkeypatch.setattr(lab, "_post_runtime_facts", fake_post)
+
+    result = lab.import_runtime_facts(
+        EXAMPLE_ROOT,
+        stage=EXAMPLE_ROOT / "stage-lora-adapter-smoke",
+        das_url="http://das.local",
+        project="k1s-workerbee-test",
+        track="lora-adapter-smoke",
+        k1s_root=REPO_ROOT.parent / "missing-k1s",
+    )
+
+    assert result["ok"] is True
+    assert result["posted"]["imported"] == len(posted)
+    assert posted
+    assert all(item["namespace"] == "runtime" for item in posted)
+
+
 def test_ai_fabric_lab_adapter_preflight_blocks_without_payload(tmp_path: Path) -> None:
     lab = _load_module(SCRIPT, "ai_fabric_lab_adapter_preflight_test")
 
@@ -797,6 +898,10 @@ def test_ai_fabric_router_advisory_includes_retrieval_and_lane_override(
     assert trace["controller_authority"] == "k1s"
     assert trace["request_contract"]["max_candidates"] == 5
     assert trace["response_contract"]["authoritative"] is False
+    assert trace["evidence_contract"]["retrieval_required"] is True
+    assert trace["evidence_contract"]["symbolic_required"] is True
+    assert trace["evidence_contract"]["retrieval_result_count"] == 1
+    assert trace["evidence_contract"]["symbolic_result_count"] == 1
     assert trace["retrieval"]["results"][0]["path"] == "workerbee/notes.md"
     assert trace["symbolic"]["results"][0]["subject"] == trace["query"]
     assert trace["replay_status"] == "recorded"
@@ -905,6 +1010,22 @@ def test_ai_fabric_das_bridge_records_and_queries_facts(tmp_path: Path, monkeypa
     assert results[1]["id"] == project["id"]
 
 
+def test_ai_fabric_das_bridge_exposes_relationship_vocabulary() -> None:
+    das_bridge = _load_module(
+        EXAMPLE_ROOT / "images" / "das-bridge" / "app.py",
+        "ai_fabric_das_bridge_relationships_test",
+    )
+
+    assert das_bridge.RELATIONSHIP_PREDICATES == (
+        "owns_service",
+        "depends_on",
+        "serves_model",
+        "requires_resource",
+        "produced_artifact",
+        "supports_advisory",
+    )
+
+
 def test_ai_fabric_das_bridge_records_f5_query_evidence(tmp_path: Path, monkeypatch) -> None:
     das_bridge = _load_module(
         EXAMPLE_ROOT / "images" / "das-bridge" / "app.py",
@@ -938,3 +1059,26 @@ def test_ai_fabric_das_bridge_records_f5_query_evidence(tmp_path: Path, monkeypa
         "das_query_trace",
         "cognitive_signal",
     ]
+
+
+def test_ai_fabric_lora_readiness_artifacts_are_valid() -> None:
+    readiness = json.loads(
+        (EXAMPLE_ROOT / "lora-readiness.json").read_text(encoding="utf-8")
+    )
+    prompt_path = EXAMPLE_ROOT / readiness["eval_prompts"]
+    prompts = [
+        json.loads(line)
+        for line in prompt_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+    assert readiness["api_version"] == "workerbee.ai-fabric.lora-readiness/v1"
+    assert readiness["adapter_target"]["served_model_name"] == "k1s-code-expert"
+    assert readiness["training_scope"]["status"] == "deferred"
+    assert readiness["corpus_manifest_shape"]["api_version"] == (
+        "workerbee.ai-fabric.lora-corpus/v1"
+    )
+    assert len(prompts) >= 6
+    assert {item["lane"] for item in prompts} == {"expert"}
+    assert all(item["min_retrieval_hits"] >= 1 for item in prompts)
+    assert all(item["min_symbolic_facts"] >= 1 for item in prompts)

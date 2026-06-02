@@ -23,6 +23,14 @@ CELL_ID = os.getenv("AI_FABRIC_DAS_CELL_ID", "runtime")
 FACT_NODE_TYPE = "Concept"
 PREDICATE_NODE_TYPE = "Predicate"
 FACT_LINK_TYPE = "ai-fabric:fact"
+RELATIONSHIP_PREDICATES = (
+    "owns_service",
+    "depends_on",
+    "serves_model",
+    "requires_resource",
+    "produced_artifact",
+    "supports_advisory",
+)
 TOKEN_RE = re.compile(r"[a-z0-9_.:-]+")
 QUERY_STOPWORDS = {
     "about",
@@ -141,7 +149,7 @@ FACT_LOCK = threading.RLock()
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ai-fabric-das-bridge/0.2"
+    server_version = "ai-fabric-das-bridge/0.3"
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -165,6 +173,15 @@ class Handler(BaseHTTPRequestHandler):
             query = parse_qs(parsed.query)
             limit = int((query.get("limit") or ["100"])[0])
             self._json({"ok": True, "records": _read_f5_evidence(limit=limit)})
+            return
+        if parsed.path == "/v1/relationships":
+            self._json(
+                {
+                    "ok": True,
+                    "api_version": "workerbee.ai-fabric.relationships/v1",
+                    "predicates": list(RELATIONSHIP_PREDICATES),
+                }
+            )
             return
         self.send_error(404)
 
