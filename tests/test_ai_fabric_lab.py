@@ -86,6 +86,15 @@ def test_ai_fabric_lab_has_quality_track_with_qwen_coordinator() -> None:
             assert len(track[lane]["revision"]) == 40
 
 
+def test_ai_fabric_lab_expert_served_name_uses_code_expert_convention() -> None:
+    model_tracks = json.loads((EXAMPLE_ROOT / "model-tracks.json").read_text(encoding="utf-8"))
+    router = _load_module(EXAMPLE_ROOT / "images" / "router" / "app.py", "ai_fabric_router")
+
+    assert router.EXPERT_MODEL == "k1s-code-expert"
+    for track in model_tracks["tracks"].values():
+        assert track["expert"]["served_model_name"] == "k1s-code-expert"
+
+
 def test_ai_fabric_lab_stage_is_workerbee_valid() -> None:
     validation = validate_stage(EXAMPLE_ROOT / "stage")
 
