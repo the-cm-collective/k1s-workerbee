@@ -253,6 +253,13 @@ def test_ai_fabric_lab_lora_adapter_smoke_stage_is_workerbee_valid() -> None:
         )
         == "lora-adapter-smoke"
     )
+    assert (
+        _env_value(
+            EXAMPLE_ROOT / "stage-lora-adapter-smoke" / "manifests" / "ai-router.yaml",
+            "AI_ROUTER_ADVISORY_MODEL_TIMEOUT",
+        )
+        == "75"
+    )
 
 
 def test_ai_fabric_lab_stages_use_dedicated_workerbee_service_ports() -> None:

@@ -95,8 +95,10 @@ vLLM can allocate KV cache with LoRA support enabled. Use
 adapter is present under
 `/srv/storage/k1s/ai-fabric-lab/adapters/expert/validation`. That stage serves
 the base expert as `k1s-code-expert` and statically registers the adapter as
-`k1s-code-expert-lora-smoke`. These stages use the same router, DAS, retrieval,
-and storage layout.
+`k1s-code-expert-lora-smoke`. It also raises the router advisory model timeout
+to 75 seconds because the expert-lane quality prompts can approach the default
+45 second budget on the resident Qwen plus LoRA runtime. These stages use the
+same router, DAS, retrieval, and storage layout.
 
 The model image wraps the pinned
 `vllm/vllm-openai:v0.22.0-x86_64-cu129-ubuntu2404` image. The stage deploys the

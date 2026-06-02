@@ -23,6 +23,8 @@ spec:
       value: http://das-bridge.ai-fabric-lab.svc.cluster.local:8081
     - name: QDRANT_URL
       value: http://qdrant.ai-fabric-lab.svc.cluster.local:6333
+    - name: AI_ROUTER_ADVISORY_MODEL_TIMEOUT
+      value: "75"
   ports:
     - name: http
       containerPort: 8080
