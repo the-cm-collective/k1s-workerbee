@@ -732,10 +732,14 @@ spec:
     assert result["alias_refresh"]["service_workloads"] == [
         {"namespace": "rawform", "name": "minio"}
     ]
+    assert result["alias_refresh"]["published_service_workloads"] == [
+        {"namespace": "rawform", "name": "api"},
+        {"namespace": "rawform", "name": "minio"},
+    ]
     assert result["alias_refresh"]["reapplied"] == 2
 
 
-def test_local_containerd_native_deploy_skips_alias_refresh_without_references(
+def test_local_containerd_native_deploy_refreshes_published_services_without_references(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -808,9 +812,17 @@ spec:
     result = deploy_local_stage(supervisor=sup, stage_dir=stage, namespace=None, timeout=60)
 
     assert result["ok"] is True
-    assert calls == ["api.k1s.yaml", "minio.k1s.yaml"]
-    assert result["alias_refresh"]["enabled"] is False
-    assert result["alias_refresh"]["reason"] == "no referenced native k1s service workloads"
+    assert calls == ["api.k1s.yaml", "minio.k1s.yaml", "api.k1s.yaml", "minio.k1s.yaml"]
+    assert result["alias_refresh"]["enabled"] is True
+    assert result["alias_refresh"]["service_workloads"] == [
+        {"namespace": "rawform", "name": "api"},
+        {"namespace": "rawform", "name": "minio"},
+    ]
+    assert result["alias_refresh"]["published_service_workloads"] == [
+        {"namespace": "rawform", "name": "api"},
+        {"namespace": "rawform", "name": "minio"},
+    ]
+    assert result["alias_refresh"]["reapplied"] == 2
 
 
 def test_local_containerd_native_deploy_does_not_reapply_when_service_not_ready(

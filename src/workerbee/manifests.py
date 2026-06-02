@@ -543,12 +543,20 @@ def _refresh_containerd_service_aliases(
             "reason": "no native k1s manifests",
             "runtime": runtime,
         }
-    service_workloads = _native_referenced_service_workloads(validation, namespace=namespace)
+    referenced_workloads = _native_referenced_service_workloads(
+        validation,
+        namespace=namespace,
+    )
+    published_workloads = _native_published_service_workloads(
+        validation,
+        namespace=namespace,
+    )
+    service_workloads = referenced_workloads or published_workloads
     if not service_workloads:
         return {
             "ok": True,
             "enabled": False,
-            "reason": "no referenced native k1s service workloads",
+            "reason": "no native k1s service workloads requiring alias refresh",
             "runtime": runtime,
         }
     if info is None:
@@ -565,6 +573,7 @@ def _refresh_containerd_service_aliases(
             "enabled": True,
             "runtime": runtime,
             "service_workloads": service_workloads,
+            "published_service_workloads": published_workloads,
             "ready": False,
             "waited_seconds": wait["waited_seconds"],
             "statuses": wait.get("statuses", []),
@@ -580,6 +589,7 @@ def _refresh_containerd_service_aliases(
         "enabled": True,
         "runtime": runtime,
         "service_workloads": service_workloads,
+        "published_service_workloads": published_workloads,
         "ready": wait["ready"],
         "waited_seconds": wait["waited_seconds"],
         "reapplied": len(reapplies),
@@ -640,6 +650,38 @@ def _native_referenced_service_workloads(
         )
     ]
     return root_providers or referenced_providers
+
+
+def _native_published_service_workloads(
+    validation: dict[str, Any],
+    *,
+    namespace: str | None,
+) -> list[dict[str, str]]:
+    workloads: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for detail in validation.get("manifest_details", []):
+        if not isinstance(detail, dict) or detail.get("input_kind") != NATIVE_K1S:
+            continue
+        path = Path(str(detail.get("path") or ""))
+        if not path.is_file():
+            continue
+        docs = _load_yaml_documents(path.read_text(encoding="utf-8"))
+        for doc in docs:
+            if not isinstance(doc, dict) or _api_version(doc) != "ae.dev/v1alpha1":
+                continue
+            spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
+            service = spec.get("service") if isinstance(spec.get("service"), dict) else {}
+            if service.get("port") is None and not service.get("ports"):
+                continue
+            metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+            name = str(metadata.get("name") or path.stem)
+            ns = str(namespace or metadata.get("namespace") or "default")
+            key = (ns, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            workloads.append({"namespace": ns, "name": name})
+    return workloads
 
 
 def _provider_depends_on_provider(
