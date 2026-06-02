@@ -1,0 +1,43 @@
+apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: ai-router
+  namespace: ai-fabric-lab
+  labels:
+    app: ai-router
+    workerbee.k1s.dev/project: ai-fabric-lab
+spec:
+  image: localhost/workerbee-ai-fabric-router:dev
+  imagePullPolicy: Never
+  replicas: 1
+  env:
+    - name: AI_ROUTER_CONFIG_REV
+      value: symbolic-lora-adapter-smoke-v1
+    - name: COORDINATOR_URL
+      value: http://ai-coordinator.ai-fabric-lab.svc.cluster.local:8001/v1/chat/completions
+    - name: EXPERT_URL
+      value: http://ai-expert.ai-fabric-lab.svc.cluster.local:8002/v1/chat/completions
+    - name: RETRIEVAL_URL
+      value: http://retrieval-indexer.ai-fabric-lab.svc.cluster.local:8082
+    - name: DAS_URL
+      value: http://das-bridge.ai-fabric-lab.svc.cluster.local:8081
+    - name: QDRANT_URL
+      value: http://qdrant.ai-fabric-lab.svc.cluster.local:6333
+  ports:
+    - name: http
+      containerPort: 8080
+  service:
+    port: 18180
+    targetPort: 8080
+  health:
+    readiness:
+      httpGet: { path: /healthz, port: 8080 }
+      initialDelaySeconds: 2
+      periodSeconds: 5
+  resources:
+    requests:
+      cpu: 0.1
+      memory: 128Mi
+    limits:
+      cpu: 1
+      memory: 512Mi

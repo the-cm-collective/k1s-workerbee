@@ -65,6 +65,7 @@ def test_ai_fabric_lab_static_bundle_validates() -> None:
     assert payload["tracks"] == [
         "baseline",
         "legacy-smollm-smoke",
+        "lora-adapter-smoke",
         "lora-plumbing",
         "quality",
         "smoke",
@@ -78,6 +79,7 @@ def test_ai_fabric_lab_has_quality_track_with_qwen_coordinator() -> None:
     baseline = model_tracks["tracks"]["baseline"]
     quality = model_tracks["tracks"]["quality"]
     lora_plumbing = model_tracks["tracks"]["lora-plumbing"]
+    lora_adapter = model_tracks["tracks"]["lora-adapter-smoke"]
     legacy = model_tracks["tracks"]["legacy-smollm-smoke"]
 
     assert model_tracks["run_defaults"]["attention_backend"] == "TRITON_ATTN"
@@ -97,6 +99,19 @@ def test_ai_fabric_lab_has_quality_track_with_qwen_coordinator() -> None:
     assert lora_plumbing["expert"]["enable_lora"] is True
     assert lora_plumbing["expert"]["max_model_len"] == 4096
     assert lora_plumbing["expert"]["gpu_memory_utilization"] == 0.44
+    assert lora_adapter["coordinator"]["model"] == "Qwen/Qwen2.5-3B-Instruct-AWQ"
+    assert lora_adapter["expert"]["model"] == "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ"
+    assert lora_adapter["expert"]["enable_lora"] is True
+    assert lora_adapter["expert"]["max_loras"] == 1
+    assert lora_adapter["expert"]["max_lora_rank"] == 16
+    assert lora_adapter["expert"]["lora_modules"] == [
+        {
+            "name": "k1s-code-expert-lora-smoke",
+            "path": "/adapters/expert/validation",
+            "base_model_name": "Qwen/Qwen2.5-Coder-7B-Instruct",
+            "max_lora_rank": 16,
+        }
+    ]
     assert legacy["coordinator"]["model"] == "HuggingFaceTB/SmolLM3-3B"
     for track in model_tracks["tracks"].values():
         for lane in ("coordinator", "expert"):
@@ -216,12 +231,37 @@ def test_ai_fabric_lab_lora_plumbing_stage_is_workerbee_valid() -> None:
     )
 
 
+def test_ai_fabric_lab_lora_adapter_smoke_stage_is_workerbee_valid() -> None:
+    validation = validate_stage(EXAMPLE_ROOT / "stage-lora-adapter-smoke")
+
+    assert validation["ok"] is True
+    assert validation["input_kinds"] == ["native-k1s"]
+    assert "localhost/workerbee-ai-fabric-models:dev" in validation["images"]
+    assert "ai-fabric-lab/ai-coordinator" in validation["required_controller_scopes"]
+    assert "ai-fabric-lab/ai-expert" in validation["required_controller_scopes"]
+    assert (
+        _env_value(
+            EXAMPLE_ROOT / "stage-lora-adapter-smoke" / "manifests" / "ai-coordinator.yaml",
+            "AI_FABRIC_TRACK",
+        )
+        == "lora-adapter-smoke"
+    )
+    assert (
+        _env_value(
+            EXAMPLE_ROOT / "stage-lora-adapter-smoke" / "manifests" / "ai-expert.yaml",
+            "AI_FABRIC_TRACK",
+        )
+        == "lora-adapter-smoke"
+    )
+
+
 def test_ai_fabric_lab_stages_use_dedicated_workerbee_service_ports() -> None:
     for stage in (
         "stage",
         "stage-baseline",
         "stage-quality",
         "stage-lora-plumbing",
+        "stage-lora-adapter-smoke",
         "stage-plumbing",
     ):
         manifests = EXAMPLE_ROOT / stage / "manifests"
@@ -244,6 +284,7 @@ def test_ai_fabric_lab_runtime_suite_contract() -> None:
     lab = _load_module(SCRIPT, "ai_fabric_lab_runtime_suite_test")
 
     assert "adapter-preflight" in lab.RUNTIME_SUITE_CHOICES
+    assert "lora-adapter-smoke" in lab.RUNTIME_SUITE_CHOICES
     assert "quality-comparison" in lab.RUNTIME_SUITE_CHOICES
     assert "stress-burst" in lab.RUNTIME_SUITE_CHOICES
     assert "recovery-smoke" in lab.RUNTIME_SUITE_CHOICES
@@ -269,6 +310,75 @@ def test_ai_fabric_lab_adapter_preflight_blocks_without_payload(tmp_path: Path) 
     assert result["state"] == "blocked"
     assert result["blocked"] is True
     assert "adapter_config_present" in result["missing"]
+
+
+def test_ai_fabric_lab_adapter_preflight_validates_ready_payload(tmp_path: Path) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_adapter_preflight_ready_test")
+    adapter = tmp_path / "adapters" / "expert" / "validation"
+    adapter.mkdir(parents=True)
+    (adapter / "adapter_config.json").write_text(
+        json.dumps(
+            {
+                "base_model_name_or_path": "Qwen/Qwen2.5-Coder-7B-Instruct",
+                "r": 16,
+                "target_modules": ["q_proj", "k_proj"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (adapter / "adapter_model.safetensors").write_text("", encoding="utf-8")
+
+    result = lab._run_adapter_preflight(storage_root=tmp_path)
+
+    assert result["ok"] is True
+    assert result["state"] == "ready"
+    assert result["blocked"] is False
+    assert result["metadata"]["base_model_name"] == "Qwen/Qwen2.5-Coder-7B-Instruct"
+    assert result["metadata"]["rank"] == 16
+    assert result["checks"]["adapter_target_modules_present"] is True
+
+
+def test_ai_fabric_lab_adapter_preflight_rejects_invalid_payload(tmp_path: Path) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_adapter_preflight_invalid_test")
+    adapter = tmp_path / "adapters" / "expert" / "validation"
+    adapter.mkdir(parents=True)
+    (adapter / "adapter_config.json").write_text(
+        json.dumps(
+            {
+                "base_model_name_or_path": "Other/Model",
+                "r": 64,
+                "target_modules": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (adapter / "adapter_model.safetensors").write_text("", encoding="utf-8")
+
+    result = lab._run_adapter_preflight(storage_root=tmp_path)
+
+    assert result["ok"] is False
+    assert result["state"] == "invalid"
+    assert "adapter_base_model_expected" in result["invalid"]
+    assert "adapter_rank_valid" in result["invalid"]
+    assert "adapter_target_modules_present" in result["invalid"]
+
+
+def test_ai_fabric_lab_lora_adapter_smoke_blocks_without_payload(tmp_path: Path) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_lora_adapter_blocked_test")
+    requests_path = tmp_path / "requests.jsonl"
+
+    result = lab._run_lora_adapter_smoke(
+        storage_root=tmp_path,
+        router_url="http://127.0.0.1:1",
+        run_id="lora-adapter-blocked-test",
+        requests_path=requests_path,
+        request_timeout=1,
+    )
+
+    assert result["ok"] is True
+    assert result["state"] == "blocked"
+    assert result["blocked"] is True
+    assert not requests_path.exists()
 
 
 def test_ai_fabric_lab_adapter_preflight_suite_skips_runtime_health(tmp_path: Path) -> None:
@@ -297,6 +407,69 @@ def test_ai_fabric_lab_adapter_preflight_suite_skips_runtime_health(tmp_path: Pa
     assert result["health"]["skipped"] is True
     assert result["host_aliases"]["skipped"] is True
     assert result["blocked_items"][0]["suite"] == "adapter-preflight"
+
+
+def test_ai_fabric_lab_lora_adapter_smoke_skips_runtime_when_payload_missing(
+    tmp_path: Path,
+) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_lora_adapter_suite_blocked_test")
+
+    result = lab.validate_runtime(
+        EXAMPLE_ROOT,
+        suite="lora-adapter-smoke",
+        prompts=None,
+        storage_root=tmp_path,
+        run_id="lora-adapter-smoke-blocked-test",
+        track=None,
+        router_url="http://127.0.0.1:1",
+        das_url="http://127.0.0.1:2",
+        retrieval_url="http://127.0.0.1:3",
+        duration_seconds=None,
+        workers=None,
+        worker_sleep_seconds=0,
+        gpu_sample_seconds=None,
+        request_timeout=1,
+        success_threshold=0.95,
+        vram_growth_mib_max=4096,
+    )
+
+    assert result["ok"] is True
+    assert result["health"]["skipped"] is True
+    assert result["lane_readiness"]["skipped"] is True
+    assert result["blocked_items"][0]["suite"] == "lora-adapter-smoke"
+
+
+def test_ai_fabric_lab_model_launcher_emits_static_lora_flags() -> None:
+    launcher = _load_module(
+        EXAMPLE_ROOT / "images" / "ai-models" / "run_two_vllm.py",
+        "ai_fabric_model_launcher_lora_test",
+    )
+
+    command = launcher._vllm_command(
+        {
+            "port": 8002,
+            "model": "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ",
+            "revision": "8e8ed243bbe6f9a5aff549a0924562fc719b2b8a",
+            "served_model_name": "k1s-code-expert",
+            "max_model_len": 4096,
+            "gpu_memory_utilization": 0.44,
+            "quantization": "awq",
+            "enable_lora": True,
+            "max_loras": 1,
+            "max_lora_rank": 16,
+            "lora_modules": [
+                {"name": "k1s-code-expert-lora-smoke", "path": "/adapters/expert/validation"}
+            ],
+        },
+        defaults={"attention_backend": "TRITON_ATTN"},
+        download_dir="/models/hf-cache",
+    )
+
+    assert "--enable-lora" in command
+    assert "--lora-modules" in command
+    assert "k1s-code-expert-lora-smoke=/adapters/expert/validation" in command
+    assert command[command.index("--max-lora-rank") + 1] == "16"
+    assert command[command.index("--max-loras") + 1] == "1"
 
 
 def test_ai_fabric_lab_runtime_output_files_contract() -> None:
@@ -628,6 +801,37 @@ def test_ai_fabric_router_advisory_includes_retrieval_and_lane_override(
     assert trace["symbolic"]["results"][0]["subject"] == trace["query"]
     assert trace["replay_status"] == "recorded"
     assert trace["divergence_reason"] == "pending_operator_review"
+
+
+def test_ai_fabric_router_models_response_proxies_lane_models(monkeypatch) -> None:
+    router = _load_module(
+        EXAMPLE_ROOT / "images" / "router" / "app.py",
+        "ai_fabric_router_models_test",
+    )
+
+    def fake_get_json(url: str, *, timeout: float) -> dict[str, object]:
+        assert timeout == router.PROXY_TIMEOUT
+        if "ai-expert" in url:
+            return {
+                "object": "list",
+                "data": [
+                    {"id": "k1s-code-expert"},
+                    {"id": "k1s-code-expert-lora-smoke"},
+                ],
+            }
+        return {"object": "list", "data": [{"id": "general-coordinator"}]}
+
+    monkeypatch.setattr(router, "_get_json", fake_get_json)
+
+    payload, status = router._models_response(lane="expert")
+
+    assert status == 200
+    assert payload["ok"] is True
+    assert [item["id"] for item in payload["data"]] == [
+        "k1s-code-expert",
+        "k1s-code-expert-lora-smoke",
+    ]
+    assert "expert" in payload["lanes"]
 
 
 def test_ai_fabric_fake_model_returns_openai_chat_completion() -> None:

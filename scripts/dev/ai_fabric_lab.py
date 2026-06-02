@@ -35,6 +35,7 @@ RUNTIME_SUITE_CHOICES = (
     "mixed-soak",
     "quality-contract",
     "lora-plumbing",
+    "lora-adapter-smoke",
     "evidence-closeout",
     "adapter-preflight",
     "quality-comparison",
@@ -45,6 +46,7 @@ RUNTIME_ENDPOINT_SUITES = {
     "mixed-soak",
     "quality-contract",
     "lora-plumbing",
+    "lora-adapter-smoke",
     "evidence-closeout",
     "quality-comparison",
     "stress-burst",
@@ -54,11 +56,18 @@ RUNTIME_MODEL_SUITES = {
     "mixed-soak",
     "quality-contract",
     "lora-plumbing",
+    "lora-adapter-smoke",
     "quality-comparison",
     "stress-burst",
     "recovery-smoke",
 }
 ADAPTER_VALIDATION_RELATIVE_PATH = "adapters/expert/validation"
+ADAPTER_VALIDATION_MODEL_NAME = "k1s-code-expert-lora-smoke"
+ADAPTER_EXPECTED_BASE_MODELS = (
+    "Qwen/Qwen2.5-Coder-7B-Instruct",
+    "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ",
+)
+ADAPTER_MAX_LORA_RANK = 16
 
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
@@ -547,8 +556,24 @@ def validate_runtime(
     prompt_path = (prompts or root / "prompts" / "validation-suite.jsonl").expanduser().resolve()
     prompt_items = _load_prompt_suite(prompt_path)
     findings: list[dict[str, str]] = []
-    requires_runtime = any(item in RUNTIME_ENDPOINT_SUITES for item in selected_suites)
-    requires_model_runtime = any(item in RUNTIME_MODEL_SUITES for item in selected_suites)
+    adapter_smoke_preflight = (
+        _run_adapter_preflight(storage_root=target_root)
+        if "lora-adapter-smoke" in selected_suites
+        else None
+    )
+    lora_adapter_ready = (
+        adapter_smoke_preflight is not None and adapter_smoke_preflight.get("state") == "ready"
+    )
+    requires_runtime = any(
+        item in RUNTIME_ENDPOINT_SUITES
+        and (item != "lora-adapter-smoke" or lora_adapter_ready)
+        for item in selected_suites
+    )
+    requires_model_runtime = any(
+        item in RUNTIME_MODEL_SUITES
+        and (item != "lora-adapter-smoke" or lora_adapter_ready)
+        for item in selected_suites
+    )
     health = (
         _health_snapshot(router_url=router_url, das_url=das_url, retrieval_url=retrieval_url)
         if requires_runtime
@@ -685,6 +710,15 @@ def validate_runtime(
                 run_id=selected_run_id,
                 requests_path=paths["requests.jsonl"],
                 request_timeout=request_timeout,
+            )
+        elif item == "lora-adapter-smoke":
+            result = _run_lora_adapter_smoke(
+                storage_root=target_root,
+                router_url=router_url,
+                run_id=selected_run_id,
+                requests_path=paths["requests.jsonl"],
+                request_timeout=request_timeout,
+                preflight=adapter_smoke_preflight,
             )
         elif item == "evidence-closeout":
             result = _run_evidence_closeout(
@@ -1244,6 +1278,8 @@ def _chat_prompt_record(
     worker_id: int,
     request_timeout: int,
     suite_label: str = "mixed-soak",
+    model_override: str | None = None,
+    expected_model: str | None = None,
 ) -> dict[str, Any]:
     lane = str(prompt.get("lane"))
     payload = {
@@ -1253,6 +1289,8 @@ def _chat_prompt_record(
         "max_tokens": int(prompt.get("max_tokens") or 32),
         "metadata": {"run_id": run_id, "prompt_id": str(prompt["id"]), "worker_id": worker_id},
     }
+    if model_override:
+        payload["model"] = model_override
     started = time.monotonic()
     response = _post_json(
         f"{router_url.rstrip('/')}/v1/chat/completions",
@@ -1268,7 +1306,7 @@ def _chat_prompt_record(
         if isinstance(message, dict):
             content = message.get("content")
     model_id = data.get("model")
-    expected_model = _expected_chat_model(lane)
+    expected_model = expected_model or model_override or _expected_chat_model(lane)
     checks = {
         "http_ok": response.get("status") == 200,
         "expected_model": model_id == expected_model,
@@ -1282,6 +1320,8 @@ def _chat_prompt_record(
         "elapsed_ms": elapsed_ms,
         "lane": lane,
         "model_id": model_id,
+        "expected_model": expected_model,
+        "model_override": model_override,
         "content_chars": len(content or ""),
         "checks": checks,
         "ok": all(checks.values()),
@@ -1305,42 +1345,202 @@ def _run_adapter_preflight(
         adapter_path / "adapter_model.bin",
         adapter_path / "adapter_model.pt",
     ]
-    checks = {
+    config_path = adapter_path / "adapter_config.json"
+    weight_path = next((path for path in weight_candidates if path.is_file()), None)
+    artifact_checks = {
         "path_exists": adapter_path.exists(),
         "is_directory": adapter_path.is_dir(),
-        "adapter_config_present": (adapter_path / "adapter_config.json").is_file(),
-        "adapter_weights_present": any(path.is_file() for path in weight_candidates),
+        "adapter_config_present": config_path.is_file(),
+        "adapter_weights_present": weight_path is not None,
     }
-    ready = all(checks.values())
-    if ready:
+    if not all(artifact_checks.values()):
+        missing = [key for key, value in artifact_checks.items() if not value]
+        return {
+            "ok": True,
+            "state": "blocked",
+            "blocked": True,
+            "adapter_path": str(adapter_path),
+            "expected_files": [
+                "adapter_config.json",
+                "adapter_model.safetensors|adapter_model.bin|adapter_model.pt",
+            ],
+            "checks": artifact_checks,
+            "missing": missing,
+            "message": "validation adapter payload is not present",
+            "findings": [
+                _finding(
+                    "warning",
+                    "ADAPTER_PREFLIGHT_BLOCKED",
+                    f"missing validation adapter payload at {adapter_path}",
+                )
+            ],
+        }
+
+    config: dict[str, Any] = {}
+    config_error = ""
+    try:
+        config = _load_json(config_path)
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        config_error = str(exc)
+    base_model = _adapter_base_model(config)
+    rank = _adapter_rank(config)
+    target_modules = config.get("target_modules")
+    metadata_checks = {
+        "adapter_config_valid": not config_error,
+        "adapter_base_model_expected": base_model in ADAPTER_EXPECTED_BASE_MODELS,
+        "adapter_rank_valid": rank is not None and 0 < rank <= ADAPTER_MAX_LORA_RANK,
+        "adapter_target_modules_present": _adapter_target_modules_present(target_modules),
+    }
+    checks = {**artifact_checks, **metadata_checks}
+    metadata = {
+        "base_model_name": base_model,
+        "rank": rank,
+        "target_modules": target_modules,
+        "adapter_model": str(weight_path) if weight_path else None,
+        "config_error": config_error or None,
+        "expected_base_models": list(ADAPTER_EXPECTED_BASE_MODELS),
+        "max_lora_rank": ADAPTER_MAX_LORA_RANK,
+    }
+    if all(checks.values()):
         return {
             "ok": True,
             "state": "ready",
             "blocked": False,
             "adapter_path": str(adapter_path),
             "checks": checks,
+            "metadata": metadata,
             "findings": [],
         }
-    missing = [key for key, value in checks.items() if not value]
+    invalid = [key for key, value in metadata_checks.items() if not value]
+    findings = [
+        _finding("error", "ADAPTER_PREFLIGHT_INVALID", ",".join(invalid) or "metadata")
+    ]
     return {
-        "ok": True,
-        "state": "blocked",
-        "blocked": True,
+        "ok": False,
+        "state": "invalid",
+        "blocked": False,
         "adapter_path": str(adapter_path),
-        "expected_files": [
-            "adapter_config.json",
-            "adapter_model.safetensors|adapter_model.bin|adapter_model.pt",
-        ],
         "checks": checks,
-        "missing": missing,
-        "message": "validation adapter payload is not present",
-        "findings": [
-            _finding(
-                "warning",
-                "ADAPTER_PREFLIGHT_BLOCKED",
-                f"missing validation adapter payload at {adapter_path}",
-            )
-        ],
+        "metadata": metadata,
+        "invalid": invalid,
+        "message": "validation adapter payload is present but does not match expectations",
+        "findings": findings,
+    }
+
+
+def _adapter_base_model(config: dict[str, Any]) -> str | None:
+    for key in ("base_model_name_or_path", "base_model_name", "base_model"):
+        value = config.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _adapter_rank(config: dict[str, Any]) -> int | None:
+    for key in ("r", "rank", "lora_rank"):
+        value = config.get(key)
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _adapter_target_modules_present(value: Any) -> bool:
+    if isinstance(value, str):
+        return bool(value.strip())
+    if isinstance(value, list):
+        return any(isinstance(item, str) and bool(item.strip()) for item in value)
+    return False
+
+
+def _run_lora_adapter_smoke(
+    *,
+    storage_root: Path,
+    router_url: str,
+    run_id: str,
+    requests_path: Path,
+    request_timeout: int,
+    preflight: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    preflight = preflight or _run_adapter_preflight(storage_root=storage_root)
+    if preflight.get("state") == "blocked":
+        return {
+            "ok": True,
+            "state": "blocked",
+            "blocked": True,
+            "message": "validation adapter payload is not present",
+            "preflight": preflight,
+            "findings": preflight.get("findings", []),
+        }
+    if not preflight.get("ok"):
+        return {
+            "ok": False,
+            "state": "invalid",
+            "preflight": preflight,
+            "findings": preflight.get("findings", []),
+        }
+
+    models_payload = _get_json(
+        f"{router_url.rstrip('/')}/v1/models?lane=expert",
+        timeout=min(max(request_timeout, 20), 120),
+    )
+    model_ids = _extract_model_ids(models_payload)
+    base_record = _chat_prompt_record(
+        prompt={
+            "id": "lora-adapter-smoke-base",
+            "lane": "expert",
+            "prompt": "Return the word ok.",
+            "max_tokens": 4,
+        },
+        router_url=router_url,
+        run_id=run_id,
+        worker_id=0,
+        request_timeout=request_timeout,
+        suite_label="lora-adapter-smoke",
+    )
+    adapter_record = _chat_prompt_record(
+        prompt={
+            "id": "lora-adapter-smoke-adapter",
+            "lane": "expert",
+            "prompt": "Return the word ok.",
+            "max_tokens": 4,
+        },
+        router_url=router_url,
+        run_id=run_id,
+        worker_id=1,
+        request_timeout=request_timeout,
+        suite_label="lora-adapter-smoke",
+        model_override=ADAPTER_VALIDATION_MODEL_NAME,
+        expected_model=ADAPTER_VALIDATION_MODEL_NAME,
+    )
+    _append_jsonl(requests_path, base_record)
+    _append_jsonl(requests_path, adapter_record)
+    checks = {
+        "preflight_ready": preflight.get("state") == "ready",
+        "models_endpoint_ok": bool(models_payload.get("ok")),
+        "adapter_model_listed": ADAPTER_VALIDATION_MODEL_NAME in model_ids,
+        "base_request_ok": bool(base_record.get("ok")),
+        "adapter_request_ok": bool(adapter_record.get("ok")),
+        "model_ids_distinct": base_record.get("model_id") != adapter_record.get("model_id"),
+    }
+    findings = [
+        _finding("error", "LORA_ADAPTER_SMOKE", key)
+        for key, value in checks.items()
+        if not value
+    ]
+    return {
+        "ok": all(checks.values()),
+        "adapter_model": ADAPTER_VALIDATION_MODEL_NAME,
+        "base_model": _expected_chat_model("expert"),
+        "checks": checks,
+        "model_ids": sorted(model_ids),
+        "models_endpoint": models_payload,
+        "preflight": preflight,
+        "requests": [base_record, adapter_record],
+        "findings": findings,
     }
 
 
@@ -1526,6 +1726,24 @@ def _get_json(url: str, *, timeout: int) -> dict[str, Any]:
             return payload if isinstance(payload, dict) else {"ok": False, "error": "invalid_json"}
     except (URLError, TimeoutError, json.JSONDecodeError) as exc:
         return {"ok": False, "error": str(exc), "url": url}
+
+
+def _extract_model_ids(payload: Any) -> set[str]:
+    model_ids: set[str] = set()
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            model_id = value.get("id")
+            if isinstance(model_id, str) and model_id.strip():
+                model_ids.add(model_id.strip())
+            for key in ("data", "models", "lanes"):
+                visit(value.get(key))
+        elif isinstance(value, list):
+            for item in value:
+                visit(item)
+
+    visit(payload)
+    return model_ids
 
 
 def _gpu_sample() -> dict[str, Any]:
@@ -2026,6 +2244,51 @@ def _validate_lane(track: str, lane: str, config: dict[str, Any]) -> list[dict[s
     port = int(config.get("port") or 0)
     if port < 1024 or port > 65535:
         findings.append(_finding("error", "MODEL_PORT", f"{track}.{lane}"))
+    findings.extend(_validate_lora_lane(track, lane, config))
+    return findings
+
+
+def _validate_lora_lane(track: str, lane: str, config: dict[str, Any]) -> list[dict[str, str]]:
+    findings: list[dict[str, str]] = []
+    modules = config.get("lora_modules")
+    if modules is None:
+        return findings
+    if not config.get("enable_lora"):
+        findings.append(_finding("error", "MODEL_LORA_ENABLE", f"{track}.{lane}"))
+    if not isinstance(modules, list) or not modules:
+        findings.append(_finding("error", "MODEL_LORA_MODULES", f"{track}.{lane}"))
+        return findings
+    for index, module in enumerate(modules):
+        if not isinstance(module, dict):
+            findings.append(_finding("error", "MODEL_LORA_MODULE", f"{track}.{lane}[{index}]"))
+            continue
+        for key in ("name", "path", "base_model_name"):
+            if not isinstance(module.get(key), str) or not str(module.get(key)).strip():
+                findings.append(
+                    _finding(
+                        "error",
+                        "MODEL_LORA_MODULE_REQUIRED",
+                        f"{track}.{lane}[{index}].{key}",
+                    )
+                )
+        rank = module.get("max_lora_rank", config.get("max_lora_rank"))
+        try:
+            rank_value = int(rank)
+        except (TypeError, ValueError):
+            rank_value = 0
+        if rank_value <= 0 or rank_value > ADAPTER_MAX_LORA_RANK:
+            findings.append(
+                _finding("error", "MODEL_LORA_RANK", f"{track}.{lane}[{index}]")
+            )
+    for key in ("max_loras", "max_lora_rank"):
+        if config.get(key) is None:
+            continue
+        try:
+            value = int(config[key])
+        except (TypeError, ValueError):
+            value = 0
+        if value <= 0:
+            findings.append(_finding("error", "MODEL_LORA_LIMIT", f"{track}.{lane}.{key}"))
     return findings
 
 

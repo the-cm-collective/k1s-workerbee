@@ -1,0 +1,27 @@
+apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: mongo
+  namespace: ai-fabric-lab
+  labels:
+    app: mongo
+    workerbee.k1s.dev/project: ai-fabric-lab
+spec:
+  image: mongo:7.0
+  replicas: 1
+  ports:
+    - name: mongo
+      containerPort: 27017
+  service:
+    port: 27017
+    targetPort: 27017
+  resources:
+    requests:
+      cpu: 0.5
+      memory: 2Gi
+    limits:
+      cpu: 4
+      memory: 32Gi
+  volumes:
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/mongo
+      mountPath: /data/db

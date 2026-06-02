@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 from urllib.error import URLError
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
 COORDINATOR_URL = os.getenv(
@@ -38,7 +38,8 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "ai-fabric-router/0.2"
 
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/healthz":
+        parsed = urlparse(self.path)
+        if parsed.path == "/healthz":
             self._json(
                 {
                     "ok": True,
@@ -48,8 +49,14 @@ class Handler(BaseHTTPRequestHandler):
                 }
             )
             return
-        if self.path == "/metrics":
+        if parsed.path == "/metrics":
             self._text("ai_fabric_router_up 1\n")
+            return
+        if parsed.path == "/v1/models":
+            lane_values = parse_qs(parsed.query).get("lane") or []
+            lane = lane_values[0] if lane_values else None
+            payload, status = _models_response(lane=lane)
+            self._json(payload, status=status)
             return
         self.send_error(404)
 
@@ -386,6 +393,60 @@ def _chat_content(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _models_response(*, lane: str | None = None) -> tuple[dict[str, Any], int]:
+    upstreams = {
+        "coordinator": COORDINATOR_URL,
+        "expert": EXPERT_URL,
+    }
+    if lane is not None and lane not in upstreams:
+        return {"ok": False, "error": "invalid_lane", "lane": lane}, 400
+
+    selected = {lane: upstreams[lane]} if lane else upstreams
+    lanes: dict[str, Any] = {}
+    errors: dict[str, Any] = {}
+    data: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for lane_name, chat_url in selected.items():
+        models_url = _models_url(chat_url)
+        if not _allowed_upstream(models_url):
+            errors[lane_name] = {"url": models_url, "error": "invalid_upstream"}
+            continue
+        payload = _get_json(models_url, timeout=PROXY_TIMEOUT)
+        lanes[lane_name] = payload
+        if not payload.get("ok") and payload.get("error"):
+            errors[lane_name] = {"url": models_url, "error": payload.get("error")}
+            continue
+        for item in _model_entries(payload):
+            model_id = str(item.get("id") or "")
+            if model_id and model_id in seen_ids:
+                continue
+            if model_id:
+                seen_ids.add(model_id)
+            data.append(item)
+
+    ok = not errors and bool(data)
+    status = 200 if ok else 503
+    return {
+        "ok": ok,
+        "object": "list",
+        "data": data,
+        "lanes": lanes,
+        "errors": errors,
+    }, status
+
+
+def _model_entries(payload: dict[str, Any]) -> list[dict[str, Any]]:
+    data = payload.get("data")
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict)]
+
+
+def _models_url(chat_url: str) -> str:
+    parsed = urlparse(chat_url)
+    return parsed._replace(path="/v1/models", query="", fragment="").geturl()
+
+
 def _query_text(payload: dict[str, Any]) -> str:
     for key in ("query", "question", "prompt", "input"):
         value = payload.get(key)
@@ -429,6 +490,19 @@ def _post_json(url: str, payload: dict[str, Any], *, timeout: float):
         method="POST",
     )
     return urlopen(request, timeout=timeout)  # noqa: S310
+
+
+def _get_json(url: str, *, timeout: float) -> dict[str, Any]:
+    try:
+        with urlopen(url, timeout=timeout) as response:  # noqa: S310
+            raw = response.read().decode("utf-8")
+            payload = json.loads(raw)
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return {"ok": False, "url": url, "error": str(exc)}
+    if not isinstance(payload, dict):
+        return {"ok": False, "url": url, "error": "invalid_json"}
+    payload.setdefault("ok", True)
+    return payload
 
 
 def _allowed_upstream(value: str) -> bool:

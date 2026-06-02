@@ -92,6 +92,7 @@ def _load_config(path: Path) -> dict[str, Any]:
 def _vllm_command(
     lane: dict[str, Any], *, defaults: dict[str, Any], download_dir: str
 ) -> list[str]:
+    lora_modules = _lora_module_args(lane.get("lora_modules"))
     command = [
         "python3",
         "-m",
@@ -119,9 +120,37 @@ def _vllm_command(
     attention_backend = lane.get("attention_backend") or defaults.get("attention_backend")
     if attention_backend:
         command.extend(["--attention-backend", str(attention_backend)])
-    if lane.get("enable_lora"):
+    if lane.get("enable_lora") or lora_modules:
         command.append("--enable-lora")
+    if lora_modules:
+        command.append("--lora-modules")
+        command.extend(lora_modules)
+    if lane.get("max_loras") is not None:
+        command.extend(["--max-loras", str(lane["max_loras"])])
+    if lane.get("max_lora_rank") is not None:
+        command.extend(["--max-lora-rank", str(lane["max_lora_rank"])])
     return command
+
+
+def _lora_module_args(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if not isinstance(value, list):
+        raise TypeError("lora_modules must be a list")
+    modules: list[str] = []
+    for item in value:
+        if isinstance(item, str):
+            if item.strip():
+                modules.append(item.strip())
+            continue
+        if not isinstance(item, dict):
+            raise TypeError("lora_modules entries must be strings or objects")
+        name = str(item.get("name") or "").strip()
+        path = str(item.get("path") or "").strip()
+        if not name or not path:
+            raise ValueError("lora_modules object entries require name and path")
+        modules.append(f"{name}={path}")
+    return modules
 
 
 if __name__ == "__main__":
