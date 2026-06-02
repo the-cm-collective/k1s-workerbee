@@ -40,6 +40,7 @@ DEGRADED_STATES = {
     "false",
     "missing",
     "not_ready",
+    "stale",
     "unavailable",
     "unhealthy",
 }
@@ -396,13 +397,16 @@ def _advisory_decision(payload: dict[str, Any]) -> dict[str, Any]:
     query = str(payload.get("query") or "")
     intent = str(payload.get("intent") or "advise")
     limit = max(1, min(int(payload.get("limit") or 10), 50))
+    use_stored_facts = payload.get("use_stored_facts") is not False
     supplied_facts = payload.get("facts") if isinstance(payload.get("facts"), list) else []
-    supplied_facts = [fact for fact in supplied_facts if isinstance(fact, dict)]
+    supplied_facts = [
+        _normalize_fact(fact) for fact in supplied_facts if isinstance(fact, dict)
+    ]
     subject = _advisory_subject(payload=payload, facts=supplied_facts, query=query)
     facts = supplied_facts[:limit]
-    if not facts and subject:
+    if not facts and subject and use_stored_facts:
         facts = _query_facts({"subject": subject, "limit": limit})
-    if not facts:
+    if not facts and use_stored_facts:
         facts = _query_facts({"query": query, "limit": limit})
     subject = subject or _advisory_subject(payload=payload, facts=facts, query=query)
     subject = subject or "ai_fabric.lab"
@@ -488,12 +492,30 @@ def _decision_blocked_conditions(
     facts: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     conditions: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str | None]] = set()
+
+    def add_condition(condition: dict[str, Any]) -> None:
+        evidence_ref = condition.get("evidence_ref")
+        key = (
+            str(condition.get("condition") or ""),
+            str(condition.get("state") or ""),
+            evidence_ref if isinstance(evidence_ref, str) else None,
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        conditions.append(condition)
+
     for fact in facts:
         predicate = str(fact.get("predicate") or "")
         if predicate in {"readiness", "status", "host_alias_health", "model_lane_readiness"}:
             state = _condition_state(fact.get("object"))
             if state in DEGRADED_STATES:
-                conditions.append(_blocked_condition(fact, state))
+                add_condition(_blocked_condition(fact, state))
+        if predicate == "artifact_state":
+            state = _condition_state(fact.get("object"))
+            if state in DEGRADED_STATES:
+                add_condition(_blocked_condition(fact, state))
     dependencies = [
         str(fact.get("object"))
         for fact in facts
@@ -510,7 +532,7 @@ def _decision_blocked_conditions(
                 continue
             state = _condition_state(fact.get("object"))
             if state in DEGRADED_STATES:
-                conditions.append(_blocked_condition(fact, state, dependency=dependency))
+                add_condition(_blocked_condition(fact, state, dependency=dependency))
     return conditions
 
 
@@ -541,6 +563,12 @@ def _decision_risks(
         risks.append("missing_symbolic_evidence")
     if blocked_conditions:
         risks.append("symbolic_blocked_condition")
+    if any(
+        fact.get("predicate") == "artifact_state"
+        and _condition_state(fact.get("object")) in DEGRADED_STATES
+        for fact in facts
+    ):
+        risks.append("validation_artifact_unhealthy")
     if subject.startswith("ai_fabric.service.") and not any(
         fact.get("subject") == subject and fact.get("predicate") == "depends_on"
         for fact in facts

@@ -280,6 +280,23 @@ def test_ai_fabric_lab_runtime_prompt_fixture_is_valid() -> None:
     assert len({item["id"] for item in prompts}) == len(prompts)
 
 
+def test_ai_fabric_lab_advisor_scenario_fixture_is_valid() -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_advisor_scenario_fixture_test")
+    scenarios = lab._load_advisor_scenarios(
+        EXAMPLE_ROOT / "prompts" / "advisor-scenarios.jsonl"
+    )
+
+    assert {
+        "healthy-ai-router",
+        "degraded-das-dependency",
+        "unavailable-retrieval-dependency",
+        "unavailable-expert-model-lane",
+        "missing-symbolic-evidence",
+        "stale-validation-artifact",
+    } == {item["id"] for item in scenarios}
+    assert all(item["expect"]["authoritative"] is False for item in scenarios)
+
+
 def test_ai_fabric_lab_runtime_suite_contract() -> None:
     lab = _load_module(SCRIPT, "ai_fabric_lab_runtime_suite_test")
 
@@ -288,6 +305,13 @@ def test_ai_fabric_lab_runtime_suite_contract() -> None:
     assert "quality-comparison" in lab.RUNTIME_SUITE_CHOICES
     assert "stress-burst" in lab.RUNTIME_SUITE_CHOICES
     assert "recovery-smoke" in lab.RUNTIME_SUITE_CHOICES
+    assert "advisor-scenarios" in lab.RUNTIME_SUITE_CHOICES
+    assert "advisor-scenarios" in lab.RUNTIME_ENDPOINT_SUITES
+    assert "advisor-scenarios" not in lab.RUNTIME_MODEL_SUITES
+    assert "advisor-scenarios" not in lab.RUNTIME_PROMPT_SUITES
+    assert lab.ADVISOR_SCENARIO_EVAL_API_VERSION == (
+        "workerbee.ai-fabric.advisor-scenario-eval/v1"
+    )
     assert lab._selected_runtime_suites("all") == [
         "quality-contract",
         "mixed-soak",
@@ -435,6 +459,68 @@ def test_ai_fabric_runtime_state_facts_capture_live_endpoint_snapshots(monkeypat
         and fact["object"]["ok"] is False
         for fact in facts
     )
+
+
+def test_ai_fabric_lab_advisor_scenarios_validate_das_decisions(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_advisor_scenario_suite_test")
+    das_bridge = _load_module(
+        EXAMPLE_ROOT / "images" / "das-bridge" / "app.py",
+        "ai_fabric_das_bridge_advisor_scenario_suite_test",
+    )
+    monkeypatch.setattr(das_bridge, "DATA_DIR", tmp_path / "das")
+    monkeypatch.setattr(das_bridge, "FACT_LOG", tmp_path / "facts.jsonl")
+    monkeypatch.setattr(das_bridge, "F5_EVIDENCE_LOG", tmp_path / "f5-evidence.jsonl")
+
+    def fake_post_json(
+        url: str, payload: dict[str, object], *, timeout: int
+    ) -> dict[str, object]:
+        del timeout
+        assert url.endswith("/v1/advisory/decision")
+        assert payload["use_stored_facts"] is False
+        decision = das_bridge._advisory_decision(payload)
+        return {"ok": True, "status": 200, "json": {"ok": True, "decision": decision}}
+
+    def fake_runtime_state_facts(**kwargs) -> list[dict[str, object]]:
+        del kwargs
+        return [
+            lab._runtime_fact(
+                "ai_fabric.service.ai-router",
+                "depends_on",
+                "ai_fabric.service.das-bridge",
+            ),
+            lab._runtime_fact(
+                "ai_fabric.service.ai-router",
+                "depends_on",
+                "ai_fabric.service.retrieval-indexer",
+            ),
+            lab._runtime_fact("ai_fabric.service.das-bridge", "readiness", "ready"),
+            lab._runtime_fact("ai_fabric.service.retrieval-indexer", "readiness", "ready"),
+        ]
+
+    monkeypatch.setattr(lab, "_post_json", fake_post_json)
+    monkeypatch.setattr(lab, "_runtime_state_facts", fake_runtime_state_facts)
+    scenarios = lab._load_advisor_scenarios(
+        EXAMPLE_ROOT / "prompts" / "advisor-scenarios.jsonl"
+    )
+    output_path = tmp_path / "advisor-scenarios.json"
+
+    result = lab._run_advisor_scenarios(
+        scenarios=scenarios,
+        das_url="http://das.local:18181",
+        router_url="http://router.local:18180",
+        retrieval_url="http://retrieval.local:18182",
+        run_id="advisor-scenario-test",
+        output_path=output_path,
+        request_timeout=1,
+    )
+
+    assert result["ok"] is True
+    assert result["api_version"] == "workerbee.ai-fabric.advisor-scenario-eval/v1"
+    assert result["scenario_count"] == 7
+    assert {item["kind"] for item in result["results"]} == {"synthetic", "live"}
+    assert output_path.exists()
 
 
 def test_ai_fabric_import_runtime_facts_batches_to_das(monkeypatch) -> None:
@@ -649,6 +735,7 @@ def test_ai_fabric_lab_runtime_output_files_contract() -> None:
         "lane-readiness.json",
         "f5-evidence.json",
         "workerbee-status.json",
+        "advisor-scenarios.json",
     }
 
 
@@ -1185,6 +1272,41 @@ def test_ai_fabric_das_bridge_builds_advisory_decision_from_runtime_facts(
         "ai_fabric.service.das-bridge.readiness"
     )
     assert "symbolic_blocked_condition" in decision["risks"]
+
+    artifact_decision = das_bridge._advisory_decision(
+        {
+            "subject": "ai_fabric.runtime_validation",
+            "intent": "validate_artifacts",
+            "query": "are runtime validation artifacts current",
+            "facts": [
+                {
+                    "namespace": "runtime",
+                    "subject": "ai_fabric.runtime_validation",
+                    "predicate": "artifact_state",
+                    "object": {"path": "runs/latest/summary.json", "state": "stale"},
+                    "source": "test",
+                }
+            ],
+        }
+    )
+    assert artifact_decision["status"] == "blocked"
+    assert "validation_artifact_unhealthy" in artifact_decision["risks"]
+    assert artifact_decision["blocked_conditions"][0]["condition"] == (
+        "ai_fabric.runtime_validation.artifact_state"
+    )
+
+    isolated_decision = das_bridge._advisory_decision(
+        {
+            "subject": "ai_fabric.service.ai-router",
+            "intent": "advise",
+            "query": "ignore stored facts for scenario evaluation",
+            "facts": [],
+            "use_stored_facts": False,
+        }
+    )
+    assert isolated_decision["status"] == "review"
+    assert isolated_decision["evidence_refs"] == []
+    assert "missing_symbolic_evidence" in isolated_decision["risks"]
 
 
 def test_ai_fabric_das_bridge_records_f5_query_evidence(tmp_path: Path, monkeypatch) -> None:

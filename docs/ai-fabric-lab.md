@@ -228,6 +228,17 @@ requests this structured DAS decision before calling the selected model lane and
 stores it in the advisory trace alongside retrieval, symbolic facts, and model
 output.
 
+Advisor scenario validation uses `validate-runtime --suite advisor-scenarios`.
+It reads
+[`examples/ai-fabric-lab/prompts/advisor-scenarios.jsonl`](../examples/ai-fabric-lab/prompts/advisor-scenarios.jsonl),
+posts synthetic fact packets directly to `POST /v1/advisory/decision` with
+`use_stored_facts=false`, and writes
+`workerbee.ai-fabric.advisor-scenario-eval/v1` records to
+`runs/<run-id>/advisor-scenarios.json`. The suite also appends one live,
+read-only scenario from current router, DAS, retrieval, model-lane, DAS-count,
+and corpus-count snapshots. Synthetic scenario facts are not imported into the
+persistent DAS fact log.
+
 `import-runtime-facts` seeds live local snapshots when local host aliases are
 available: router/DAS/retrieval readiness, host alias health, model lane
 readiness, retrieval corpus counts, DAS fact counts, and optional WorkerBee
@@ -300,6 +311,7 @@ python3 scripts/dev/ai_fabric_lab.py validate-runtime --suite lora-adapter-smoke
 python3 scripts/dev/ai_fabric_lab.py validate-runtime --suite quality-comparison
 python3 scripts/dev/ai_fabric_lab.py validate-runtime --suite stress-burst
 python3 scripts/dev/ai_fabric_lab.py validate-runtime --suite recovery-smoke
+python3 scripts/dev/ai_fabric_lab.py validate-runtime --suite advisor-scenarios
 ```
 
 `adapter-preflight` checks

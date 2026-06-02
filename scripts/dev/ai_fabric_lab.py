@@ -30,6 +30,7 @@ RUNTIME_OUTPUT_FILES = (
     "lane-readiness.json",
     "f5-evidence.json",
     "workerbee-status.json",
+    "advisor-scenarios.json",
 )
 RUNTIME_SUITE_CHOICES = (
     "all",
@@ -42,6 +43,7 @@ RUNTIME_SUITE_CHOICES = (
     "quality-comparison",
     "stress-burst",
     "recovery-smoke",
+    "advisor-scenarios",
 )
 RUNTIME_ENDPOINT_SUITES = {
     "mixed-soak",
@@ -52,6 +54,7 @@ RUNTIME_ENDPOINT_SUITES = {
     "quality-comparison",
     "stress-burst",
     "recovery-smoke",
+    "advisor-scenarios",
 }
 RUNTIME_MODEL_SUITES = {
     "mixed-soak",
@@ -59,6 +62,15 @@ RUNTIME_MODEL_SUITES = {
     "lora-plumbing",
     "lora-adapter-smoke",
     "quality-comparison",
+    "stress-burst",
+    "recovery-smoke",
+}
+RUNTIME_PROMPT_SUITES = {
+    "mixed-soak",
+    "quality-contract",
+    "quality-comparison",
+    "lora-plumbing",
+    "lora-adapter-smoke",
     "stress-burst",
     "recovery-smoke",
 }
@@ -71,6 +83,7 @@ ADAPTER_EXPECTED_BASE_MODELS = (
 ADAPTER_MAX_LORA_RANK = 16
 RUNTIME_FACT_SOURCE = "workerbee.ai-fabric.runtime-facts/v1"
 ADVISORY_DECISION_API_VERSION = "workerbee.ai-fabric.advisory-decision/v1"
+ADVISOR_SCENARIO_EVAL_API_VERSION = "workerbee.ai-fabric.advisor-scenario-eval/v1"
 RUNTIME_RELATIONSHIP_PREDICATES = (
     "owns_service",
     "depends_on",
@@ -610,7 +623,20 @@ def validate_runtime(
         encoding="utf-8",
     )
     prompt_path = (prompts or root / "prompts" / "validation-suite.jsonl").expanduser().resolve()
-    prompt_items = _load_prompt_suite(prompt_path)
+    scenario_path = (
+        prompts if suite == "advisor-scenarios" and prompts is not None else None
+    ) or root / "prompts" / "advisor-scenarios.jsonl"
+    scenario_path = scenario_path.expanduser().resolve()
+    prompt_items = (
+        _load_prompt_suite(prompt_path)
+        if any(item in RUNTIME_PROMPT_SUITES for item in selected_suites)
+        else []
+    )
+    advisor_scenarios = (
+        _load_advisor_scenarios(scenario_path)
+        if "advisor-scenarios" in selected_suites
+        else []
+    )
     findings: list[dict[str, str]] = []
     adapter_smoke_preflight = (
         _run_adapter_preflight(storage_root=target_root)
@@ -791,6 +817,16 @@ def validate_runtime(
                 request_timeout=request_timeout,
                 host_aliases=host_aliases,
             )
+        elif item == "advisor-scenarios":
+            result = _run_advisor_scenarios(
+                scenarios=advisor_scenarios,
+                das_url=das_url,
+                router_url=router_url,
+                retrieval_url=retrieval_url,
+                run_id=selected_run_id,
+                output_path=paths["advisor-scenarios.json"],
+                request_timeout=request_timeout,
+            )
         else:  # pragma: no cover - argparse constrains values.
             result = {"ok": False, "findings": [_finding("error", "UNKNOWN_SUITE", item)]}
         summary["suites"][item] = result
@@ -864,6 +900,51 @@ def _load_prompt_suite(path: Path) -> list[dict[str, Any]]:
         seen.add(prompt_id)
         prompts.append(payload)
     return prompts
+
+
+def _load_advisor_scenarios(path: Path) -> list[dict[str, Any]]:
+    scenarios: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if not isinstance(payload, dict):
+            raise ValueError(f"{path}:{line_no} must be a JSON object")
+        scenario_id = str(payload.get("id") or "")
+        subject = str(payload.get("subject") or "")
+        intent = str(payload.get("intent") or "")
+        query = str(payload.get("query") or "")
+        facts = payload.get("facts")
+        expect = payload.get("expect")
+        if not scenario_id or scenario_id in seen:
+            raise ValueError(f"{path}:{line_no} has missing or duplicate id")
+        if not subject.strip():
+            raise ValueError(f"{path}:{line_no} has empty subject")
+        if not intent.strip():
+            raise ValueError(f"{path}:{line_no} has empty intent")
+        if not query.strip():
+            raise ValueError(f"{path}:{line_no} has empty query")
+        if not isinstance(facts, list) or any(not isinstance(item, dict) for item in facts):
+            raise ValueError(f"{path}:{line_no} has invalid facts")
+        if not isinstance(expect, dict):
+            raise ValueError(f"{path}:{line_no} has invalid expect")
+        if str(expect.get("status") or "") not in {"review", "blocked"}:
+            raise ValueError(f"{path}:{line_no} has invalid expected status")
+        for list_key in ("risks_present", "risks_absent"):
+            value = expect.get(list_key, [])
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise ValueError(f"{path}:{line_no} has invalid {list_key}")
+        for int_key in ("min_evidence_refs", "blocked_condition_count"):
+            if int_key in expect:
+                value = expect[int_key]
+                if not isinstance(value, int) or value < 0:
+                    raise ValueError(f"{path}:{line_no} has invalid {int_key}")
+        seen.add(scenario_id)
+        scenarios.append(payload)
+    if not scenarios:
+        raise ValueError(f"{path} did not contain advisor scenarios")
+    return scenarios
 
 
 def _health_snapshot(*, router_url: str, das_url: str, retrieval_url: str) -> dict[str, Any]:
@@ -1768,6 +1849,200 @@ def _run_evidence_closeout(*, das_url: str, f5_evidence_path: Path) -> dict[str,
         "missing": missing,
         "path": str(f5_evidence_path),
         "findings": findings,
+    }
+
+
+def _run_advisor_scenarios(
+    *,
+    scenarios: list[dict[str, Any]],
+    das_url: str,
+    router_url: str,
+    retrieval_url: str,
+    run_id: str,
+    output_path: Path,
+    request_timeout: int,
+) -> dict[str, Any]:
+    results = [
+        _advisor_scenario_record(
+            scenario=scenario,
+            das_url=das_url,
+            run_id=run_id,
+            request_timeout=request_timeout,
+            kind="synthetic",
+        )
+        for scenario in scenarios
+    ]
+    live_scenario = _live_advisor_scenario(
+        router_url=router_url,
+        das_url=das_url,
+        retrieval_url=retrieval_url,
+    )
+    results.append(
+        _advisor_scenario_record(
+            scenario=live_scenario,
+            das_url=das_url,
+            run_id=run_id,
+            request_timeout=request_timeout,
+            kind="live",
+        )
+    )
+    findings = [
+        _finding(
+            "error",
+            "ADVISOR_SCENARIO_FAILED",
+            str(item.get("id") or "unknown scenario"),
+        )
+        for item in results
+        if not item.get("ok")
+    ]
+    payload = {
+        "ok": not findings,
+        "api_version": ADVISOR_SCENARIO_EVAL_API_VERSION,
+        "run_id": run_id,
+        "scenario_count": len(results),
+        "synthetic_count": len(scenarios),
+        "live_count": 1,
+        "results": results,
+        "findings": findings,
+        "recorded_at": _utc_now(),
+    }
+    output_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    payload["path"] = str(output_path)
+    return payload
+
+
+def _live_advisor_scenario(
+    *,
+    router_url: str,
+    das_url: str,
+    retrieval_url: str,
+) -> dict[str, Any]:
+    return {
+        "id": "live-runtime-snapshot",
+        "description": "Current read-only runtime health, model, DAS, and corpus snapshot.",
+        "subject": "ai_fabric.service.ai-router",
+        "intent": "validate_runtime_snapshot",
+        "query": "Validate the current live AI fabric advisor runtime snapshot.",
+        "facts": _runtime_state_facts(
+            router_url=router_url,
+            das_url=das_url,
+            retrieval_url=retrieval_url,
+            workerbee_status=None,
+        ),
+        "expect": {
+            "status": "review",
+            "min_evidence_refs": 3,
+            "risks_absent": [
+                "symbolic_blocked_condition",
+                "validation_artifact_unhealthy",
+            ],
+            "blocked_condition_count": 0,
+            "authoritative": False,
+        },
+    }
+
+
+def _advisor_scenario_record(
+    *,
+    scenario: dict[str, Any],
+    das_url: str,
+    run_id: str,
+    request_timeout: int,
+    kind: str,
+) -> dict[str, Any]:
+    request_payload = {
+        "subject": str(scenario["subject"]),
+        "intent": str(scenario["intent"]),
+        "query": str(scenario["query"]),
+        "facts": scenario.get("facts") if isinstance(scenario.get("facts"), list) else [],
+        "limit": int(scenario.get("limit") or 50),
+        "request_id": f"{run_id}:{scenario['id']}",
+        "use_stored_facts": False,
+    }
+    started = time.monotonic()
+    response = _post_json(
+        f"{das_url.rstrip('/')}/v1/advisory/decision",
+        request_payload,
+        timeout=request_timeout,
+    )
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    data = response.get("json") if isinstance(response.get("json"), dict) else {}
+    decision = data.get("decision") if isinstance(data.get("decision"), dict) else {}
+    checks = _advisor_scenario_checks(
+        response=response,
+        response_payload=data,
+        decision=decision,
+        expect=scenario["expect"],
+    )
+    blocked_conditions = (
+        decision.get("blocked_conditions")
+        if isinstance(decision.get("blocked_conditions"), list)
+        else []
+    )
+    risks = decision.get("risks") if isinstance(decision.get("risks"), list) else []
+    evidence_refs = (
+        decision.get("evidence_refs") if isinstance(decision.get("evidence_refs"), list) else []
+    )
+    return {
+        "id": str(scenario["id"]),
+        "kind": kind,
+        "description": str(scenario.get("description") or ""),
+        "subject": request_payload["subject"],
+        "intent": request_payload["intent"],
+        "status": response.get("status"),
+        "elapsed_ms": elapsed_ms,
+        "decision_status": decision.get("status"),
+        "decision_id": decision.get("decision_id"),
+        "authoritative": decision.get("authoritative"),
+        "risk_count": len(risks),
+        "risks": risks,
+        "blocked_condition_count": len(blocked_conditions),
+        "blocked_conditions": blocked_conditions,
+        "evidence_ref_count": len(evidence_refs),
+        "fact_count": len(request_payload["facts"]),
+        "checks": checks,
+        "ok": all(checks.values()),
+        "error": response.get("error"),
+        "recorded_at": _utc_now(),
+    }
+
+
+def _advisor_scenario_checks(
+    *,
+    response: dict[str, Any],
+    response_payload: dict[str, Any],
+    decision: dict[str, Any],
+    expect: dict[str, Any],
+) -> dict[str, bool]:
+    risks = decision.get("risks") if isinstance(decision.get("risks"), list) else []
+    blocked_conditions = (
+        decision.get("blocked_conditions")
+        if isinstance(decision.get("blocked_conditions"), list)
+        else []
+    )
+    evidence_refs = (
+        decision.get("evidence_refs") if isinstance(decision.get("evidence_refs"), list) else []
+    )
+    expected_blocked_count = expect.get("blocked_condition_count")
+    expected_authoritative = expect.get("authoritative", False)
+    return {
+        "http_ok": response.get("status") == 200,
+        "response_ok": bool(response_payload.get("ok")),
+        "decision_present": bool(decision),
+        "api_version": decision.get("api_version") == ADVISORY_DECISION_API_VERSION,
+        "status": decision.get("status") == expect.get("status"),
+        "authoritative": decision.get("authoritative") is expected_authoritative,
+        "controller_authority": decision.get("controller_authority") == "k1s",
+        "min_evidence_refs": len(evidence_refs) >= int(expect.get("min_evidence_refs") or 0),
+        "risks_present": all(item in risks for item in expect.get("risks_present", [])),
+        "risks_absent": not any(item in risks for item in expect.get("risks_absent", [])),
+        "blocked_condition_count": (
+            expected_blocked_count is None
+            or len(blocked_conditions) == int(expected_blocked_count)
+        ),
     }
 
 
