@@ -168,6 +168,30 @@ def test_ai_fabric_lab_baseline_stage_is_workerbee_valid() -> None:
     )
 
 
+def test_ai_fabric_lab_quality_stage_is_workerbee_valid() -> None:
+    validation = validate_stage(EXAMPLE_ROOT / "stage-quality")
+
+    assert validation["ok"] is True
+    assert validation["input_kinds"] == ["native-k1s"]
+    assert "localhost/workerbee-ai-fabric-models:dev" in validation["images"]
+    assert "ai-fabric-lab/ai-coordinator" in validation["required_controller_scopes"]
+    assert "ai-fabric-lab/ai-expert" in validation["required_controller_scopes"]
+    assert (
+        _env_value(
+            EXAMPLE_ROOT / "stage-quality" / "manifests" / "ai-coordinator.yaml",
+            "AI_FABRIC_TRACK",
+        )
+        == "quality"
+    )
+    assert (
+        _env_value(
+            EXAMPLE_ROOT / "stage-quality" / "manifests" / "ai-expert.yaml",
+            "AI_FABRIC_TRACK",
+        )
+        == "quality"
+    )
+
+
 def test_ai_fabric_lab_lora_plumbing_stage_is_workerbee_valid() -> None:
     validation = validate_stage(EXAMPLE_ROOT / "stage-lora-plumbing")
 
@@ -193,7 +217,13 @@ def test_ai_fabric_lab_lora_plumbing_stage_is_workerbee_valid() -> None:
 
 
 def test_ai_fabric_lab_stages_use_dedicated_workerbee_service_ports() -> None:
-    for stage in ("stage", "stage-baseline", "stage-lora-plumbing", "stage-plumbing"):
+    for stage in (
+        "stage",
+        "stage-baseline",
+        "stage-quality",
+        "stage-lora-plumbing",
+        "stage-plumbing",
+    ):
         manifests = EXAMPLE_ROOT / stage / "manifests"
 
         assert _service_port(manifests / "ai-router.yaml") == 18180
@@ -210,6 +240,65 @@ def test_ai_fabric_lab_runtime_prompt_fixture_is_valid() -> None:
     assert len({item["id"] for item in prompts}) == len(prompts)
 
 
+def test_ai_fabric_lab_runtime_suite_contract() -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_runtime_suite_test")
+
+    assert "adapter-preflight" in lab.RUNTIME_SUITE_CHOICES
+    assert "quality-comparison" in lab.RUNTIME_SUITE_CHOICES
+    assert "stress-burst" in lab.RUNTIME_SUITE_CHOICES
+    assert "recovery-smoke" in lab.RUNTIME_SUITE_CHOICES
+    assert lab._selected_runtime_suites("all") == [
+        "quality-contract",
+        "mixed-soak",
+        "evidence-closeout",
+    ]
+    assert lab._runtime_defaults_for_suite(
+        suite="stress-burst",
+        duration_seconds=None,
+        workers=None,
+        gpu_sample_seconds=None,
+    ) == {"duration_seconds": 900, "workers": 6, "gpu_sample_seconds": 15}
+
+
+def test_ai_fabric_lab_adapter_preflight_blocks_without_payload(tmp_path: Path) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_adapter_preflight_test")
+
+    result = lab._run_adapter_preflight(storage_root=tmp_path)
+
+    assert result["ok"] is True
+    assert result["state"] == "blocked"
+    assert result["blocked"] is True
+    assert "adapter_config_present" in result["missing"]
+
+
+def test_ai_fabric_lab_adapter_preflight_suite_skips_runtime_health(tmp_path: Path) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_adapter_preflight_suite_test")
+
+    result = lab.validate_runtime(
+        EXAMPLE_ROOT,
+        suite="adapter-preflight",
+        prompts=None,
+        storage_root=tmp_path,
+        run_id="adapter-preflight-test",
+        track=None,
+        router_url="http://127.0.0.1:1",
+        das_url="http://127.0.0.1:2",
+        retrieval_url="http://127.0.0.1:3",
+        duration_seconds=None,
+        workers=None,
+        worker_sleep_seconds=0,
+        gpu_sample_seconds=None,
+        request_timeout=1,
+        success_threshold=0.95,
+        vram_growth_mib_max=4096,
+    )
+
+    assert result["ok"] is True
+    assert result["health"]["skipped"] is True
+    assert result["host_aliases"]["skipped"] is True
+    assert result["blocked_items"][0]["suite"] == "adapter-preflight"
+
+
 def test_ai_fabric_lab_runtime_output_files_contract() -> None:
     lab = _load_module(SCRIPT, "ai_fabric_lab_runtime_output_test")
 
@@ -218,9 +307,43 @@ def test_ai_fabric_lab_runtime_output_files_contract() -> None:
         "requests.jsonl",
         "gpu-samples.jsonl",
         "health.json",
+        "lane-readiness.json",
         "f5-evidence.json",
         "workerbee-status.json",
     }
+
+
+def test_ai_fabric_lab_lane_readiness_retries_until_models_answer() -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_lane_readiness_test")
+    calls: list[str] = []
+
+    def fake_post_json(url: str, payload: dict[str, object], timeout: int) -> dict[str, object]:
+        del url, timeout
+        lane = str(payload["lane"])
+        calls.append(lane)
+        if lane == "expert" and calls.count("expert") == 1:
+            return {"status": 503, "error": "upstream unavailable"}
+        return {
+            "status": 200,
+            "json": {
+                "model": lab._expected_chat_model(lane),
+                "choices": [{"message": {"content": "ok"}}],
+            },
+        }
+
+    lab._post_json = fake_post_json
+
+    result = lab._lane_readiness_snapshot(
+        router_url="http://router.example",
+        run_id="readiness-test",
+        timeout_seconds=3,
+        request_timeout=1,
+        interval_seconds=0,
+    )
+
+    assert result["ok"] is True
+    assert result["lanes"]["coordinator"]["attempts"] == 1
+    assert result["lanes"]["expert"]["attempts"] == 2
 
 
 def test_ai_fabric_lab_init_storage_can_target_temp_root(tmp_path: Path) -> None:

@@ -1,0 +1,27 @@
+apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: ai-fabric-lab
+  labels:
+    app: redis
+    workerbee.k1s.dev/project: ai-fabric-lab
+spec:
+  image: redis:7.4-alpine
+  replicas: 1
+  ports:
+    - name: redis
+      containerPort: 6379
+  service:
+    port: 6379
+    targetPort: 6379
+  resources:
+    requests:
+      cpu: 0.25
+      memory: 512Mi
+    limits:
+      cpu: 2
+      memory: 16Gi
+  volumes:
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/redis
+      mountPath: /data

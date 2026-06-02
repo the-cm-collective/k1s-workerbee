@@ -26,9 +26,39 @@ RUNTIME_OUTPUT_FILES = (
     "requests.jsonl",
     "gpu-samples.jsonl",
     "health.json",
+    "lane-readiness.json",
     "f5-evidence.json",
     "workerbee-status.json",
 )
+RUNTIME_SUITE_CHOICES = (
+    "all",
+    "mixed-soak",
+    "quality-contract",
+    "lora-plumbing",
+    "evidence-closeout",
+    "adapter-preflight",
+    "quality-comparison",
+    "stress-burst",
+    "recovery-smoke",
+)
+RUNTIME_ENDPOINT_SUITES = {
+    "mixed-soak",
+    "quality-contract",
+    "lora-plumbing",
+    "evidence-closeout",
+    "quality-comparison",
+    "stress-burst",
+    "recovery-smoke",
+}
+RUNTIME_MODEL_SUITES = {
+    "mixed-soak",
+    "quality-contract",
+    "lora-plumbing",
+    "quality-comparison",
+    "stress-burst",
+    "recovery-smoke",
+}
+ADAPTER_VALIDATION_RELATIVE_PATH = "adapters/expert/validation"
 
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
@@ -133,7 +163,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     runtime_validate.add_argument(
         "--suite",
-        choices=("all", "mixed-soak", "quality-contract", "lora-plumbing", "evidence-closeout"),
+        choices=RUNTIME_SUITE_CHOICES,
         default="all",
     )
     runtime_validate.add_argument("--prompts", type=Path, default=None)
@@ -143,10 +173,10 @@ def main(argv: list[str] | None = None) -> int:
     runtime_validate.add_argument("--router-url", default="http://127.0.0.1:18180")
     runtime_validate.add_argument("--das-url", default="http://127.0.0.1:18181")
     runtime_validate.add_argument("--retrieval-url", default="http://127.0.0.1:18182")
-    runtime_validate.add_argument("--duration-seconds", type=int, default=3600)
-    runtime_validate.add_argument("--workers", type=int, default=3)
+    runtime_validate.add_argument("--duration-seconds", type=int, default=None)
+    runtime_validate.add_argument("--workers", type=int, default=None)
     runtime_validate.add_argument("--worker-sleep-seconds", type=float, default=2.0)
-    runtime_validate.add_argument("--gpu-sample-seconds", type=int, default=30)
+    runtime_validate.add_argument("--gpu-sample-seconds", type=int, default=None)
     runtime_validate.add_argument("--request-timeout", type=int, default=300)
     runtime_validate.add_argument("--success-threshold", type=float, default=0.95)
     runtime_validate.add_argument("--vram-growth-mib-max", type=int, default=4096)
@@ -476,10 +506,10 @@ def validate_runtime(
     router_url: str,
     das_url: str,
     retrieval_url: str,
-    duration_seconds: int,
-    workers: int,
+    duration_seconds: int | None,
+    workers: int | None,
     worker_sleep_seconds: float,
-    gpu_sample_seconds: int,
+    gpu_sample_seconds: int | None,
     request_timeout: int,
     success_threshold: float,
     vram_growth_mib_max: int,
@@ -487,6 +517,16 @@ def validate_runtime(
     storage_layout = _load_json(root / "storage-layout.json")
     target_root = storage_root or Path(str(storage_layout["root"]))
     target_root = target_root.expanduser().resolve()
+    selected_suites = _selected_runtime_suites(suite)
+    runtime_defaults = _runtime_defaults_for_suite(
+        suite=suite,
+        duration_seconds=duration_seconds,
+        workers=workers,
+        gpu_sample_seconds=gpu_sample_seconds,
+    )
+    duration_seconds = runtime_defaults["duration_seconds"]
+    workers = runtime_defaults["workers"]
+    gpu_sample_seconds = runtime_defaults["gpu_sample_seconds"]
     selected_run_id = run_id or f"runtime-validation-{_runtime_timestamp()}"
     run_dir = target_root / "runs" / selected_run_id
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -507,19 +547,67 @@ def validate_runtime(
     prompt_path = (prompts or root / "prompts" / "validation-suite.jsonl").expanduser().resolve()
     prompt_items = _load_prompt_suite(prompt_path)
     findings: list[dict[str, str]] = []
-    health = _health_snapshot(router_url=router_url, das_url=das_url, retrieval_url=retrieval_url)
+    requires_runtime = any(item in RUNTIME_ENDPOINT_SUITES for item in selected_suites)
+    requires_model_runtime = any(item in RUNTIME_MODEL_SUITES for item in selected_suites)
+    health = (
+        _health_snapshot(router_url=router_url, das_url=das_url, retrieval_url=retrieval_url)
+        if requires_runtime
+        else {
+            "ok": True,
+            "skipped": True,
+            "reason": "selected suites do not require live runtime endpoints",
+            "checked_at": _utc_now(),
+        }
+    )
+    host_aliases = (
+        _host_alias_snapshot(router_url=router_url, das_url=das_url, retrieval_url=retrieval_url)
+        if requires_runtime
+        else {
+            "ok": True,
+            "skipped": True,
+            "reason": "selected suites do not require live runtime endpoints",
+            "checked_at": _utc_now(),
+            "endpoints": {},
+        }
+    )
+    if requires_model_runtime and health.get("ok"):
+        lane_readiness = _lane_readiness_snapshot(
+            router_url=router_url,
+            run_id=selected_run_id,
+            timeout_seconds=min(max(request_timeout, 180), 300),
+            request_timeout=min(max(request_timeout, 20), 60),
+        )
+    else:
+        lane_readiness = {
+            "ok": True,
+            "skipped": True,
+            "reason": (
+                "selected suites do not require model-backed runtime lanes"
+                if not requires_model_runtime
+                else "runtime health failed before lane readiness"
+            ),
+            "checked_at": _utc_now(),
+            "lanes": {},
+        }
     paths["health.json"].write_text(
         json.dumps(health, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+    paths["lane-readiness.json"].write_text(
+        json.dumps(lane_readiness, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     if not health.get("ok"):
         findings.append(_finding("error", "RUNTIME_HEALTH", "one or more runtime endpoints failed"))
-
-    selected_suites = (
-        ["quality-contract", "mixed-soak", "evidence-closeout"]
-        if suite == "all"
-        else [suite]
-    )
+    if requires_model_runtime and not lane_readiness.get("ok"):
+        findings.append(
+            _finding("error", "RUNTIME_LANE_READINESS", "one or more model lanes were not ready")
+        )
+    if "recovery-smoke" in selected_suites and not host_aliases.get("ok"):
+        findings.append(
+            _finding("error", "RUNTIME_HOST_ALIASES", "one or more host aliases failed")
+        )
+    blocked_items: list[dict[str, Any]] = []
     summary: dict[str, Any] = {
         "ok": True,
         "api_version": "workerbee.ai-fabric.runtime-validation/v1",
@@ -532,8 +620,12 @@ def validate_runtime(
         "router_url": router_url,
         "das_url": das_url,
         "retrieval_url": retrieval_url,
+        "runtime_defaults": runtime_defaults,
         "output_files": {key: str(value) for key, value in paths.items()},
         "health": health,
+        "host_aliases": host_aliases,
+        "lane_readiness": lane_readiness,
+        "blocked_items": blocked_items,
         "suites": {},
         "findings": findings,
     }
@@ -546,8 +638,31 @@ def validate_runtime(
                 requests_path=paths["requests.jsonl"],
                 request_timeout=request_timeout,
             )
+        elif item == "quality-comparison":
+            result = _run_quality_comparison(
+                prompts=prompt_items,
+                router_url=router_url,
+                run_id=selected_run_id,
+                requests_path=paths["requests.jsonl"],
+                request_timeout=request_timeout,
+            )
         elif item == "mixed-soak":
             result = _run_mixed_soak(
+                prompts=prompt_items,
+                router_url=router_url,
+                run_id=selected_run_id,
+                requests_path=paths["requests.jsonl"],
+                gpu_samples_path=paths["gpu-samples.jsonl"],
+                duration_seconds=duration_seconds,
+                workers=workers,
+                worker_sleep_seconds=worker_sleep_seconds,
+                gpu_sample_seconds=gpu_sample_seconds,
+                request_timeout=request_timeout,
+                success_threshold=success_threshold,
+                vram_growth_mib_max=vram_growth_mib_max,
+            )
+        elif item == "stress-burst":
+            result = _run_stress_burst(
                 prompts=prompt_items,
                 router_url=router_url,
                 run_id=selected_run_id,
@@ -576,9 +691,27 @@ def validate_runtime(
                 das_url=das_url,
                 f5_evidence_path=paths["f5-evidence.json"],
             )
+        elif item == "adapter-preflight":
+            result = _run_adapter_preflight(storage_root=target_root)
+        elif item == "recovery-smoke":
+            result = _run_recovery_smoke(
+                router_url=router_url,
+                run_id=selected_run_id,
+                requests_path=paths["requests.jsonl"],
+                request_timeout=request_timeout,
+                host_aliases=host_aliases,
+            )
         else:  # pragma: no cover - argparse constrains values.
             result = {"ok": False, "findings": [_finding("error", "UNKNOWN_SUITE", item)]}
         summary["suites"][item] = result
+        if result.get("state") == "blocked" or result.get("blocked") is True:
+            blocked_items.append(
+                {
+                    "suite": item,
+                    "state": str(result.get("state") or "blocked"),
+                    "message": str(result.get("message") or ""),
+                }
+            )
         for finding in result.get("findings", []):
             if isinstance(finding, dict):
                 findings.append(finding)
@@ -591,6 +724,30 @@ def validate_runtime(
         encoding="utf-8",
     )
     return summary
+
+
+def _selected_runtime_suites(suite: str) -> list[str]:
+    return ["quality-contract", "mixed-soak", "evidence-closeout"] if suite == "all" else [suite]
+
+
+def _runtime_defaults_for_suite(
+    *,
+    suite: str,
+    duration_seconds: int | None,
+    workers: int | None,
+    gpu_sample_seconds: int | None,
+) -> dict[str, int]:
+    if suite == "stress-burst":
+        return {
+            "duration_seconds": duration_seconds or 900,
+            "workers": workers or 6,
+            "gpu_sample_seconds": gpu_sample_seconds or 15,
+        }
+    return {
+        "duration_seconds": duration_seconds or 3600,
+        "workers": workers or 3,
+        "gpu_sample_seconds": gpu_sample_seconds or 30,
+    }
 
 
 def _load_prompt_suite(path: Path) -> list[dict[str, Any]]:
@@ -633,6 +790,128 @@ def _health_snapshot(*, router_url: str, das_url: str, retrieval_url: str) -> di
     }
 
 
+def _host_alias_snapshot(*, router_url: str, das_url: str, retrieval_url: str) -> dict[str, Any]:
+    endpoints = {
+        "router": f"{router_url.rstrip('/')}/healthz",
+        "das": f"{das_url.rstrip('/')}/healthz",
+        "retrieval": f"{retrieval_url.rstrip('/')}/healthz",
+    }
+    results = {}
+    for name, url in endpoints.items():
+        payload = _get_json(url, timeout=20)
+        results[name] = {
+            "url": url,
+            "ok": bool(payload.get("ok")),
+            "service": payload.get("service"),
+            "error": payload.get("error"),
+        }
+    return {
+        "ok": all(bool(item.get("ok")) for item in results.values()),
+        "checked_at": _utc_now(),
+        "endpoints": results,
+    }
+
+
+def _lane_readiness_snapshot(
+    *,
+    router_url: str,
+    run_id: str,
+    timeout_seconds: int,
+    request_timeout: int,
+    interval_seconds: float = 5.0,
+) -> dict[str, Any]:
+    lanes = {
+        "coordinator": {
+            "ok": False,
+            "attempts": 0,
+            "expected_model": _expected_chat_model("coordinator"),
+        },
+        "expert": {
+            "ok": False,
+            "attempts": 0,
+            "expected_model": _expected_chat_model("expert"),
+        },
+    }
+    deadline = time.monotonic() + max(1, timeout_seconds)
+    while time.monotonic() < deadline:
+        for lane, state in lanes.items():
+            if state.get("ok"):
+                continue
+            attempt = _chat_lane_readiness_probe(
+                lane=lane,
+                router_url=router_url,
+                run_id=run_id,
+                request_timeout=request_timeout,
+            )
+            state.update(attempt)
+            state["attempts"] = int(state.get("attempts") or 0) + 1
+        if all(bool(item.get("ok")) for item in lanes.values()):
+            break
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(interval_seconds, remaining))
+    return {
+        "ok": all(bool(item.get("ok")) for item in lanes.values()),
+        "checked_at": _utc_now(),
+        "timeout_seconds": timeout_seconds,
+        "request_timeout": request_timeout,
+        "lanes": lanes,
+    }
+
+
+def _chat_lane_readiness_probe(
+    *,
+    lane: str,
+    router_url: str,
+    run_id: str,
+    request_timeout: int,
+) -> dict[str, Any]:
+    payload = {
+        "lane": lane,
+        "messages": [{"role": "user", "content": "Readiness check. Reply ok."}],
+        "temperature": 0,
+        "max_tokens": 4,
+        "metadata": {
+            "run_id": run_id,
+            "suite": "lane-readiness",
+            "lane": lane,
+        },
+    }
+    started = time.monotonic()
+    response = _post_json(
+        f"{router_url.rstrip('/')}/v1/chat/completions",
+        payload,
+        timeout=request_timeout,
+    )
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    data = response.get("json") if isinstance(response.get("json"), dict) else {}
+    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+    content = None
+    if choices and isinstance(choices[0], dict):
+        message = choices[0].get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+    expected_model = _expected_chat_model(lane)
+    model_id = data.get("model")
+    checks = {
+        "http_ok": response.get("status") == 200,
+        "expected_model": model_id == expected_model,
+        "content_present": isinstance(content, str) and bool(content.strip()),
+    }
+    return {
+        "ok": all(checks.values()),
+        "status": response.get("status"),
+        "elapsed_ms": elapsed_ms,
+        "expected_model": expected_model,
+        "model_id": model_id,
+        "content_chars": len(content or ""),
+        "checks": checks,
+        "error": response.get("error"),
+        "checked_at": _utc_now(),
+    }
+
+
 def _run_quality_contract(
     *,
     prompts: list[dict[str, Any]],
@@ -640,6 +919,7 @@ def _run_quality_contract(
     run_id: str,
     requests_path: Path,
     request_timeout: int,
+    suite_label: str = "quality-contract",
 ) -> dict[str, Any]:
     selected = [item for item in prompts if item.get("suite") == "quality-contract"]
     findings: list[dict[str, str]] = []
@@ -650,6 +930,7 @@ def _run_quality_contract(
             router_url=router_url,
             run_id=run_id,
             request_timeout=request_timeout,
+            suite_label=suite_label,
         )
         _append_jsonl(requests_path, record)
         results.append(record)
@@ -663,10 +944,76 @@ def _run_quality_contract(
             )
     return {
         "ok": bool(selected) and not [item for item in findings if item["level"] == "error"],
+        "suite_label": suite_label,
+        "prompt_suite": "quality-contract",
         "prompt_count": len(selected),
         "results": results,
         "findings": findings,
     }
+
+
+def _run_quality_comparison(
+    *,
+    prompts: list[dict[str, Any]],
+    router_url: str,
+    run_id: str,
+    requests_path: Path,
+    request_timeout: int,
+) -> dict[str, Any]:
+    result = _run_quality_contract(
+        prompts=prompts,
+        router_url=router_url,
+        run_id=run_id,
+        requests_path=requests_path,
+        request_timeout=request_timeout,
+        suite_label="quality-comparison",
+    )
+    result["metrics"] = _quality_metrics(result["results"])
+    return result
+
+
+def _quality_metrics(results: list[dict[str, Any]]) -> dict[str, Any]:
+    lanes: dict[str, dict[str, Any]] = {}
+    for record in results:
+        lane = str(record.get("expected_lane") or record.get("lane") or "unknown")
+        lane_metrics = lanes.setdefault(
+            lane,
+            {
+                "prompt_count": 0,
+                "ok_count": 0,
+                "elapsed_ms_total": 0,
+                "retrieval_hits_min": None,
+                "symbolic_facts_min": None,
+                "models": set(),
+            },
+        )
+        lane_metrics["prompt_count"] += 1
+        if record.get("ok"):
+            lane_metrics["ok_count"] += 1
+        if isinstance(record.get("elapsed_ms"), int):
+            lane_metrics["elapsed_ms_total"] += int(record["elapsed_ms"])
+        if record.get("model_id"):
+            lane_metrics["models"].add(str(record["model_id"]))
+        for source_key, target_key in (
+            ("retrieval_hits", "retrieval_hits_min"),
+            ("symbolic_facts", "symbolic_facts_min"),
+        ):
+            value = record.get(source_key)
+            if isinstance(value, int):
+                current = lane_metrics[target_key]
+                lane_metrics[target_key] = value if current is None else min(current, value)
+    serializable = {}
+    for lane, metrics in lanes.items():
+        count = int(metrics["prompt_count"])
+        serializable[lane] = {
+            "prompt_count": count,
+            "ok_count": int(metrics["ok_count"]),
+            "avg_elapsed_ms": int(metrics["elapsed_ms_total"] / count) if count else None,
+            "retrieval_hits_min": metrics["retrieval_hits_min"],
+            "symbolic_facts_min": metrics["symbolic_facts_min"],
+            "models": sorted(metrics["models"]),
+        }
+    return {"lanes": serializable}
 
 
 def _advisory_prompt_record(
@@ -675,6 +1022,7 @@ def _advisory_prompt_record(
     router_url: str,
     run_id: str,
     request_timeout: int,
+    suite_label: str = "quality-contract",
 ) -> dict[str, Any]:
     expected_lane = str(prompt.get("lane"))
     payload = {
@@ -683,7 +1031,7 @@ def _advisory_prompt_record(
         "run_id": run_id,
         "metadata": {
             "prompt_id": str(prompt["id"]),
-            "suite": "quality-contract",
+            "suite": suite_label,
         },
     }
     started = time.monotonic()
@@ -714,7 +1062,7 @@ def _advisory_prompt_record(
     }
     return {
         "id": str(prompt["id"]),
-        "suite": "quality-contract",
+        "suite": suite_label,
         "status": response.get("status"),
         "elapsed_ms": elapsed_ms,
         "lane": data.get("lane"),
@@ -748,6 +1096,7 @@ def _run_mixed_soak(
     request_timeout: int,
     success_threshold: float,
     vram_growth_mib_max: int,
+    suite_label: str = "mixed-soak",
 ) -> dict[str, Any]:
     selected = [item for item in prompts if item.get("suite") == "mixed-soak"]
     if not selected:
@@ -784,6 +1133,7 @@ def _run_mixed_soak(
                 run_id=run_id,
                 worker_id=worker_id,
                 request_timeout=request_timeout,
+                suite_label=suite_label,
             )
             with lock:
                 records.append(record)
@@ -851,6 +1201,41 @@ def _run_mixed_soak(
     }
 
 
+def _run_stress_burst(
+    *,
+    prompts: list[dict[str, Any]],
+    router_url: str,
+    run_id: str,
+    requests_path: Path,
+    gpu_samples_path: Path,
+    duration_seconds: int,
+    workers: int,
+    worker_sleep_seconds: float,
+    gpu_sample_seconds: int,
+    request_timeout: int,
+    success_threshold: float,
+    vram_growth_mib_max: int,
+) -> dict[str, Any]:
+    result = _run_mixed_soak(
+        prompts=prompts,
+        router_url=router_url,
+        run_id=run_id,
+        requests_path=requests_path,
+        gpu_samples_path=gpu_samples_path,
+        duration_seconds=duration_seconds,
+        workers=workers,
+        worker_sleep_seconds=worker_sleep_seconds,
+        gpu_sample_seconds=gpu_sample_seconds,
+        request_timeout=request_timeout,
+        success_threshold=success_threshold,
+        vram_growth_mib_max=vram_growth_mib_max,
+        suite_label="stress-burst",
+    )
+    result["profile"] = "stress-burst"
+    result["suite_label"] = "stress-burst"
+    return result
+
+
 def _chat_prompt_record(
     *,
     prompt: dict[str, Any],
@@ -858,6 +1243,7 @@ def _chat_prompt_record(
     run_id: str,
     worker_id: int,
     request_timeout: int,
+    suite_label: str = "mixed-soak",
 ) -> dict[str, Any]:
     lane = str(prompt.get("lane"))
     payload = {
@@ -882,7 +1268,7 @@ def _chat_prompt_record(
         if isinstance(message, dict):
             content = message.get("content")
     model_id = data.get("model")
-    expected_model = "k1s-code-expert" if lane == "expert" else "general-coordinator"
+    expected_model = _expected_chat_model(lane)
     checks = {
         "http_ok": response.get("status") == 200,
         "expected_model": model_id == expected_model,
@@ -890,7 +1276,7 @@ def _chat_prompt_record(
     }
     return {
         "id": str(prompt["id"]),
-        "suite": "mixed-soak",
+        "suite": suite_label,
         "worker_id": worker_id,
         "status": response.get("status"),
         "elapsed_ms": elapsed_ms,
@@ -901,6 +1287,135 @@ def _chat_prompt_record(
         "ok": all(checks.values()),
         "error": response.get("error"),
         "recorded_at": _utc_now(),
+    }
+
+
+def _expected_chat_model(lane: str) -> str:
+    return "k1s-code-expert" if lane == "expert" else "general-coordinator"
+
+
+def _run_adapter_preflight(
+    *,
+    storage_root: Path,
+    adapter_relative_path: str = ADAPTER_VALIDATION_RELATIVE_PATH,
+) -> dict[str, Any]:
+    adapter_path = storage_root / adapter_relative_path
+    weight_candidates = [
+        adapter_path / "adapter_model.safetensors",
+        adapter_path / "adapter_model.bin",
+        adapter_path / "adapter_model.pt",
+    ]
+    checks = {
+        "path_exists": adapter_path.exists(),
+        "is_directory": adapter_path.is_dir(),
+        "adapter_config_present": (adapter_path / "adapter_config.json").is_file(),
+        "adapter_weights_present": any(path.is_file() for path in weight_candidates),
+    }
+    ready = all(checks.values())
+    if ready:
+        return {
+            "ok": True,
+            "state": "ready",
+            "blocked": False,
+            "adapter_path": str(adapter_path),
+            "checks": checks,
+            "findings": [],
+        }
+    missing = [key for key, value in checks.items() if not value]
+    return {
+        "ok": True,
+        "state": "blocked",
+        "blocked": True,
+        "adapter_path": str(adapter_path),
+        "expected_files": [
+            "adapter_config.json",
+            "adapter_model.safetensors|adapter_model.bin|adapter_model.pt",
+        ],
+        "checks": checks,
+        "missing": missing,
+        "message": "validation adapter payload is not present",
+        "findings": [
+            _finding(
+                "warning",
+                "ADAPTER_PREFLIGHT_BLOCKED",
+                f"missing validation adapter payload at {adapter_path}",
+            )
+        ],
+    }
+
+
+def _run_recovery_smoke(
+    *,
+    router_url: str,
+    run_id: str,
+    requests_path: Path,
+    request_timeout: int,
+    host_aliases: dict[str, Any],
+) -> dict[str, Any]:
+    prompts = [
+        {
+            "id": "recovery-smoke-coordinator",
+            "lane": "coordinator",
+            "prompt": (
+                "Return one concise sentence confirming ai_fabric.coordinator_model "
+                "model and revision facts are available for recovery."
+            ),
+            "min_retrieval_hits": 1,
+            "min_symbolic_facts": 1,
+        },
+        {
+            "id": "recovery-smoke-expert",
+            "lane": "expert",
+            "prompt": (
+                "Return one concise sentence confirming ai_fabric.expert_model "
+                "model and revision facts are available for k1s code expert recovery."
+            ),
+            "min_retrieval_hits": 1,
+            "min_symbolic_facts": 1,
+        },
+    ]
+    findings: list[dict[str, str]] = []
+    results = []
+    for prompt in prompts:
+        record = _advisory_prompt_record(
+            prompt=prompt,
+            router_url=router_url,
+            run_id=run_id,
+            request_timeout=request_timeout,
+            suite_label="recovery-smoke",
+        )
+        _append_jsonl(requests_path, record)
+        results.append(record)
+        if not record.get("ok"):
+            findings.append(
+                _finding(
+                    "error",
+                    "RECOVERY_PROMPT_FAILED",
+                    str(record.get("id") or "unknown prompt"),
+                )
+            )
+    checks = {
+        "host_aliases_ok": bool(host_aliases.get("ok")),
+        "coordinator_ok": any(
+            item.get("expected_lane") == "coordinator" and item.get("ok") for item in results
+        ),
+        "expert_ok": any(
+            item.get("expected_lane") == "expert" and item.get("ok") for item in results
+        ),
+        "traces_persisted": all(
+            bool(item.get("trace_id")) and bool(item.get("trace_path")) for item in results
+        ),
+    }
+    for key, value in checks.items():
+        if not value:
+            findings.append(_finding("error", "RECOVERY_SMOKE", key))
+    return {
+        "ok": all(checks.values()),
+        "prompt_count": len(prompts),
+        "host_aliases": host_aliases,
+        "checks": checks,
+        "results": results,
+        "findings": findings,
     }
 
 

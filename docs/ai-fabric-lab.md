@@ -83,8 +83,9 @@ workerbee build-image examples/ai-fabric-lab/images/fake-model \
 workerbee manifest deploy-local --stage examples/ai-fabric-lab/stage-plumbing
 ```
 
-Use `examples/ai-fabric-lab/stage` for the two-lane Qwen smoke track and
-`examples/ai-fabric-lab/stage-baseline` for the resident baseline track.
+Use `examples/ai-fabric-lab/stage` for the two-lane Qwen smoke track,
+`examples/ai-fabric-lab/stage-baseline` for the resident baseline track, and
+`examples/ai-fabric-lab/stage-quality` for quality-contract comparison runs.
 Use `examples/ai-fabric-lab/stage-lora-plumbing` for the small Qwen LoRA
 plumbing track. That track keeps the same small all-Qwen model pair as smoke
 but lowers both lanes to 4k context and shifts more GPU budget to the expert so
@@ -253,8 +254,26 @@ python3 scripts/dev/ai_fabric_lab.py validate-runtime \
   --run-id ai-fabric-baseline-$(date -u +%Y%m%dT%H%M%SZ)
 ```
 
+For short iteration on the remaining untested areas, run these suites in order:
+
+```bash
+python3 scripts/dev/ai_fabric_lab.py validate-runtime --suite adapter-preflight
+python3 scripts/dev/ai_fabric_lab.py validate-runtime --suite quality-comparison
+python3 scripts/dev/ai_fabric_lab.py validate-runtime --suite stress-burst
+python3 scripts/dev/ai_fabric_lab.py validate-runtime --suite recovery-smoke
+```
+
+`adapter-preflight` checks
+`/srv/storage/k1s/ai-fabric-lab/adapters/expert/validation` for a real adapter
+payload. If no payload exists, it records `state=blocked` and leaves the run
+successful so unrelated runtime validation can continue.
+
 The runner writes `summary.json`, `requests.jsonl`, `gpu-samples.jsonl`,
-`health.json`, `f5-evidence.json`, and a `workerbee-status.json` placeholder
-under `/srv/storage/k1s/ai-fabric-lab/runs/<run-id>/`. Capture final
-WorkerBee MCP project status during closeout and store it in that placeholder
-path when a run is promoted to acceptance evidence.
+`health.json`, `lane-readiness.json`, `f5-evidence.json`, and a
+`workerbee-status.json` placeholder under
+`/srv/storage/k1s/ai-fabric-lab/runs/<run-id>/`. Capture final WorkerBee MCP
+project status during closeout and store it in that placeholder path when a run
+is promoted to acceptance evidence. Runtime summaries also record selected
+defaults, blocked items, host alias health for the validated router, DAS, and
+retrieval endpoints, and model lane readiness for suites that exercise
+coordinator or expert chat/advisory calls.
