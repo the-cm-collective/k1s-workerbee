@@ -12,7 +12,7 @@ spec:
   replicas: 1
   env:
     - name: AI_ROUTER_CONFIG_REV
-      value: plumbing-smoke-v2
+      value: plumbing-smoke-v3
     - name: COORDINATOR_URL
       value: http://fake-model.ai-fabric-lab.svc.cluster.local:8090/v1/chat/completions
     - name: EXPERT_URL

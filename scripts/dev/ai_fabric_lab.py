@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -69,6 +70,7 @@ ADAPTER_EXPECTED_BASE_MODELS = (
 )
 ADAPTER_MAX_LORA_RANK = 16
 RUNTIME_FACT_SOURCE = "workerbee.ai-fabric.runtime-facts/v1"
+ADVISORY_DECISION_API_VERSION = "workerbee.ai-fabric.advisory-decision/v1"
 RUNTIME_RELATIONSHIP_PREDICATES = (
     "owns_service",
     "depends_on",
@@ -177,9 +179,12 @@ def main(argv: list[str] | None = None) -> int:
     runtime_facts = sub.add_parser("import-runtime-facts", help="Import lab facts into DAS")
     runtime_facts.add_argument("--stage", type=Path, default=None)
     runtime_facts.add_argument("--das-url", default="http://127.0.0.1:8081")
+    runtime_facts.add_argument("--router-url", default="http://127.0.0.1:18180")
+    runtime_facts.add_argument("--retrieval-url", default="http://127.0.0.1:18182")
     runtime_facts.add_argument("--project", default="")
     runtime_facts.add_argument("--track", default="")
     runtime_facts.add_argument("--k1s-root", type=Path, default=REPO_ROOT.parent / "k1s")
+    runtime_facts.add_argument("--workerbee-status", type=Path, default=None)
     runtime_facts.add_argument(
         "--phase-report",
         type=Path,
@@ -253,10 +258,13 @@ def main(argv: list[str] | None = None) -> int:
             root,
             stage=args.stage,
             das_url=args.das_url,
+            router_url=args.router_url,
+            retrieval_url=args.retrieval_url,
             project=args.project,
             track=args.track or None,
             k1s_root=args.k1s_root,
             phase_report=args.phase_report,
+            workerbee_status=args.workerbee_status,
         )
         return _emit(result, json_out=args.json)
     if args.cmd == "import-phase-facts":
@@ -440,10 +448,13 @@ def import_runtime_facts(
     *,
     stage: Path | None = None,
     das_url: str,
+    router_url: str = "http://127.0.0.1:18180",
+    retrieval_url: str = "http://127.0.0.1:18182",
     project: str,
     track: str | None,
     k1s_root: Path,
     phase_report: Path | None = None,
+    workerbee_status: Path | None = None,
 ) -> dict[str, Any]:
     model_tracks = _load_json(root / "model-tracks.json")
     stage_dir = (stage or root / "stage").expanduser().resolve()
@@ -467,6 +478,14 @@ def import_runtime_facts(
         config=config,
         k1s_root=k1s_root,
         stage_dir=stage_dir,
+    )
+    facts.extend(
+        _runtime_state_facts(
+            router_url=router_url,
+            das_url=das_url,
+            retrieval_url=retrieval_url,
+            workerbee_status=workerbee_status,
+        )
     )
     findings: list[dict[str, str]] = []
     if phase_report is not None:
@@ -1771,7 +1790,7 @@ def _post_json(url: str, payload: dict[str, Any], *, timeout: int) -> dict[str, 
             "json": {},
             "error": exc.read().decode("utf-8", errors="replace"),
         }
-    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
         return {"ok": False, "status": None, "json": {}, "error": str(exc)}
 
 
@@ -1781,8 +1800,13 @@ def _get_json(url: str, *, timeout: int) -> dict[str, Any]:
             raw = response.read().decode("utf-8")
             payload = json.loads(raw)
             return payload if isinstance(payload, dict) else {"ok": False, "error": "invalid_json"}
-    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
         return {"ok": False, "error": str(exc), "url": url}
+
+
+def _is_local_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.hostname in {"127.0.0.1", "::1", "localhost"}
 
 
 def _extract_model_ids(payload: Any) -> set[str]:
@@ -1918,6 +1942,12 @@ def _runtime_facts(
             for predicate in RUNTIME_RELATIONSHIP_PREDICATES
         ],
         _runtime_fact("ai_fabric.track", "configured_as", track, source=RUNTIME_FACT_SOURCE),
+        _runtime_fact(
+            "ai_fabric.advisory_decision",
+            "api_version",
+            ADVISORY_DECISION_API_VERSION,
+            source=RUNTIME_FACT_SOURCE,
+        ),
         _runtime_fact(
             "ai_fabric.coordinator_model",
             "model",
@@ -2233,6 +2263,202 @@ def _validation_artifact_facts() -> list[dict[str, Any]]:
         )
         for filename in RUNTIME_OUTPUT_FILES
     ]
+
+
+def _runtime_state_facts(
+    *,
+    router_url: str,
+    das_url: str,
+    retrieval_url: str,
+    workerbee_status: Path | None,
+) -> list[dict[str, Any]]:
+    facts: list[dict[str, Any]] = [
+        _runtime_fact(
+            "ai_fabric.advisory_decision",
+            "api_version",
+            ADVISORY_DECISION_API_VERSION,
+            source=RUNTIME_FACT_SOURCE,
+        )
+    ]
+    health_targets = {
+        "ai-router": router_url,
+        "das-bridge": das_url,
+        "retrieval-indexer": retrieval_url,
+    }
+    for service_name, base_url in health_targets.items():
+        subject = f"ai_fabric.service.{service_name}"
+        health = _local_health(base_url)
+        readiness = "ready" if health.get("ok") is True else "unavailable"
+        if health.get("skipped"):
+            readiness = "unknown"
+        facts.extend(
+            [
+                _runtime_fact(subject, "readiness", readiness, source=RUNTIME_FACT_SOURCE),
+                _runtime_fact(subject, "host_alias_health", health, source=RUNTIME_FACT_SOURCE),
+            ]
+        )
+        if service_name == "das-bridge" and isinstance(health.get("payload"), dict):
+            payload = health["payload"]
+            for key in ("fact_count", "f5_evidence_count"):
+                if key in payload:
+                    facts.append(
+                        _runtime_fact(
+                            subject,
+                            key,
+                            payload[key],
+                            source=RUNTIME_FACT_SOURCE,
+                        )
+                    )
+        if service_name == "retrieval-indexer" and isinstance(health.get("payload"), dict):
+            payload = health["payload"]
+            for key in ("document_count", "chunk_count", "qdrant_indexed"):
+                if key in payload:
+                    facts.append(
+                        _runtime_fact(
+                            "ai_fabric.retrieval_corpus",
+                            key,
+                            payload[key],
+                            source=RUNTIME_FACT_SOURCE,
+                        )
+                    )
+    facts.extend(_model_lane_state_facts(router_url=router_url))
+    if workerbee_status is not None:
+        facts.extend(_workerbee_status_facts(workerbee_status))
+    return facts
+
+
+def _local_health(base_url: str) -> dict[str, Any]:
+    if not _is_local_url(base_url):
+        return {
+            "ok": None,
+            "skipped": True,
+            "url": f"{base_url.rstrip('/')}/healthz",
+            "reason": "non_local_url",
+        }
+    url = f"{base_url.rstrip('/')}/healthz"
+    payload = _get_json(url, timeout=5)
+    return {
+        "ok": bool(payload.get("ok")),
+        "url": url,
+        "service": payload.get("service"),
+        "error": payload.get("error"),
+        "payload": payload,
+    }
+
+
+def _model_lane_state_facts(*, router_url: str) -> list[dict[str, Any]]:
+    facts: list[dict[str, Any]] = []
+    if not _is_local_url(router_url):
+        return [
+            _runtime_fact(
+                f"ai_fabric.model.{lane}",
+                "model_lane_readiness",
+                {"ok": None, "lane": lane, "skipped": True, "reason": "non_local_router_url"},
+                source=RUNTIME_FACT_SOURCE,
+            )
+            for lane in ("coordinator", "expert")
+        ]
+    for lane in ("coordinator", "expert"):
+        payload = _get_json(f"{router_url.rstrip('/')}/v1/models?lane={lane}", timeout=15)
+        models = payload.get("data") if isinstance(payload.get("data"), list) else []
+        errors = payload.get("errors") if isinstance(payload.get("errors"), dict) else {}
+        facts.append(
+            _runtime_fact(
+                f"ai_fabric.model.{lane}",
+                "model_lane_readiness",
+                {
+                    "ok": bool(payload.get("ok")),
+                    "lane": lane,
+                    "model_count": len(models),
+                    "errors": errors,
+                    "url": f"{router_url.rstrip('/')}/v1/models?lane={lane}",
+                },
+                source=RUNTIME_FACT_SOURCE,
+            )
+        )
+    return facts
+
+
+def _workerbee_status_facts(path: Path) -> list[dict[str, Any]]:
+    if not path.expanduser().is_file():
+        return [
+            _runtime_fact(
+                "workerbee.project",
+                "status_snapshot",
+                {"ok": False, "path": str(path), "error": "missing"},
+                source=RUNTIME_FACT_SOURCE,
+            )
+        ]
+    try:
+        payload = _load_json(path.expanduser())
+    except (OSError, TypeError, json.JSONDecodeError) as exc:
+        return [
+            _runtime_fact(
+                "workerbee.project",
+                "status_snapshot",
+                {"ok": False, "path": str(path), "error": str(exc)},
+                source=RUNTIME_FACT_SOURCE,
+            )
+        ]
+    data = payload.get("data") if isinstance(payload.get("data"), dict) else payload
+    latest = (
+        data.get("latest_deployment")
+        if isinstance(data.get("latest_deployment"), dict)
+        else {}
+    )
+    app_status = data.get("app_status") if isinstance(data.get("app_status"), dict) else {}
+    if not app_status and isinstance(latest.get("app_status"), dict):
+        app_status = latest["app_status"]
+    facts = [
+        _runtime_fact(
+            "workerbee.project",
+            "status_snapshot",
+            {
+                "ok": bool(payload.get("ok", True)),
+                "path": str(path.expanduser()),
+                "deployment_id": app_status.get("deployment_id") or latest.get("id"),
+            },
+            source=RUNTIME_FACT_SOURCE,
+        )
+    ]
+    if app_status:
+        facts.extend(
+            [
+                _runtime_fact(
+                    "workerbee.project",
+                    "readiness",
+                    "ready" if app_status.get("ready") else "degraded",
+                    source=RUNTIME_FACT_SOURCE,
+                ),
+                _runtime_fact(
+                    "workerbee.project",
+                    "degraded_workload_count",
+                    app_status.get("degraded_workload_count", 0),
+                    source=RUNTIME_FACT_SOURCE,
+                ),
+            ]
+        )
+        for item in app_status.get("ready_workloads") or []:
+            if isinstance(item, dict) and item.get("name"):
+                facts.append(
+                    _runtime_fact(
+                        f"ai_fabric.service.{item['name']}",
+                        "readiness",
+                        "ready",
+                        source=RUNTIME_FACT_SOURCE,
+                    )
+                )
+        for item in app_status.get("degraded_workloads") or []:
+            if isinstance(item, dict) and item.get("name"):
+                facts.append(
+                    _runtime_fact(
+                        f"ai_fabric.service.{item['name']}",
+                        "readiness",
+                        "degraded",
+                        source=RUNTIME_FACT_SOURCE,
+                    )
+                )
+    return facts
 
 
 def _phase_report_facts(report: dict[str, Any]) -> list[dict[str, Any]]:

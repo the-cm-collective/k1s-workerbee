@@ -32,10 +32,11 @@ ADVISORY_MODEL_TIMEOUT = float(os.getenv("AI_ROUTER_ADVISORY_MODEL_TIMEOUT", "45
 RETRIEVAL_TIMEOUT = float(os.getenv("AI_ROUTER_RETRIEVAL_TIMEOUT", "8"))
 SYMBOLIC_TIMEOUT = float(os.getenv("AI_ROUTER_SYMBOLIC_TIMEOUT", "8"))
 TRACE_DIR = Path(os.getenv("AI_ROUTER_TRACE_DIR", "/data/traces"))
+ADVISORY_DECISION_API_VERSION = "workerbee.ai-fabric.advisory-decision/v1"
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ai-fabric-router/0.3"
+    server_version = "ai-fabric-router/0.4"
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -93,7 +94,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 self.end_headers()
                 self.wfile.write(response.read())
-        except URLError as exc:
+        except (OSError, URLError) as exc:
             self._json(
                 {
                     "error": "upstream_unavailable",
@@ -137,7 +138,19 @@ def _advisory_response(payload: dict[str, Any]) -> dict[str, Any]:
     query = _query_text(payload)
     retrieval = _retrieve_evidence(query, limit=5)
     symbolic = _query_symbolic_evidence(query, limit=5)
-    model = _call_advisory_model(lane, payload, retrieval, symbolic)
+    advisory_decision = _query_das_advisory_decision(
+        payload=payload,
+        query=query,
+        symbolic=symbolic,
+        limit=5,
+    )
+    model = _call_advisory_model(
+        lane,
+        payload,
+        retrieval,
+        symbolic,
+        advisory_decision=advisory_decision,
+    )
     answer = model.get("content") if model.get("ok") else None
     trace = _advisory_trace(
         payload=payload,
@@ -145,6 +158,7 @@ def _advisory_response(payload: dict[str, Any]) -> dict[str, Any]:
         query=query,
         retrieval=retrieval,
         symbolic=symbolic,
+        advisory_decision=advisory_decision,
         model=model,
         answer=answer,
     )
@@ -160,7 +174,9 @@ def _advisory_response(payload: dict[str, Any]) -> dict[str, Any]:
         "evidence": {
             "retrieval": retrieval,
             "symbolic": symbolic,
+            "advisory_decision": advisory_decision,
         },
+        "advisory_decision": advisory_decision,
         "decision_trace": trace,
         "next_actions": [
             "treat this as advisory only; k1s remains authoritative",
@@ -178,6 +194,7 @@ def _advisory_trace(
     query: str,
     retrieval: dict[str, Any],
     symbolic: dict[str, Any],
+    advisory_decision: dict[str, Any],
     model: dict[str, Any],
     answer: Any,
 ) -> dict[str, Any]:
@@ -189,6 +206,20 @@ def _advisory_trace(
     symbolic_results = (
         symbolic.get("results") if isinstance(symbolic.get("results"), list) else []
     )
+    decision = (
+        advisory_decision.get("decision")
+        if isinstance(advisory_decision.get("decision"), dict)
+        else advisory_decision
+    )
+    decision_evidence_refs = (
+        decision.get("evidence_refs") if isinstance(decision.get("evidence_refs"), list) else []
+    )
+    blocked_conditions = (
+        decision.get("blocked_conditions")
+        if isinstance(decision.get("blocked_conditions"), list)
+        else []
+    )
+    risks = decision.get("risks") if isinstance(decision.get("risks"), list) else []
     now = datetime.now(UTC).isoformat()
     return {
         "trace_id": trace_id,
@@ -228,8 +259,13 @@ def _advisory_trace(
                     for item in symbolic_results
                     if isinstance(item, dict) and item.get("id")
                 ],
+                *[str(item) for item in decision_evidence_refs],
             ],
             "authoritative": False,
+            "advisory_decision_id": decision.get("decision_id"),
+            "advisory_decision_status": decision.get("status"),
+            "risks": risks,
+            "blocked_conditions": blocked_conditions,
         },
         "deterministic_baseline": {
             "selected_lane": lane,
@@ -240,13 +276,17 @@ def _advisory_trace(
         "evidence_contract": {
             "retrieval_required": True,
             "symbolic_required": True,
+            "das_decision_required": True,
             "retrieval_result_count": len(retrieval_results),
             "symbolic_result_count": len(symbolic_results),
+            "das_decision_ok": bool(advisory_decision.get("ok")),
+            "das_decision_evidence_count": len(decision_evidence_refs),
             "selected_model_lane": lane,
             "model_ok": bool(model.get("ok")),
         },
         "retrieval": retrieval,
         "symbolic": symbolic,
+        "advisory_decision": advisory_decision,
         "model": model,
         "accepted": None,
         "divergence_reason": "pending_operator_review",
@@ -259,6 +299,8 @@ def _advisory_trace(
         "coherence_signals": {
             "retrieval_result_count": len(retrieval_results),
             "symbolic_result_count": len(symbolic_results),
+            "das_decision_ok": bool(advisory_decision.get("ok")),
+            "blocked_condition_count": len(blocked_conditions),
             "model_ok": bool(model.get("ok")),
             "authoritative": False,
         },
@@ -293,7 +335,7 @@ def _retrieve_evidence(query: str, *, limit: int) -> dict[str, Any]:
             timeout=RETRIEVAL_TIMEOUT,
         ) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
         return {"ok": False, "url": RETRIEVAL_URL, "results": [], "error": str(exc)}
     if not isinstance(payload, dict):
         return {"ok": False, "url": RETRIEVAL_URL, "results": [], "error": "invalid_response"}
@@ -318,7 +360,7 @@ def _query_symbolic_evidence(query: str, *, limit: int) -> dict[str, Any]:
             timeout=SYMBOLIC_TIMEOUT,
         ) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
         return {"ok": False, "url": DAS_URL, "results": [], "error": str(exc)}
     if not isinstance(payload, dict):
         return {"ok": False, "url": DAS_URL, "results": [], "error": "invalid_response"}
@@ -332,11 +374,56 @@ def _query_symbolic_evidence(query: str, *, limit: int) -> dict[str, Any]:
     }
 
 
+def _query_das_advisory_decision(
+    *,
+    payload: dict[str, Any],
+    query: str,
+    symbolic: dict[str, Any],
+    limit: int,
+) -> dict[str, Any]:
+    if not _allowed_upstream(DAS_URL):
+        return {"ok": False, "url": DAS_URL, "error": "invalid_das_url"}
+    facts = symbolic.get("results") if isinstance(symbolic.get("results"), list) else []
+    decision_payload = {
+        "query": query,
+        "intent": str(payload.get("intent") or "advise"),
+        "subject": payload.get("subject") or payload.get("subject_id"),
+        "limit": limit,
+        "facts": facts,
+        "request_id": payload.get("request_id") or payload.get("run_id"),
+    }
+    try:
+        with _post_json(
+            f"{DAS_URL.rstrip('/')}/v1/advisory/decision",
+            decision_payload,
+            timeout=SYMBOLIC_TIMEOUT,
+        ) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return {"ok": False, "url": DAS_URL, "error": str(exc)}
+    if not isinstance(response_payload, dict):
+        return {"ok": False, "url": DAS_URL, "error": "invalid_response"}
+    decision = (
+        response_payload.get("decision")
+        if isinstance(response_payload.get("decision"), dict)
+        else {}
+    )
+    return {
+        "ok": bool(response_payload.get("ok")),
+        "url": DAS_URL,
+        "api_version": decision.get("api_version") or ADVISORY_DECISION_API_VERSION,
+        "decision": decision,
+        "error": response_payload.get("error"),
+    }
+
+
 def _call_advisory_model(
     lane: str,
     payload: dict[str, Any],
     retrieval: dict[str, Any],
     symbolic: dict[str, Any],
+    *,
+    advisory_decision: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     upstream = EXPERT_URL if lane == "expert" else COORDINATOR_URL
     if not _allowed_upstream(upstream):
@@ -355,8 +442,15 @@ def _call_advisory_model(
             "content": json.dumps(
                 {
                     "request": payload,
-                    "retrieval_evidence": retrieval.get("results") or [],
-                    "symbolic_evidence": symbolic.get("results") or [],
+                    "retrieval_evidence": _compact_evidence_results(
+                        retrieval.get("results") or []
+                    ),
+                    "symbolic_evidence": _compact_evidence_results(
+                        symbolic.get("results") or []
+                    ),
+                    "das_advisory_decision": _compact_advisory_decision(
+                        advisory_decision or {}
+                    ),
                     "controller_authority": "k1s",
                 },
                 indent=2,
@@ -373,7 +467,7 @@ def _call_advisory_model(
     try:
         with _post_json(upstream, model_payload, timeout=ADVISORY_MODEL_TIMEOUT) as response:
             raw = response.read().decode("utf-8")
-    except (URLError, TimeoutError) as exc:
+    except (OSError, URLError, TimeoutError) as exc:
         return {"ok": False, "lane": lane, "upstream": upstream, "error": str(exc)}
     try:
         data = json.loads(raw)
@@ -386,6 +480,63 @@ def _call_advisory_model(
         "content": _chat_content(data),
         "raw": data,
     }
+
+
+def _compact_evidence_results(results: Any, *, limit: int = 5) -> list[dict[str, Any]]:
+    if not isinstance(results, list):
+        return []
+    compacted: list[dict[str, Any]] = []
+    for item in results[:limit]:
+        if not isinstance(item, dict):
+            continue
+        entry: dict[str, Any] = {}
+        for key in ("id", "path", "subject", "predicate", "source", "score"):
+            if key in item:
+                entry[key] = _compact_value(item[key])
+        if "object" in item:
+            entry["object"] = _compact_value(item["object"])
+        if "text" in item:
+            entry["text"] = _compact_value(item["text"], limit=700)
+        compacted.append(entry)
+    return compacted
+
+
+def _compact_advisory_decision(packet: dict[str, Any]) -> dict[str, Any]:
+    decision = packet.get("decision") if isinstance(packet.get("decision"), dict) else packet
+    if not isinstance(decision, dict):
+        return {}
+    return {
+        "api_version": decision.get("api_version") or ADVISORY_DECISION_API_VERSION,
+        "decision_id": decision.get("decision_id"),
+        "subject": decision.get("subject"),
+        "intent": decision.get("intent"),
+        "status": decision.get("status"),
+        "recommended_action": decision.get("recommended_action"),
+        "confidence": decision.get("confidence"),
+        "evidence_refs": (decision.get("evidence_refs") or [])[:5]
+        if isinstance(decision.get("evidence_refs"), list)
+        else [],
+        "risks": decision.get("risks") if isinstance(decision.get("risks"), list) else [],
+        "blocked_conditions": decision.get("blocked_conditions")
+        if isinstance(decision.get("blocked_conditions"), list)
+        else [],
+        "authoritative": False,
+    }
+
+
+def _compact_value(value: Any, *, limit: int = 240) -> Any:
+    if isinstance(value, str):
+        return value if len(value) <= limit else f"{value[:limit]}..."
+    if isinstance(value, (bool, int, float)) or value is None:
+        return value
+    if isinstance(value, list):
+        return [_compact_value(item, limit=limit) for item in value[:5]]
+    if isinstance(value, dict):
+        compacted: dict[str, Any] = {}
+        for key in sorted(value)[:10]:
+            compacted[str(key)] = _compact_value(value[key], limit=limit)
+        return compacted
+    return _compact_value(str(value), limit=limit)
 
 
 def _chat_content(payload: dict[str, Any]) -> str | None:
@@ -505,7 +656,7 @@ def _get_json(url: str, *, timeout: float) -> dict[str, Any]:
         with urlopen(url, timeout=timeout) as response:  # noqa: S310
             raw = response.read().decode("utf-8")
             payload = json.loads(raw)
-    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+    except (OSError, URLError, TimeoutError, json.JSONDecodeError) as exc:
         return {"ok": False, "url": url, "error": str(exc)}
     if not isinstance(payload, dict):
         return {"ok": False, "url": url, "error": "invalid_json"}

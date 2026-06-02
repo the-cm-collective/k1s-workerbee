@@ -12,7 +12,7 @@ spec:
   replicas: 1
   env:
     - name: AI_DAS_CONFIG_REV
-      value: hyperon-das-v7
+      value: hyperon-das-v8
     - name: AI_DAS_BACKEND
       value: hyperon-das
     - name: MONGO_URL

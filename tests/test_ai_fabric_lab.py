@@ -304,6 +304,7 @@ def test_ai_fabric_lab_runtime_suite_contract() -> None:
 def test_ai_fabric_runtime_relationship_vocabulary_is_stable() -> None:
     lab = _load_module(SCRIPT, "ai_fabric_lab_relationship_vocabulary_test")
 
+    assert lab.ADVISORY_DECISION_API_VERSION == "workerbee.ai-fabric.advisory-decision/v1"
     assert lab.RUNTIME_RELATIONSHIP_PREDICATES == (
         "owns_service",
         "depends_on",
@@ -368,6 +369,70 @@ def test_ai_fabric_runtime_facts_cover_services_dependencies_and_lora(
         fact["subject"] == "ai_fabric.runtime_validation"
         and fact["predicate"] == "produced_artifact"
         and str(fact["object"]).endswith("/summary.json")
+        for fact in facts
+    )
+    assert any(
+        fact["subject"] == "ai_fabric.advisory_decision"
+        and fact["predicate"] == "api_version"
+        and fact["object"] == "workerbee.ai-fabric.advisory-decision/v1"
+        for fact in facts
+    )
+
+
+def test_ai_fabric_runtime_state_facts_capture_live_endpoint_snapshots(monkeypatch) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_runtime_state_facts_test")
+
+    def fake_get_json(url: str, *, timeout: int) -> dict[str, object]:
+        del timeout
+        if url.endswith("/healthz") and "18180" in url:
+            return {"ok": True, "service": "ai-router"}
+        if url.endswith("/healthz") and "18182" in url:
+            return {
+                "ok": True,
+                "service": "retrieval-indexer",
+                "document_count": 7,
+                "chunk_count": 11,
+                "qdrant_indexed": True,
+            }
+        if "/v1/models?lane=coordinator" in url:
+            return {"ok": True, "data": [{"id": "general-coordinator"}]}
+        if "/v1/models?lane=expert" in url:
+            return {"ok": False, "data": [], "errors": {"expert": "warming"}}
+        return {"ok": False, "error": "unexpected"}
+
+    monkeypatch.setattr(lab, "_get_json", fake_get_json)
+
+    facts = lab._runtime_state_facts(
+        router_url="http://127.0.0.1:18180",
+        das_url="http://das.local:18181",
+        retrieval_url="http://127.0.0.1:18182",
+        workerbee_status=None,
+    )
+
+    assert {
+        "namespace": "runtime",
+        "subject": "ai_fabric.service.ai-router",
+        "predicate": "readiness",
+        "object": "ready",
+        "source": "workerbee.ai-fabric.runtime-facts/v1",
+    } in facts
+    assert {
+        "namespace": "runtime",
+        "subject": "ai_fabric.service.das-bridge",
+        "predicate": "readiness",
+        "object": "unknown",
+        "source": "workerbee.ai-fabric.runtime-facts/v1",
+    } in facts
+    assert any(
+        fact["subject"] == "ai_fabric.retrieval_corpus"
+        and fact["predicate"] == "document_count"
+        and fact["object"] == 7
+        for fact in facts
+    )
+    assert any(
+        fact["subject"] == "ai_fabric.model.expert"
+        and fact["predicate"] == "model_lane_readiness"
+        and fact["object"]["ok"] is False
         for fact in facts
     )
 
@@ -862,7 +927,10 @@ def test_ai_fabric_router_advisory_includes_retrieval_and_lane_override(
         payload: dict[str, object],
         retrieval: dict[str, object],
         symbolic: dict[str, object],
+        *,
+        advisory_decision: dict[str, object],
     ) -> dict[str, object]:
+        assert advisory_decision["decision"]["status"] == "review"
         return {
             "ok": False,
             "lane": lane,
@@ -877,6 +945,38 @@ def test_ai_fabric_router_advisory_includes_retrieval_and_lane_override(
         router,
         "_query_symbolic_evidence",
         lambda query, *, limit: {"ok": True, "results": [{"subject": query, "limit": limit}]},
+    )
+
+    def fake_das_decision(
+        *,
+        payload: dict[str, object],
+        query: str,
+        symbolic: dict[str, object],
+        limit: int,
+    ) -> dict[str, object]:
+        assert symbolic["results"][0]["limit"] == limit
+        return {
+            "ok": True,
+            "api_version": "workerbee.ai-fabric.advisory-decision/v1",
+            "decision": {
+                "api_version": "workerbee.ai-fabric.advisory-decision/v1",
+                "decision_id": "advisory-decision-test",
+                "subject": query,
+                "intent": payload.get("intent") or "advise",
+                "status": "review",
+                "recommended_action": "review with symbolic evidence",
+                "confidence": 0.7,
+                "evidence_refs": ["das-fact://fact-1"],
+                "risks": ["relationship_context_sparse"],
+                "blocked_conditions": [],
+                "authoritative": False,
+            },
+        }
+
+    monkeypatch.setattr(
+        router,
+        "_query_das_advisory_decision",
+        fake_das_decision,
     )
     monkeypatch.setattr(router, "_call_advisory_model", fake_model)
     monkeypatch.setattr(router, "TRACE_DIR", tmp_path)
@@ -893,6 +993,7 @@ def test_ai_fabric_router_advisory_includes_retrieval_and_lane_override(
     assert response["trace_path"] == str(trace_path)
     assert response["evidence"]["retrieval"]["results"][0]["path"] == "workerbee/notes.md"
     assert response["evidence"]["symbolic"]["results"][0]["limit"] == 5
+    assert response["advisory_decision"]["decision"]["decision_id"] == "advisory-decision-test"
     assert response["model"]["lane"] == "coordinator"
     assert trace["authoritative"] is False
     assert trace["controller_authority"] == "k1s"
@@ -900,10 +1001,14 @@ def test_ai_fabric_router_advisory_includes_retrieval_and_lane_override(
     assert trace["response_contract"]["authoritative"] is False
     assert trace["evidence_contract"]["retrieval_required"] is True
     assert trace["evidence_contract"]["symbolic_required"] is True
+    assert trace["evidence_contract"]["das_decision_required"] is True
+    assert trace["evidence_contract"]["das_decision_ok"] is True
+    assert trace["evidence_contract"]["das_decision_evidence_count"] == 1
     assert trace["evidence_contract"]["retrieval_result_count"] == 1
     assert trace["evidence_contract"]["symbolic_result_count"] == 1
     assert trace["retrieval"]["results"][0]["path"] == "workerbee/notes.md"
     assert trace["symbolic"]["results"][0]["subject"] == trace["query"]
+    assert trace["advisory_decision"]["decision"]["authoritative"] is False
     assert trace["replay_status"] == "recorded"
     assert trace["divergence_reason"] == "pending_operator_review"
 
@@ -1024,6 +1129,62 @@ def test_ai_fabric_das_bridge_exposes_relationship_vocabulary() -> None:
         "produced_artifact",
         "supports_advisory",
     )
+    assert das_bridge.ADVISORY_DECISION_API_VERSION == (
+        "workerbee.ai-fabric.advisory-decision/v1"
+    )
+
+
+def test_ai_fabric_das_bridge_builds_advisory_decision_from_runtime_facts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    das_bridge = _load_module(
+        EXAMPLE_ROOT / "images" / "das-bridge" / "app.py",
+        "ai_fabric_das_bridge_advisory_decision_test",
+    )
+    monkeypatch.setattr(das_bridge, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(das_bridge, "FACT_LOG", tmp_path / "facts.jsonl")
+    monkeypatch.setattr(das_bridge, "F5_EVIDENCE_LOG", tmp_path / "f5-evidence.jsonl")
+
+    dependency = das_bridge._append_fact(
+        {
+            "namespace": "runtime",
+            "subject": "ai_fabric.service.ai-router",
+            "predicate": "depends_on",
+            "object": "ai_fabric.service.das-bridge",
+            "source": "test",
+        }
+    )
+    degraded = das_bridge._append_fact(
+        {
+            "namespace": "runtime",
+            "subject": "ai_fabric.service.das-bridge",
+            "predicate": "readiness",
+            "object": "degraded",
+            "source": "test",
+        }
+    )
+
+    decision = das_bridge._advisory_decision(
+        {
+            "subject": "ai_fabric.service.ai-router",
+            "intent": "advise",
+            "query": "should ai-router handle symbolic evidence",
+            "facts": [dependency, degraded],
+        }
+    )
+
+    assert decision["api_version"] == "workerbee.ai-fabric.advisory-decision/v1"
+    assert decision["authoritative"] is False
+    assert decision["controller_authority"] == "k1s"
+    assert decision["status"] == "blocked"
+    assert decision["evidence_refs"] == [
+        f"das-fact://{dependency['id']}",
+        f"das-fact://{degraded['id']}",
+    ]
+    assert decision["blocked_conditions"][0]["condition"] == (
+        "ai_fabric.service.das-bridge.readiness"
+    )
+    assert "symbolic_blocked_condition" in decision["risks"]
 
 
 def test_ai_fabric_das_bridge_records_f5_query_evidence(tmp_path: Path, monkeypatch) -> None:

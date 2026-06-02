@@ -23,6 +23,7 @@ CELL_ID = os.getenv("AI_FABRIC_DAS_CELL_ID", "runtime")
 FACT_NODE_TYPE = "Concept"
 PREDICATE_NODE_TYPE = "Predicate"
 FACT_LINK_TYPE = "ai-fabric:fact"
+ADVISORY_DECISION_API_VERSION = "workerbee.ai-fabric.advisory-decision/v1"
 RELATIONSHIP_PREDICATES = (
     "owns_service",
     "depends_on",
@@ -31,6 +32,18 @@ RELATIONSHIP_PREDICATES = (
     "produced_artifact",
     "supports_advisory",
 )
+DEGRADED_STATES = {
+    "blocked",
+    "degraded",
+    "down",
+    "failed",
+    "false",
+    "missing",
+    "not_ready",
+    "unavailable",
+    "unhealthy",
+}
+READY_STATES = {"available", "healthy", "ok", "ready", "true"}
 TOKEN_RE = re.compile(r"[a-z0-9_.:-]+")
 QUERY_STOPWORDS = {
     "about",
@@ -149,7 +162,7 @@ FACT_LOCK = threading.RLock()
 
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "ai-fabric-das-bridge/0.3"
+    server_version = "ai-fabric-das-bridge/0.4"
 
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
@@ -205,6 +218,10 @@ class Handler(BaseHTTPRequestHandler):
                     "f5_evidence": f5_evidence,
                 }
             )
+            return
+        if parsed.path == "/v1/advisory/decision":
+            decision = _advisory_decision(payload)
+            self._json({"ok": True, "decision": decision})
             return
         if parsed.path == "/v1/import/runtime":
             facts = payload.get("facts") if isinstance(payload.get("facts"), list) else []
@@ -373,6 +390,187 @@ def _record_replication_intent(payload: dict[str, Any]) -> dict[str, Any]:
     _append_f5_evidence("das_cell_bundle", bundle)
     _append_f5_evidence("das_replication", replication)
     return replication
+
+
+def _advisory_decision(payload: dict[str, Any]) -> dict[str, Any]:
+    query = str(payload.get("query") or "")
+    intent = str(payload.get("intent") or "advise")
+    limit = max(1, min(int(payload.get("limit") or 10), 50))
+    supplied_facts = payload.get("facts") if isinstance(payload.get("facts"), list) else []
+    supplied_facts = [fact for fact in supplied_facts if isinstance(fact, dict)]
+    subject = _advisory_subject(payload=payload, facts=supplied_facts, query=query)
+    facts = supplied_facts[:limit]
+    if not facts and subject:
+        facts = _query_facts({"subject": subject, "limit": limit})
+    if not facts:
+        facts = _query_facts({"query": query, "limit": limit})
+    subject = subject or _advisory_subject(payload=payload, facts=facts, query=query)
+    subject = subject or "ai_fabric.lab"
+    evidence_refs = _decision_evidence_refs(facts)
+    blocked_conditions = _decision_blocked_conditions(subject=subject, facts=facts)
+    risks = _decision_risks(
+        subject=subject,
+        facts=facts,
+        blocked_conditions=blocked_conditions,
+    )
+    status = "blocked" if blocked_conditions else "review"
+    if not facts:
+        recommended_action = "defer action until DAS runtime evidence is imported"
+        confidence = 0.2
+    elif blocked_conditions:
+        recommended_action = "resolve blocked symbolic conditions before changing runtime state"
+        confidence = 0.45
+    else:
+        recommended_action = (
+            f"review {subject} with the attached symbolic evidence and verify live k1s state"
+        )
+        confidence = 0.7
+    now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+    decision = {
+        "api_version": ADVISORY_DECISION_API_VERSION,
+        "decision_id": _stable_id(
+            "advisory-decision",
+            [subject, intent, query, *[str(fact.get("id") or "") for fact in facts[:8]]],
+        ),
+        "subject": subject,
+        "intent": intent,
+        "query": query,
+        "status": status,
+        "recommended_action": recommended_action,
+        "confidence": confidence,
+        "evidence_refs": evidence_refs,
+        "risks": risks,
+        "blocked_conditions": blocked_conditions,
+        "authoritative": False,
+        "controller_authority": "k1s",
+        "facts": facts,
+        "created_at": now,
+    }
+    _append_f5_evidence("advisory_decision", decision)
+    return decision
+
+
+def _advisory_subject(
+    *,
+    payload: dict[str, Any],
+    facts: list[dict[str, Any]],
+    query: str,
+) -> str | None:
+    for key in ("subject", "subject_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    query_text = query.lower()
+    candidates: list[str] = []
+    for fact in [*facts, *_read_facts()]:
+        subject = fact.get("subject")
+        obj = fact.get("object")
+        if isinstance(subject, str) and subject.startswith("ai_fabric.service."):
+            candidates.append(subject)
+        if isinstance(obj, str) and obj.startswith("ai_fabric.service."):
+            candidates.append(obj)
+    for candidate in candidates:
+        service_name = candidate.rsplit(".", 1)[-1].lower()
+        if service_name in query_text or service_name.replace("-", " ") in query_text:
+            return candidate
+    if facts and isinstance(facts[0].get("subject"), str):
+        return str(facts[0]["subject"])
+    return None
+
+
+def _decision_evidence_refs(facts: list[dict[str, Any]]) -> list[str]:
+    return [f"das-fact://{fact['id']}" for fact in facts if fact.get("id")]
+
+
+def _decision_blocked_conditions(
+    *,
+    subject: str,
+    facts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    conditions: list[dict[str, Any]] = []
+    for fact in facts:
+        predicate = str(fact.get("predicate") or "")
+        if predicate in {"readiness", "status", "host_alias_health", "model_lane_readiness"}:
+            state = _condition_state(fact.get("object"))
+            if state in DEGRADED_STATES:
+                conditions.append(_blocked_condition(fact, state))
+    dependencies = [
+        str(fact.get("object"))
+        for fact in facts
+        if fact.get("subject") == subject
+        and fact.get("predicate") == "depends_on"
+        and isinstance(fact.get("object"), str)
+    ]
+    for dependency in dependencies:
+        for fact in facts:
+            if fact.get("subject") != dependency:
+                continue
+            predicate = str(fact.get("predicate") or "")
+            if predicate not in {"readiness", "status", "host_alias_health"}:
+                continue
+            state = _condition_state(fact.get("object"))
+            if state in DEGRADED_STATES:
+                conditions.append(_blocked_condition(fact, state, dependency=dependency))
+    return conditions
+
+
+def _blocked_condition(
+    fact: dict[str, Any],
+    state: str,
+    *,
+    dependency: str | None = None,
+) -> dict[str, Any]:
+    subject = str(dependency or fact.get("subject") or "unknown")
+    predicate = str(fact.get("predicate") or "state")
+    return {
+        "condition": f"{subject}.{predicate}",
+        "state": state,
+        "reason": f"{subject} reports {predicate}={state}",
+        "evidence_ref": f"das-fact://{fact['id']}" if fact.get("id") else None,
+    }
+
+
+def _decision_risks(
+    *,
+    subject: str,
+    facts: list[dict[str, Any]],
+    blocked_conditions: list[dict[str, Any]],
+) -> list[str]:
+    risks: list[str] = []
+    if not facts:
+        risks.append("missing_symbolic_evidence")
+    if blocked_conditions:
+        risks.append("symbolic_blocked_condition")
+    if subject.startswith("ai_fabric.service.") and not any(
+        fact.get("subject") == subject and fact.get("predicate") == "depends_on"
+        for fact in facts
+    ):
+        risks.append("dependency_context_incomplete")
+    if not any(fact.get("predicate") in RELATIONSHIP_PREDICATES for fact in facts):
+        risks.append("relationship_context_sparse")
+    return risks
+
+
+def _condition_state(value: Any) -> str:
+    if isinstance(value, bool):
+        return "ready" if value else "unhealthy"
+    if isinstance(value, str):
+        lowered = value.strip().lower().replace(" ", "_")
+        if lowered in READY_STATES or lowered in DEGRADED_STATES:
+            return lowered
+        return "unknown"
+    if isinstance(value, dict):
+        if value.get("ok") is False:
+            return "unhealthy"
+        for key in ("readiness", "status", "state", "health"):
+            state = value.get(key)
+            if isinstance(state, str):
+                return _condition_state(state)
+        if value.get("ready") is False:
+            return "not_ready"
+        if value.get("ready") is True or value.get("ok") is True:
+            return "ready"
+    return "unknown"
 
 
 def _das_cell_bundle(now: str) -> dict[str, Any]:

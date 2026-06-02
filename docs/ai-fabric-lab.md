@@ -220,6 +220,19 @@ Each DAS query also records F5-compatible local-first query evidence in
 `/srv/storage/k1s/ai-fabric-lab/das/f5-evidence.jsonl`, and the bridge exposes
 the recent records at `/v1/f5/evidence`.
 
+The DAS bridge also exposes `POST /v1/advisory/decision`. The response uses
+`workerbee.ai-fabric.advisory-decision/v1` and is always advisory-only with
+`authoritative=false`. The decision includes a subject, intent, recommended
+action, confidence, DAS evidence refs, risks, and blocked conditions. The router
+requests this structured DAS decision before calling the selected model lane and
+stores it in the advisory trace alongside retrieval, symbolic facts, and model
+output.
+
+`import-runtime-facts` seeds live local snapshots when local host aliases are
+available: router/DAS/retrieval readiness, host alias health, model lane
+readiness, retrieval corpus counts, DAS fact counts, and optional WorkerBee
+project status from a `workerbee-status.json` file.
+
 Emit a durable F5 evidence bundle for import or review without starting the
 runtime:
 
