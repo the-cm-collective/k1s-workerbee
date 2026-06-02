@@ -33,6 +33,7 @@ MCP_TOOL_NAMES = [
     "workerbee_v1_edge_link_validate",
     "workerbee_v1_edge_link_stop",
     "workerbee_v1_logs",
+    "workerbee_v1_workload_restart",
     "workerbee_v1_exec",
     "workerbee_v1_ingress_status",
     "workerbee_v1_ingress_probe",
@@ -304,6 +305,13 @@ def _feedback_summary(
             return f"Ingress probe did not match expectations{f' for {url}' if url else ''}."
         return f"Ingress probe succeeded{f' with HTTP {status}' if status else ''}."
 
+    if kind == "WorkloadRestart":
+        app = data.get("app_key") or data.get("app")
+        app_status = _app_status(data)
+        if app_status.get("state") == "degraded":
+            return f"Restarted workload `{app}`, but it is degraded."
+        return f"Restarted workload `{app}`."
+
     if kind in {"ManifestValidate", "ManifestDeployLocal", "ManifestDeployRemoteK1s"}:
         app_status = _app_status(data)
         if app_status.get("state") == "degraded":
@@ -494,6 +502,18 @@ def _feedback_next_actions(
                     "workerbee_v1_logs",
                     project_args,
                     "inspect readiness or runtime failures",
+                )
+            )
+    elif kind == "WorkloadRestart":
+        actions.append(
+            _action("workerbee_v1_project_status", project_args, "verify restarted workload status")
+        )
+        if _data_reports_problem(data):
+            actions.append(
+                _action(
+                    "workerbee_v1_logs",
+                    project_args,
+                    "inspect restart or readiness failures",
                 )
             )
     elif kind in {"SessionStart", "ProjectModeGet", "ProjectStatus"}:

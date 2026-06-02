@@ -25,6 +25,7 @@ def test_contract_tool_names_are_v1_only() -> None:
     assert "workerbee_v1_security_review_project" in MCP_TOOL_NAMES
     assert "workerbee_v1_secret_policy_status" in MCP_TOOL_NAMES
     assert "workerbee_v1_project_mode_set" in MCP_TOOL_NAMES
+    assert "workerbee_v1_workload_restart" in MCP_TOOL_NAMES
 
 
 def test_result_envelopes_are_stable_and_mask_errors() -> None:
@@ -211,6 +212,28 @@ def test_agent_feedback_observes_image_build_summary() -> None:
     feedback = result["data"]["agent_feedback"]
 
     assert "build output: lines=150, warnings=2, errors=0" in feedback["observations"]
+
+
+def test_agent_feedback_summarizes_workload_restart() -> None:
+    result = ok(
+        kind="WorkloadRestart",
+        project="alpha",
+        data={
+            "ok": True,
+            "app": "web",
+            "app_key": "alpha--web",
+            "app_status": {"state": "ready", "degraded_workload_count": 0},
+        },
+    )
+
+    feedback = result["data"]["agent_feedback"]
+
+    assert feedback["summary"] == "Restarted workload `alpha--web`."
+    assert feedback["next_actions"][0] == {
+        "tool": "workerbee_v1_project_status",
+        "args": {"project": "alpha"},
+        "reason": "verify restarted workload status",
+    }
 
 
 def test_ingress_probe_tool_schema_exposes_body_and_headers() -> None:

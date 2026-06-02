@@ -15,6 +15,7 @@ from contextlib import suppress
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 try:
     import yaml
@@ -399,6 +400,35 @@ class WorkerBeeSupervisor:
             "apply": result,
         }
 
+    def restart_workload(
+        self,
+        app: str,
+        *,
+        namespace: str | None = None,
+        timeout: int = 180,
+    ) -> dict[str, Any]:
+        info = self.start()
+        resolved_namespace, resolved_app, app_key = _resolve_controller_app_ref(
+            app,
+            namespace=namespace,
+            default_namespace=project_slug(self.project),
+        )
+        result = self._restart_workload_direct(
+            info=info,
+            app_key=app_key,
+            resolved_namespace=resolved_namespace,
+            resolved_app=resolved_app,
+            timeout=timeout,
+        )
+        return {
+            "ok": True,
+            "project": self.project,
+            "app": resolved_app,
+            "namespace": resolved_namespace,
+            "app_key": app_key,
+            "restart": result,
+        }
+
     def deploy_k8s_manifest(
         self,
         manifest: Path,
@@ -525,6 +555,89 @@ class WorkerBeeSupervisor:
             "cmd": cmd,
             "returncode": 0,
             "stdout": _remote_apply_stdout(data),
+            "stderr": "",
+            "http_status": response.status,
+            "response": data,
+            "transport": "direct-controller",
+        }
+
+    def _restart_workload_direct(
+        self,
+        *,
+        info: StackInfo,
+        app_key: str,
+        resolved_namespace: str,
+        resolved_app: str,
+        timeout: int,
+    ) -> dict[str, Any]:
+        cmd = _mask_sensitive_args(
+            [
+                self.python_executable,
+                "-m",
+                "ae.cli",
+                "--server",
+                info.controller_url,
+                "--token",
+                info.admin_token,
+                "rollout",
+                "restart",
+                f"{resolved_namespace}/{resolved_app}",
+            ]
+        )
+        try:
+            response = request(
+                f"{info.controller_url.rstrip('/')}/rollout/restart/{quote(app_key, safe='')}",
+                method="POST",
+                token=info.admin_token,
+                headers={"Accept": "application/json"},
+                timeout=float(_bounded_cli_http_timeout(timeout)),
+            )
+            body = response.text
+        except Exception as exc:  # noqa: BLE001 - preserve ae.cli-style restart diagnostics
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "cmd": cmd,
+                        "returncode": 1,
+                        "stdout": f"remote rollout restart failed: {exc}\n",
+                        "stderr": "",
+                    },
+                    indent=2,
+                )
+            ) from exc
+        if response.status >= 400:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "cmd": cmd,
+                        "returncode": 1,
+                        "stdout": f"remote rollout restart failed: HTTP {response.status}\n{body}",
+                        "stderr": "",
+                    },
+                    indent=2,
+                )
+            )
+        try:
+            data = response.json() or {}
+        except Exception as exc:  # noqa: BLE001 - preserve ae.cli-style restart diagnostics
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "cmd": cmd,
+                        "returncode": 1,
+                        "stdout": (
+                            "remote rollout restart failed: "
+                            f"invalid JSON response: {exc}\n{body}"
+                        ),
+                        "stderr": "",
+                    },
+                    indent=2,
+                )
+            ) from exc
+        return {
+            "cmd": cmd,
+            "returncode": 0,
+            "stdout": _remote_rollout_restart_stdout(data),
             "stderr": "",
             "http_status": response.status,
             "response": data,
@@ -1970,6 +2083,38 @@ def _resolve_app_ref(
     return resolved_namespace, raw_app
 
 
+def _resolve_controller_app_ref(
+    app: str,
+    *,
+    namespace: str | None,
+    default_namespace: str,
+) -> tuple[str, str, str]:
+    raw_app = str(app or "").strip()
+    raw_namespace = str(namespace or "").strip()
+    if not raw_app:
+        raise ValueError("app is required")
+    if "/" not in raw_app and "--" in raw_app:
+        key_namespace, key_name = raw_app.split("--", 1)
+        if key_namespace.strip() and key_name.strip():
+            if raw_namespace and raw_namespace != key_namespace.strip():
+                raise ValueError(
+                    f"namespace mismatch: app references {key_namespace.strip()!r} but namespace "
+                    f"is {raw_namespace!r}"
+                )
+            return key_namespace.strip(), key_name.strip(), raw_app
+    resolved_namespace, resolved_app = _resolve_app_ref(
+        raw_app,
+        namespace=raw_namespace or None,
+        default_namespace=default_namespace,
+    )
+    app_key = (
+        resolved_app
+        if not resolved_namespace or resolved_namespace == "default"
+        else f"{resolved_namespace}--{resolved_app}"
+    )
+    return resolved_namespace, resolved_app, app_key
+
+
 def _set_cli_http_timeout(env: dict[str, str], timeout: int) -> None:
     env["AE_CLI_HTTP_TIMEOUT"] = str(_bounded_cli_http_timeout(timeout))
 
@@ -2020,6 +2165,29 @@ def _remote_apply_stdout(data: dict[str, Any]) -> str:
         f"applied {data.get('app')} rev={data.get('revision')}({data.get('status')}) "
         f"ops=+{data.get('created')}/~{data.get('updated')}/-{data.get('removed')}\n"
     )
+
+
+def _remote_rollout_restart_stdout(data: dict[str, Any]) -> str:
+    if str(data.get("status", "")).lower() == "accepted":
+        detail = f"rollout restart desired state for {data.get('app')}"
+        if data.get("resourceVersion") is not None:
+            detail += f" resourceVersion={data.get('resourceVersion')}"
+        if data.get("restartAt"):
+            detail += f" restartAt={data.get('restartAt')}"
+        return f"{detail}\n"
+    detail = (
+        f"rollout restart {data.get('app')}: "
+        f"rev={data.get('revision')} status={data.get('status')}"
+    )
+    if data.get("ready") is not None and data.get("desired") is not None:
+        detail += f" ready={data.get('ready')}/{data.get('desired')}"
+    if data.get("created") is not None:
+        detail += (
+            f" ops=+{data.get('created')}/~{data.get('updated')}/-{data.get('removed')}"
+        )
+    if data.get("restartAt"):
+        detail += f" restartAt={data.get('restartAt')}"
+    return f"{detail}\n"
 
 
 def _env_int(name: str) -> int | None:

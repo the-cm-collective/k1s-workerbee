@@ -633,6 +633,25 @@ def serve_mcp(
         )
 
     @mcp.tool()
+    def workerbee_v1_workload_restart(
+        app: str,
+        project: str = "default",
+        namespace: str | None = None,
+        timeout: int = 180,
+    ) -> dict[str, Any]:
+        """Restart a deployed workload after rebuilding an unchanged local image tag."""
+        return protect(
+            "WorkloadRestart",
+            project,
+            lambda: daemon.workload_restart(
+                app=app,
+                project=project,
+                namespace=namespace,
+                timeout=timeout,
+            ),
+        )
+
+    @mcp.tool()
     def workerbee_v1_profile_workload_status(
         project: str = "default",
         profile: str | None = None,

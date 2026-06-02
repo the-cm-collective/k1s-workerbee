@@ -81,6 +81,62 @@ def test_capabilities_surface_probe_and_image_build_hints(tmp_path: Path, monkey
     assert probe["headers"] is True
     assert probe["body_fields"] == ["json_body", "body"]
     assert "dockerfile" in payload["tool_hints"]["workerbee_v1_image_build"]
+    assert "app_ref" in payload["tool_hints"]["workerbee_v1_workload_restart"]
+
+
+def test_workload_restart_returns_status(tmp_path: Path, monkeypatch) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="docker", default_project="demo")
+    captured: dict[str, object] = {}
+
+    class FakeSupervisor:
+        def restart_workload(self, app: str, *, namespace: str | None, timeout: int) -> dict:
+            captured["restart"] = {"app": app, "namespace": namespace, "timeout": timeout}
+            return {
+                "ok": True,
+                "project": "demo",
+                "app": "web",
+                "namespace": "secure",
+                "app_key": "secure--web",
+                "restart": {"returncode": 0},
+            }
+
+    def fake_collect_app_status(**kwargs):
+        captured["status"] = kwargs
+        return {
+            "state": "ready",
+            "ready": True,
+            "degraded_workload_count": 0,
+        }
+
+    def fake_with_project(project, fn, **kwargs):
+        captured["with_project"] = {"project": project, **kwargs}
+        return fn(FakeSupervisor())
+
+    monkeypatch.setattr("workerbee.daemon.collect_app_status", fake_collect_app_status)
+    monkeypatch.setattr(daemon, "with_project", fake_with_project)
+
+    result = daemon.workload_restart(
+        app="secure/web",
+        project="demo",
+        namespace=None,
+        timeout=120,
+    )
+
+    assert result["ok"] is True
+    assert result["app_key"] == "secure--web"
+    assert result["app_status"]["state"] == "ready"
+    assert captured["restart"] == {"app": "secure/web", "namespace": None, "timeout": 120}
+    assert captured["with_project"] == {
+        "project": "demo",
+        "require_active": True,
+        "autostart": True,
+        "start_reason": "workload_restart",
+    }
+    status_call = captured["status"]
+    assert status_call["workloads"] == [
+        {"name": "web", "namespace": "secure", "kind": "Deployment"}
+    ]
+    assert status_call["wait"] is True
 
 
 def test_daemon_start_does_not_register_default_project(tmp_path: Path, monkeypatch) -> None:

@@ -1141,6 +1141,47 @@ class WorkerBeeDaemon:
                 )
                 return {**result, "project": name, "deployment": deployment}
 
+    def workload_restart(
+        self,
+        *,
+        app: str,
+        project: str | None = None,
+        namespace: str | None = None,
+        timeout: int = 180,
+    ) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+
+        def restart_and_status(supervisor: WorkerBeeSupervisor) -> dict[str, Any]:
+            result = supervisor.restart_workload(app, namespace=namespace, timeout=timeout)
+            workloads = [
+                {
+                    "name": result["app"],
+                    "namespace": result["namespace"],
+                    "kind": "Deployment",
+                }
+            ]
+            app_status = collect_app_status(
+                supervisor=supervisor,
+                workloads=workloads,
+                namespace=None,
+                timeout=timeout,
+                wait=True,
+                prune=False,
+            )
+            return {
+                **result,
+                "ok": bool(result.get("ok")) and not app_status.get("degraded_workload_count"),
+                "app_status": app_status,
+            }
+
+        return self.with_project(
+            name,
+            restart_and_status,
+            require_active=True,
+            autostart=True,
+            start_reason="workload_restart",
+        )
+
     def security_assess(
         self,
         *,
@@ -1458,6 +1499,13 @@ class WorkerBeeDaemon:
                         "Defaults to true; WorkerBee falls back to the last matching exited "
                         "container when no running container has logs."
                     )
+                },
+                "workerbee_v1_workload_restart": {
+                    "purpose": (
+                        "Restart a deployed workload after rebuilding an unchanged local image "
+                        "tag such as :dev; returns restart output plus workload status."
+                    ),
+                    "app_ref": "Accepts name, namespace/name, or namespace--name.",
                 },
                 "workerbee_v1_manifest_deploy_local": {
                     "prune": (

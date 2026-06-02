@@ -97,6 +97,51 @@ spec:
     assert result["apply"]["cmd"][result["apply"]["cmd"].index("--token") + 1] == "***"
 
 
+def test_restart_workload_posts_directly_and_masks_token(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="docker")
+    sup.start = lambda: _stack(tmp_path)  # type: ignore[method-assign]
+    captured: dict[str, Any] = {}
+    response_payload = {
+        "app": "secure--web",
+        "revision": 2,
+        "status": "ready",
+        "ready": 1,
+        "desired": 1,
+        "created": 1,
+        "updated": 0,
+        "removed": 1,
+        "restartAt": "2026-06-02T00:00:00+00:00",
+    }
+
+    def fake_request(url: str, **kwargs: Any) -> SimpleNamespace:
+        captured["url"] = url
+        captured.update(kwargs)
+        return SimpleNamespace(
+            status=200,
+            text='{"ok": true}',
+            json=lambda: response_payload,
+        )
+
+    monkeypatch.setattr("workerbee.supervisor.request", fake_request)
+
+    result = sup.restart_workload("secure/web", timeout=120)
+
+    assert captured["url"] == "http://127.0.0.1:19108/rollout/restart/secure--web"
+    assert captured["method"] == "POST"
+    assert captured["token"] == "-".join(["admin", "token"])
+    assert captured["timeout"] == 120.0
+    assert result["namespace"] == "secure"
+    assert result["app"] == "web"
+    assert result["app_key"] == "secure--web"
+    assert result["restart"]["transport"] == "direct-controller"
+    assert result["restart"]["cmd"][result["restart"]["cmd"].index("--token") + 1] == "***"
+    assert "restartAt=2026-06-02T00:00:00+00:00" in result["restart"]["stdout"]
+
+
 def test_cleanup_runtime_removes_project_and_deploy_namespace_containers(
     tmp_path: Path,
     monkeypatch,
