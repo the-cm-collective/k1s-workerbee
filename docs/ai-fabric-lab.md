@@ -82,6 +82,10 @@ workerbee build-image examples/ai-fabric-lab/images/fake-model \
 workerbee manifest deploy-local --stage examples/ai-fabric-lab/stage-plumbing
 ```
 
+Use `examples/ai-fabric-lab/stage` for the two-lane Qwen smoke track and
+`examples/ai-fabric-lab/stage-baseline` for the resident baseline track.
+Both stages use the same router, DAS, retrieval, and storage layout.
+
 The model image wraps the pinned
 `vllm/vllm-openai:v0.22.0-x86_64-cu129-ubuntu2404` image. The stage deploys the
 same image twice with `AI_FABRIC_LANE` selecting one OpenAI-compatible vLLM

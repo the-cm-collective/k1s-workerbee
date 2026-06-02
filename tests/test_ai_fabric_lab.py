@@ -36,6 +36,19 @@ def _service_port(path: Path) -> int:
     return int(service["port"])
 
 
+def _env_value(path: Path, name: str) -> str:
+    deployment = _deployment(path)
+    spec = deployment["spec"]
+    assert isinstance(spec, dict)
+    env = spec["env"]
+    assert isinstance(env, list)
+    for item in env:
+        assert isinstance(item, dict)
+        if item.get("name") == name:
+            return str(item.get("value"))
+    raise AssertionError(f"missing env {name} in {path}")
+
+
 def test_ai_fabric_lab_static_bundle_validates() -> None:
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "validate", "--json"],
@@ -98,8 +111,39 @@ def test_ai_fabric_lab_plumbing_stage_is_workerbee_valid() -> None:
     assert "ai-fabric-lab/ai-expert" not in validation["required_controller_scopes"]
 
 
+def test_ai_fabric_lab_baseline_stage_is_workerbee_valid() -> None:
+    validation = validate_stage(EXAMPLE_ROOT / "stage-baseline")
+
+    assert validation["ok"] is True
+    assert validation["input_kinds"] == ["native-k1s"]
+    assert "localhost/workerbee-ai-fabric-models:dev" in validation["images"]
+    assert "ai-fabric-lab/ai-coordinator" in validation["required_controller_scopes"]
+    assert "ai-fabric-lab/ai-expert" in validation["required_controller_scopes"]
+    assert (
+        _env_value(
+            EXAMPLE_ROOT / "stage-baseline" / "manifests" / "ai-coordinator.yaml",
+            "AI_FABRIC_TRACK",
+        )
+        == "baseline"
+    )
+    assert (
+        _env_value(
+            EXAMPLE_ROOT / "stage-baseline" / "manifests" / "ai-expert.yaml",
+            "AI_FABRIC_TRACK",
+        )
+        == "baseline"
+    )
+    assert (
+        _env_value(
+            EXAMPLE_ROOT / "stage-baseline" / "manifests" / "ai-router.yaml",
+            "AI_ROUTER_ADVISORY_MODEL_TIMEOUT",
+        )
+        == "180"
+    )
+
+
 def test_ai_fabric_lab_stages_use_dedicated_workerbee_service_ports() -> None:
-    for stage in ("stage", "stage-plumbing"):
+    for stage in ("stage", "stage-baseline", "stage-plumbing"):
         manifests = EXAMPLE_ROOT / stage / "manifests"
 
         assert _service_port(manifests / "ai-router.yaml") == 18180

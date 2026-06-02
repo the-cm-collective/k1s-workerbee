@@ -1,0 +1,55 @@
+apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: ai-coordinator
+  namespace: ai-fabric-lab
+  labels:
+    app: ai-coordinator
+    workerbee.k1s.dev/project: ai-fabric-lab
+spec:
+  image: localhost/workerbee-ai-fabric-models:dev
+  imagePullPolicy: Never
+  replicas: 1
+  runtimeClassName: nvidia
+  env:
+    - name: AI_FABRIC_TRACK
+      value: baseline
+    - name: AI_FABRIC_LANE
+      value: coordinator
+    - name: AI_FABRIC_CONFIG
+      value: /etc/ai-fabric/model-tracks.json
+    - name: HF_HOME
+      value: /models/hf-cache
+    - name: TRANSFORMERS_CACHE
+      value: /models/hf-cache
+    - name: VLLM_WORKER_MULTIPROC_METHOD
+      value: spawn
+    - name: VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+      value: "0"
+    - name: AI_FABRIC_CONFIG_REV
+      value: qwen-baseline-v1
+  ports:
+    - name: http
+      containerPort: 8001
+  service:
+    port: 8001
+    targetPort: 8001
+  resources:
+    requests:
+      cpu: 2
+      memory: 12Gi
+      nvidia.com/gpu: "1"
+    limits:
+      cpu: 6
+      memory: 32Gi
+      nvidia.com/gpu: "1"
+  volumes:
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/config
+      mountPath: /etc/ai-fabric
+      readOnly: true
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/models
+      mountPath: /models
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/adapters
+      mountPath: /adapters
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/runs
+      mountPath: /runs
