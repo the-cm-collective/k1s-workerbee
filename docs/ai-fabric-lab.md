@@ -241,6 +241,14 @@ read-only scenario from current router, DAS, retrieval, model-lane, DAS-count,
 and corpus-count snapshots. Synthetic scenario facts are not imported into the
 persistent DAS fact log.
 
+The synthetic suite covers healthy and degraded service dependencies, missing
+symbolic evidence, stale validation artifacts, k1s phase-gate blockers, missing
+phase evidence, stale phase-report artifacts, and LoRA adapter readiness. Phase
+risks such as `fabric_phase_gate_blocked`, `missing_phase_evidence`, and
+`phase_report_stale` are advisory-only evidence for k1s review. Adapter risks
+such as `lora_adapter_not_ready` describe the transformer adapter payload and do
+not make the Hyperon/DAS substrate authoritative.
+
 `import-runtime-facts` seeds live local snapshots when local host aliases are
 available: router/DAS/retrieval readiness, host alias health, model lane
 readiness, retrieval corpus counts, DAS fact counts, and optional WorkerBee

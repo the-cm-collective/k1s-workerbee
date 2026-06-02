@@ -300,6 +300,12 @@ def test_ai_fabric_lab_advisor_scenario_fixture_is_valid() -> None:
         "unavailable-expert-model-lane",
         "missing-symbolic-evidence",
         "stale-validation-artifact",
+        "fabric-f3-blocked-by-f1-f2",
+        "fabric-f5-blocked-by-f3",
+        "missing-phase-evidence",
+        "stale-phase-report",
+        "lora-adapter-ready",
+        "lora-adapter-invalid",
     } == {item["id"] for item in scenarios}
     assert all(item["expect"]["authoritative"] is False for item in scenarios)
 
@@ -525,7 +531,7 @@ def test_ai_fabric_lab_advisor_scenarios_validate_das_decisions(
 
     assert result["ok"] is True
     assert result["api_version"] == "workerbee.ai-fabric.advisor-scenario-eval/v1"
-    assert result["scenario_count"] == 7
+    assert result["scenario_count"] == len(scenarios) + 1
     assert {item["kind"] for item in result["results"]} == {"synthetic", "live"}
     assert output_path.exists()
 
@@ -1301,6 +1307,83 @@ def test_ai_fabric_das_bridge_builds_advisory_decision_from_runtime_facts(
     assert artifact_decision["blocked_conditions"][0]["condition"] == (
         "ai_fabric.runtime_validation.artifact_state"
     )
+
+    phase_decision = das_bridge._advisory_decision(
+        {
+            "subject": "k1s.fabric.phase.F3",
+            "intent": "review_phase_gate",
+            "query": "can F3 proceed",
+            "facts": [
+                {
+                    "namespace": "runtime",
+                    "subject": "k1s.fabric.phase.F3",
+                    "predicate": "gate_ready",
+                    "object": False,
+                    "source": "test",
+                },
+                {
+                    "namespace": "runtime",
+                    "subject": "k1s.fabric.phase.F3",
+                    "predicate": "blocked_by",
+                    "object": "F1",
+                    "source": "test",
+                },
+                {
+                    "namespace": "runtime",
+                    "subject": "k1s.fabric.phase.F3.evidence.advisory_contract",
+                    "predicate": "present",
+                    "object": False,
+                    "source": "test",
+                },
+            ],
+        }
+    )
+    assert phase_decision["status"] == "blocked"
+    assert "fabric_phase_gate_blocked" in phase_decision["risks"]
+    assert "missing_phase_evidence" in phase_decision["risks"]
+    assert phase_decision["blocked_conditions"][0]["condition"] == (
+        "k1s.fabric.phase.F3.gate_ready"
+    )
+    assert "blocked_by=F1" in phase_decision["blocked_conditions"][0]["reason"]
+
+    phase_report_decision = das_bridge._advisory_decision(
+        {
+            "subject": "k1s.fabric.phase_report",
+            "intent": "validate_phase_report",
+            "query": "is the phase report current",
+            "facts": [
+                {
+                    "namespace": "runtime",
+                    "subject": "k1s.fabric.phase_report",
+                    "predicate": "artifact_state",
+                    "object": {"path": "runs/fabric-phase-report.json", "state": "stale"},
+                    "source": "test",
+                }
+            ],
+        }
+    )
+    assert phase_report_decision["status"] == "blocked"
+    assert "phase_report_stale" in phase_report_decision["risks"]
+    assert "validation_artifact_unhealthy" in phase_report_decision["risks"]
+
+    adapter_decision = das_bridge._advisory_decision(
+        {
+            "subject": "ai_fabric.adapter.k1s-code-expert-lora-smoke",
+            "intent": "validate_lora_adapter",
+            "query": "is the adapter ready",
+            "facts": [
+                {
+                    "namespace": "runtime",
+                    "subject": "ai_fabric.adapter.k1s-code-expert-lora-smoke",
+                    "predicate": "adapter_state",
+                    "object": {"state": "invalid"},
+                    "source": "test",
+                }
+            ],
+        }
+    )
+    assert adapter_decision["status"] == "blocked"
+    assert "lora_adapter_not_ready" in adapter_decision["risks"]
 
     isolated_decision = das_bridge._advisory_decision(
         {

@@ -24,6 +24,10 @@ FACT_NODE_TYPE = "Concept"
 PREDICATE_NODE_TYPE = "Predicate"
 FACT_LINK_TYPE = "ai-fabric:fact"
 ADVISORY_DECISION_API_VERSION = "workerbee.ai-fabric.advisory-decision/v1"
+PHASE_REPORT_SUBJECT = "k1s.fabric.phase_report"
+PHASE_SUBJECT_PREFIX = "k1s.fabric.phase."
+PHASE_EVIDENCE_MARKER = ".evidence."
+ADAPTER_SUBJECT_PREFIX = "ai_fabric.adapter."
 RELATIONSHIP_PREDICATES = (
     "owns_service",
     "depends_on",
@@ -38,6 +42,7 @@ DEGRADED_STATES = {
     "down",
     "failed",
     "false",
+    "invalid",
     "missing",
     "not_ready",
     "stale",
@@ -493,6 +498,8 @@ def _decision_blocked_conditions(
 ) -> list[dict[str, Any]]:
     conditions: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str | None]] = set()
+    phase_context = subject == PHASE_REPORT_SUBJECT or _is_phase_subject(subject)
+    adapter_context = _is_adapter_subject(subject)
 
     def add_condition(condition: dict[str, Any]) -> None:
         evidence_ref = condition.get("evidence_ref")
@@ -507,7 +514,46 @@ def _decision_blocked_conditions(
         conditions.append(condition)
 
     for fact in facts:
+        fact_subject = str(fact.get("subject") or "")
         predicate = str(fact.get("predicate") or "")
+        if phase_context and _phase_fact_applies(subject, fact_subject):
+            if predicate == "gate_ready":
+                state = _condition_state(fact.get("object"))
+                if state in DEGRADED_STATES:
+                    add_condition(
+                        _phase_gate_blocked_condition(
+                            fact,
+                            _phase_gate_blockers(fact_subject, facts),
+                        )
+                    )
+                continue
+            if predicate == "present" and _is_phase_evidence_subject(fact_subject):
+                state = _condition_state(fact.get("object"))
+                if state in DEGRADED_STATES:
+                    add_condition(_blocked_condition(fact, state))
+                continue
+            if predicate == "status":
+                state = _condition_state(fact.get("object"))
+                if state in DEGRADED_STATES:
+                    add_condition(_blocked_condition(fact, state))
+                continue
+            if fact_subject == PHASE_REPORT_SUBJECT and predicate == "artifact_state":
+                state = _condition_state(fact.get("object"))
+                if state in DEGRADED_STATES:
+                    add_condition(_blocked_condition(fact, state))
+                continue
+        if _is_phase_fact_subject(fact_subject):
+            continue
+        if adapter_context and fact_subject == subject and predicate in {
+            "readiness",
+            "status",
+            "adapter_state",
+            "preflight_state",
+        }:
+            state = _condition_state(fact.get("object"))
+            if state in DEGRADED_STATES:
+                add_condition(_blocked_condition(fact, state))
+            continue
         if predicate in {"readiness", "status", "host_alias_health", "model_lane_readiness"}:
             state = _condition_state(fact.get("object"))
             if state in DEGRADED_STATES:
@@ -552,6 +598,22 @@ def _blocked_condition(
     }
 
 
+def _phase_gate_blocked_condition(
+    fact: dict[str, Any],
+    blockers: list[str],
+) -> dict[str, Any]:
+    subject = str(fact.get("subject") or "unknown")
+    reason = f"{subject} reports gate_ready=false"
+    if blockers:
+        reason = f"{reason}; blocked_by={','.join(blockers)}"
+    return {
+        "condition": f"{subject}.gate_ready",
+        "state": "blocked",
+        "reason": reason,
+        "evidence_ref": f"das-fact://{fact['id']}" if fact.get("id") else None,
+    }
+
+
 def _decision_risks(
     *,
     subject: str,
@@ -569,6 +631,14 @@ def _decision_risks(
         for fact in facts
     ):
         risks.append("validation_artifact_unhealthy")
+    if _phase_gate_blocked(subject, facts):
+        risks.append("fabric_phase_gate_blocked")
+    if _missing_phase_evidence(subject, facts):
+        risks.append("missing_phase_evidence")
+    if _phase_report_stale(subject, facts):
+        risks.append("phase_report_stale")
+    if _lora_adapter_not_ready(subject, facts):
+        risks.append("lora_adapter_not_ready")
     if subject.startswith("ai_fabric.service.") and not any(
         fact.get("subject") == subject and fact.get("predicate") == "depends_on"
         for fact in facts
@@ -577,6 +647,111 @@ def _decision_risks(
     if not any(fact.get("predicate") in RELATIONSHIP_PREDICATES for fact in facts):
         risks.append("relationship_context_sparse")
     return risks
+
+
+def _is_adapter_subject(subject: str) -> bool:
+    return subject.startswith(ADAPTER_SUBJECT_PREFIX)
+
+
+def _is_phase_subject(subject: str) -> bool:
+    return (
+        subject.startswith(PHASE_SUBJECT_PREFIX)
+        and PHASE_EVIDENCE_MARKER not in subject
+    )
+
+
+def _is_phase_evidence_subject(subject: str) -> bool:
+    return (
+        subject.startswith(PHASE_SUBJECT_PREFIX)
+        and PHASE_EVIDENCE_MARKER in subject
+    )
+
+
+def _is_phase_fact_subject(subject: str) -> bool:
+    return subject == PHASE_REPORT_SUBJECT or subject.startswith(PHASE_SUBJECT_PREFIX)
+
+
+def _phase_id_from_subject(subject: str) -> str | None:
+    if not subject.startswith(PHASE_SUBJECT_PREFIX):
+        return None
+    tail = subject[len(PHASE_SUBJECT_PREFIX) :]
+    return tail.split(".", 1)[0] if tail else None
+
+
+def _phase_fact_applies(decision_subject: str, fact_subject: str) -> bool:
+    if decision_subject == PHASE_REPORT_SUBJECT:
+        return _is_phase_fact_subject(fact_subject)
+    if not _is_phase_subject(decision_subject):
+        return False
+    return _phase_id_from_subject(decision_subject) == _phase_id_from_subject(fact_subject)
+
+
+def _phase_gate_blockers(phase_subject: str, facts: list[dict[str, Any]]) -> list[str]:
+    phase_id = _phase_id_from_subject(phase_subject)
+    if not phase_id:
+        return []
+    canonical = f"{PHASE_SUBJECT_PREFIX}{phase_id}"
+    blockers = []
+    for fact in facts:
+        if fact.get("subject") != canonical or fact.get("predicate") != "blocked_by":
+            continue
+        blocker = fact.get("object")
+        if isinstance(blocker, str) and blocker not in blockers:
+            blockers.append(blocker)
+    return blockers
+
+
+def _phase_gate_blocked(subject: str, facts: list[dict[str, Any]]) -> bool:
+    if subject != PHASE_REPORT_SUBJECT and not _is_phase_subject(subject):
+        return False
+    for fact in facts:
+        fact_subject = str(fact.get("subject") or "")
+        if not _phase_fact_applies(subject, fact_subject):
+            continue
+        predicate = fact.get("predicate")
+        if predicate == "blocked_by":
+            return True
+        if predicate == "gate_ready" and _condition_state(fact.get("object")) in DEGRADED_STATES:
+            return True
+    return False
+
+
+def _missing_phase_evidence(subject: str, facts: list[dict[str, Any]]) -> bool:
+    if subject != PHASE_REPORT_SUBJECT and not _is_phase_subject(subject):
+        return False
+    for fact in facts:
+        fact_subject = str(fact.get("subject") or "")
+        if not _phase_fact_applies(subject, fact_subject):
+            continue
+        predicate = fact.get("predicate")
+        if predicate == "present" and _is_phase_evidence_subject(fact_subject):
+            if _condition_state(fact.get("object")) in DEGRADED_STATES:
+                return True
+        if predicate == "status" and _condition_state(fact.get("object")) in DEGRADED_STATES:
+            return True
+    return False
+
+
+def _phase_report_stale(subject: str, facts: list[dict[str, Any]]) -> bool:
+    if subject != PHASE_REPORT_SUBJECT:
+        return False
+    return any(
+        fact.get("subject") == PHASE_REPORT_SUBJECT
+        and fact.get("predicate") == "artifact_state"
+        and _condition_state(fact.get("object")) in DEGRADED_STATES
+        for fact in facts
+    )
+
+
+def _lora_adapter_not_ready(subject: str, facts: list[dict[str, Any]]) -> bool:
+    if not _is_adapter_subject(subject):
+        return False
+    return any(
+        fact.get("subject") == subject
+        and fact.get("predicate") in {"readiness", "status", "adapter_state", "preflight_state"}
+        and _condition_state(fact.get("object")) in DEGRADED_STATES
+        for fact in facts
+    )
 
 
 def _condition_state(value: Any) -> str:
