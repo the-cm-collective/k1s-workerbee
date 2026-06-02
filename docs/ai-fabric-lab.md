@@ -24,6 +24,7 @@ All models are pinned to Hugging Face revision SHAs as of the lab definition.
 | Track | Coordinator | Expert | Purpose |
 | --- | --- | --- | --- |
 | `smoke` | `Qwen/Qwen2.5-3B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-7B-Instruct-AWQ` | All-Qwen fallback path with smaller coordinator and lower expert VRAM pressure. |
+| `lora-plumbing` | `Qwen/Qwen2.5-3B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-7B-Instruct-AWQ` | LoRA plumbing validation with expert LoRA support enabled, no required adapter artifact, and a 4k resident context budget. |
 | `baseline` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | Primary all-Qwen development baseline. |
 | `quality` | `Qwen/Qwen2.5-7B-Instruct-AWQ` | `Qwen/Qwen2.5-Coder-14B-Instruct-AWQ` | Compare coordinator quality versus the baseline. |
 | `legacy-smollm-smoke` | `HuggingFaceTB/SmolLM3-3B` | `Qwen/Qwen2.5-Coder-7B-Instruct-AWQ` | Legacy plumbing-only track, not a baseline. |
@@ -84,7 +85,11 @@ workerbee manifest deploy-local --stage examples/ai-fabric-lab/stage-plumbing
 
 Use `examples/ai-fabric-lab/stage` for the two-lane Qwen smoke track and
 `examples/ai-fabric-lab/stage-baseline` for the resident baseline track.
-Both stages use the same router, DAS, retrieval, and storage layout.
+Use `examples/ai-fabric-lab/stage-lora-plumbing` for the small Qwen LoRA
+plumbing track. That track keeps the same small all-Qwen model pair as smoke
+but lowers both lanes to 4k context and shifts more GPU budget to the expert so
+vLLM can allocate KV cache with LoRA support enabled. These stages use the same
+router, DAS, retrieval, and storage layout.
 
 The model image wraps the pinned
 `vllm/vllm-openai:v0.22.0-x86_64-cu129-ubuntu2404` image. The stage deploys the
@@ -107,6 +112,9 @@ matches the intended two-Qwen architecture while preserving VRAM headroom. The
 baseline keeps the stronger 7B coordinator target for quality validation.
 The smoke coordinator cap is higher than the expert cap because vLLM 0.22
 reported a larger CUDA graph reservation for the smaller general Qwen model.
+The baseline and quality tracks keep the 7B coordinator at a slightly higher
+GPU memory cap than the first draft so it can reliably allocate KV cache after
+warm restarts alongside the resident 14B expert.
 The model launcher passes `--attention-backend TRITON_ATTN` from
 `run_defaults.attention_backend`; FlashInfer initialized on the RTX 8000 but
 failed during prefill in the smoke test.
@@ -236,3 +244,17 @@ Each run should record:
 The lab is successful when `baseline` stays resident for 30 minutes without
 VRAM pressure, `quality` produces comparable runtime evidence, and the evidence
 is sufficient to draft a concrete VRAM-aware k1s scheduling contract.
+
+Run the next validation batch with the runtime runner:
+
+```bash
+python3 scripts/dev/ai_fabric_lab.py validate-runtime \
+  --suite all \
+  --run-id ai-fabric-baseline-$(date -u +%Y%m%dT%H%M%SZ)
+```
+
+The runner writes `summary.json`, `requests.jsonl`, `gpu-samples.jsonl`,
+`health.json`, `f5-evidence.json`, and a `workerbee-status.json` placeholder
+under `/srv/storage/k1s/ai-fabric-lab/runs/<run-id>/`. Capture final
+WorkerBee MCP project status during closeout and store it in that placeholder
+path when a run is promoted to acceptance evidence.

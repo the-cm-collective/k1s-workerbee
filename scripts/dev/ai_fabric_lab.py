@@ -9,16 +9,26 @@ import json
 import shutil
 import subprocess
 import sys
+import threading
+import time
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.error import URLError
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 EXAMPLE_ROOT = REPO_ROOT / "examples" / "ai-fabric-lab"
 SRC_ROOT = REPO_ROOT / "src"
 REVISION_HEX_LEN = 40
+RUNTIME_OUTPUT_FILES = (
+    "summary.json",
+    "requests.jsonl",
+    "gpu-samples.jsonl",
+    "health.json",
+    "f5-evidence.json",
+    "workerbee-status.json",
+)
 
 if str(SRC_ROOT) not in sys.path:
     sys.path.insert(0, str(SRC_ROOT))
@@ -117,6 +127,31 @@ def main(argv: list[str] | None = None) -> int:
     f5_evidence.add_argument("--query-id", default="ai-fabric-local-first-smoke")
     f5_evidence.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
 
+    runtime_validate = sub.add_parser(
+        "validate-runtime",
+        help="Run AI fabric runtime validation suites against a deployed WorkerBee lab",
+    )
+    runtime_validate.add_argument(
+        "--suite",
+        choices=("all", "mixed-soak", "quality-contract", "lora-plumbing", "evidence-closeout"),
+        default="all",
+    )
+    runtime_validate.add_argument("--prompts", type=Path, default=None)
+    runtime_validate.add_argument("--storage-root", type=Path, default=None)
+    runtime_validate.add_argument("--run-id", default="")
+    runtime_validate.add_argument("--track", default="")
+    runtime_validate.add_argument("--router-url", default="http://127.0.0.1:18180")
+    runtime_validate.add_argument("--das-url", default="http://127.0.0.1:18181")
+    runtime_validate.add_argument("--retrieval-url", default="http://127.0.0.1:18182")
+    runtime_validate.add_argument("--duration-seconds", type=int, default=3600)
+    runtime_validate.add_argument("--workers", type=int, default=3)
+    runtime_validate.add_argument("--worker-sleep-seconds", type=float, default=2.0)
+    runtime_validate.add_argument("--gpu-sample-seconds", type=int, default=30)
+    runtime_validate.add_argument("--request-timeout", type=int, default=300)
+    runtime_validate.add_argument("--success-threshold", type=float, default=0.95)
+    runtime_validate.add_argument("--vram-growth-mib-max", type=int, default=4096)
+    runtime_validate.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+
     args = parser.parse_args(argv)
     root = args.root.expanduser().resolve()
     if args.cmd == "validate":
@@ -164,6 +199,26 @@ def main(argv: list[str] | None = None) -> int:
             project=args.project,
             track=args.track or None,
             query_id=args.query_id,
+        )
+        return _emit(result, json_out=args.json)
+    if args.cmd == "validate-runtime":
+        result = validate_runtime(
+            root,
+            suite=args.suite,
+            prompts=args.prompts,
+            storage_root=args.storage_root,
+            run_id=args.run_id or None,
+            track=args.track or None,
+            router_url=args.router_url,
+            das_url=args.das_url,
+            retrieval_url=args.retrieval_url,
+            duration_seconds=args.duration_seconds,
+            workers=args.workers,
+            worker_sleep_seconds=args.worker_sleep_seconds,
+            gpu_sample_seconds=args.gpu_sample_seconds,
+            request_timeout=args.request_timeout,
+            success_threshold=args.success_threshold,
+            vram_growth_mib_max=args.vram_growth_mib_max,
         )
         return _emit(result, json_out=args.json)
     return 2
@@ -408,6 +463,625 @@ def emit_f5_evidence(
         "facts": _f5_evidence_facts(payload),
         "findings": [],
     }
+
+
+def validate_runtime(
+    root: Path,
+    *,
+    suite: str,
+    prompts: Path | None,
+    storage_root: Path | None,
+    run_id: str | None,
+    track: str | None,
+    router_url: str,
+    das_url: str,
+    retrieval_url: str,
+    duration_seconds: int,
+    workers: int,
+    worker_sleep_seconds: float,
+    gpu_sample_seconds: int,
+    request_timeout: int,
+    success_threshold: float,
+    vram_growth_mib_max: int,
+) -> dict[str, Any]:
+    storage_layout = _load_json(root / "storage-layout.json")
+    target_root = storage_root or Path(str(storage_layout["root"]))
+    target_root = target_root.expanduser().resolve()
+    selected_run_id = run_id or f"runtime-validation-{_runtime_timestamp()}"
+    run_dir = target_root / "runs" / selected_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    paths = {name: run_dir / name for name in RUNTIME_OUTPUT_FILES}
+    paths["workerbee-status.json"].write_text(
+        json.dumps(
+            {
+                "ok": None,
+                "note": "capture WorkerBee MCP project_status after runtime validation",
+                "created_at": _utc_now(),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    prompt_path = (prompts or root / "prompts" / "validation-suite.jsonl").expanduser().resolve()
+    prompt_items = _load_prompt_suite(prompt_path)
+    findings: list[dict[str, str]] = []
+    health = _health_snapshot(router_url=router_url, das_url=das_url, retrieval_url=retrieval_url)
+    paths["health.json"].write_text(
+        json.dumps(health, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    if not health.get("ok"):
+        findings.append(_finding("error", "RUNTIME_HEALTH", "one or more runtime endpoints failed"))
+
+    selected_suites = (
+        ["quality-contract", "mixed-soak", "evidence-closeout"]
+        if suite == "all"
+        else [suite]
+    )
+    summary: dict[str, Any] = {
+        "ok": True,
+        "api_version": "workerbee.ai-fabric.runtime-validation/v1",
+        "run_id": selected_run_id,
+        "run_dir": str(run_dir),
+        "suite": suite,
+        "selected_suites": selected_suites,
+        "track": track,
+        "created_at": _utc_now(),
+        "router_url": router_url,
+        "das_url": das_url,
+        "retrieval_url": retrieval_url,
+        "output_files": {key: str(value) for key, value in paths.items()},
+        "health": health,
+        "suites": {},
+        "findings": findings,
+    }
+    for item in selected_suites:
+        if item == "quality-contract":
+            result = _run_quality_contract(
+                prompts=prompt_items,
+                router_url=router_url,
+                run_id=selected_run_id,
+                requests_path=paths["requests.jsonl"],
+                request_timeout=request_timeout,
+            )
+        elif item == "mixed-soak":
+            result = _run_mixed_soak(
+                prompts=prompt_items,
+                router_url=router_url,
+                run_id=selected_run_id,
+                requests_path=paths["requests.jsonl"],
+                gpu_samples_path=paths["gpu-samples.jsonl"],
+                duration_seconds=duration_seconds,
+                workers=workers,
+                worker_sleep_seconds=worker_sleep_seconds,
+                gpu_sample_seconds=gpu_sample_seconds,
+                request_timeout=request_timeout,
+                success_threshold=success_threshold,
+                vram_growth_mib_max=vram_growth_mib_max,
+            )
+        elif item == "lora-plumbing":
+            result = _run_lora_plumbing(
+                root=root,
+                storage_root=target_root,
+                track=track or "lora-plumbing",
+                router_url=router_url,
+                run_id=selected_run_id,
+                requests_path=paths["requests.jsonl"],
+                request_timeout=request_timeout,
+            )
+        elif item == "evidence-closeout":
+            result = _run_evidence_closeout(
+                das_url=das_url,
+                f5_evidence_path=paths["f5-evidence.json"],
+            )
+        else:  # pragma: no cover - argparse constrains values.
+            result = {"ok": False, "findings": [_finding("error", "UNKNOWN_SUITE", item)]}
+        summary["suites"][item] = result
+        for finding in result.get("findings", []):
+            if isinstance(finding, dict):
+                findings.append(finding)
+    summary["completed_at"] = _utc_now()
+    summary["ok"] = not [item for item in findings if item.get("level") == "error"] and all(
+        bool(item.get("ok")) for item in summary["suites"].values() if isinstance(item, dict)
+    )
+    paths["summary.json"].write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return summary
+
+
+def _load_prompt_suite(path: Path) -> list[dict[str, Any]]:
+    prompts: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        payload = json.loads(line)
+        if not isinstance(payload, dict):
+            raise ValueError(f"{path}:{line_no} must be a JSON object")
+        prompt_id = str(payload.get("id") or "")
+        lane = str(payload.get("lane") or "")
+        suite = str(payload.get("suite") or "")
+        prompt = str(payload.get("prompt") or "")
+        if not prompt_id or prompt_id in seen:
+            raise ValueError(f"{path}:{line_no} has missing or duplicate id")
+        if lane not in {"coordinator", "expert"}:
+            raise ValueError(f"{path}:{line_no} has invalid lane")
+        if suite not in {"quality-contract", "mixed-soak"}:
+            raise ValueError(f"{path}:{line_no} has invalid suite")
+        if not prompt.strip():
+            raise ValueError(f"{path}:{line_no} has empty prompt")
+        seen.add(prompt_id)
+        prompts.append(payload)
+    return prompts
+
+
+def _health_snapshot(*, router_url: str, das_url: str, retrieval_url: str) -> dict[str, Any]:
+    endpoints = {
+        "router": f"{router_url.rstrip('/')}/healthz",
+        "das": f"{das_url.rstrip('/')}/healthz",
+        "retrieval": f"{retrieval_url.rstrip('/')}/healthz",
+    }
+    results = {name: _get_json(url, timeout=20) for name, url in endpoints.items()}
+    return {
+        "ok": all(bool(item.get("ok")) for item in results.values()),
+        "checked_at": _utc_now(),
+        "endpoints": results,
+    }
+
+
+def _run_quality_contract(
+    *,
+    prompts: list[dict[str, Any]],
+    router_url: str,
+    run_id: str,
+    requests_path: Path,
+    request_timeout: int,
+) -> dict[str, Any]:
+    selected = [item for item in prompts if item.get("suite") == "quality-contract"]
+    findings: list[dict[str, str]] = []
+    results = []
+    for prompt in selected:
+        record = _advisory_prompt_record(
+            prompt=prompt,
+            router_url=router_url,
+            run_id=run_id,
+            request_timeout=request_timeout,
+        )
+        _append_jsonl(requests_path, record)
+        results.append(record)
+        if not record.get("ok"):
+            findings.append(
+                _finding(
+                    "error",
+                    "QUALITY_PROMPT_FAILED",
+                    str(record.get("id") or "unknown prompt"),
+                )
+            )
+    return {
+        "ok": bool(selected) and not [item for item in findings if item["level"] == "error"],
+        "prompt_count": len(selected),
+        "results": results,
+        "findings": findings,
+    }
+
+
+def _advisory_prompt_record(
+    *,
+    prompt: dict[str, Any],
+    router_url: str,
+    run_id: str,
+    request_timeout: int,
+) -> dict[str, Any]:
+    expected_lane = str(prompt.get("lane"))
+    payload = {
+        "query": str(prompt["prompt"]),
+        "lane": expected_lane,
+        "run_id": run_id,
+        "metadata": {
+            "prompt_id": str(prompt["id"]),
+            "suite": "quality-contract",
+        },
+    }
+    started = time.monotonic()
+    response = _post_json(
+        f"{router_url.rstrip('/')}/v1/advisory/query",
+        payload,
+        timeout=request_timeout,
+    )
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    data = response.get("json") if isinstance(response.get("json"), dict) else {}
+    evidence = data.get("evidence") if isinstance(data.get("evidence"), dict) else {}
+    retrieval = evidence.get("retrieval") if isinstance(evidence.get("retrieval"), dict) else {}
+    symbolic = evidence.get("symbolic") if isinstance(evidence.get("symbolic"), dict) else {}
+    retrieval_results = (
+        retrieval.get("results") if isinstance(retrieval.get("results"), list) else []
+    )
+    symbolic_results = symbolic.get("results") if isinstance(symbolic.get("results"), list) else []
+    model = data.get("model") if isinstance(data.get("model"), dict) else {}
+    raw_model = model.get("raw") if isinstance(model.get("raw"), dict) else {}
+    checks = {
+        "http_ok": response.get("status") == 200,
+        "expected_lane": data.get("lane") == expected_lane,
+        "model_ok": bool(model.get("ok")),
+        "retrieval_count": len(retrieval_results) >= int(prompt.get("min_retrieval_hits") or 1),
+        "symbolic_count": len(symbolic_results) >= int(prompt.get("min_symbolic_facts") or 1),
+        "authoritative_false": data.get("authoritative") is False,
+        "trace_persisted": bool(data.get("trace_id")) and bool(data.get("trace_path")),
+    }
+    return {
+        "id": str(prompt["id"]),
+        "suite": "quality-contract",
+        "status": response.get("status"),
+        "elapsed_ms": elapsed_ms,
+        "lane": data.get("lane"),
+        "expected_lane": expected_lane,
+        "model_id": raw_model.get("model"),
+        "model_ok": model.get("ok"),
+        "model_error": model.get("error"),
+        "retrieval_hits": len(retrieval_results),
+        "symbolic_facts": len(symbolic_results),
+        "authoritative": data.get("authoritative"),
+        "trace_id": data.get("trace_id"),
+        "trace_path": data.get("trace_path"),
+        "checks": checks,
+        "ok": all(checks.values()),
+        "error": response.get("error"),
+        "recorded_at": _utc_now(),
+    }
+
+
+def _run_mixed_soak(
+    *,
+    prompts: list[dict[str, Any]],
+    router_url: str,
+    run_id: str,
+    requests_path: Path,
+    gpu_samples_path: Path,
+    duration_seconds: int,
+    workers: int,
+    worker_sleep_seconds: float,
+    gpu_sample_seconds: int,
+    request_timeout: int,
+    success_threshold: float,
+    vram_growth_mib_max: int,
+) -> dict[str, Any]:
+    selected = [item for item in prompts if item.get("suite") == "mixed-soak"]
+    if not selected:
+        return {"ok": False, "findings": [_finding("error", "SOAK_PROMPTS", "no soak prompts")]}
+    workers = max(1, workers)
+    duration_seconds = max(1, duration_seconds)
+    gpu_sample_seconds = max(1, gpu_sample_seconds)
+    findings: list[dict[str, str]] = []
+    records: list[dict[str, Any]] = []
+    samples: list[dict[str, Any]] = []
+    lock = threading.Lock()
+    stop_at = time.monotonic() + duration_seconds
+    stop_event = threading.Event()
+
+    def sample_gpu() -> None:
+        while not stop_event.is_set():
+            sample = _gpu_sample()
+            with lock:
+                samples.append(sample)
+            _append_jsonl(gpu_samples_path, sample)
+            sleep_for = min(gpu_sample_seconds, max(0.0, stop_at - time.monotonic()))
+            if sleep_for <= 0:
+                return
+            stop_event.wait(sleep_for)
+
+    def run_worker(worker_id: int) -> None:
+        index = worker_id
+        while time.monotonic() < stop_at:
+            prompt = selected[index % len(selected)]
+            index += workers
+            record = _chat_prompt_record(
+                prompt=prompt,
+                router_url=router_url,
+                run_id=run_id,
+                worker_id=worker_id,
+                request_timeout=request_timeout,
+            )
+            with lock:
+                records.append(record)
+            _append_jsonl(requests_path, record)
+            if worker_sleep_seconds > 0:
+                stop_event.wait(min(worker_sleep_seconds, max(0.0, stop_at - time.monotonic())))
+
+    sampler = threading.Thread(target=sample_gpu, name="ai-fabric-gpu-sampler", daemon=True)
+    sampler.start()
+    threads = [
+        threading.Thread(target=run_worker, args=(worker_id,), name=f"ai-fabric-soak-{worker_id}")
+        for worker_id in range(workers)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    stop_event.set()
+    sampler.join(timeout=max(1, gpu_sample_seconds))
+    if not samples:
+        sample = _gpu_sample()
+        samples.append(sample)
+        _append_jsonl(gpu_samples_path, sample)
+    total = len(records)
+    ok_count = len([item for item in records if item.get("ok")])
+    success_rate = ok_count / total if total else 0.0
+    final_growth = _final_vram_growth_mib(samples, window_seconds=900)
+    no_oom = not any("out of memory" in str(item.get("error") or "").lower() for item in records)
+    checks = {
+        "requests_present": total > 0,
+        "success_rate": success_rate >= success_threshold,
+        "gpu_samples_present": bool(samples),
+        "final_vram_growth": final_growth is not None and final_growth <= vram_growth_mib_max,
+        "no_oom": no_oom,
+    }
+    if not checks["success_rate"]:
+        findings.append(
+            _finding(
+                "error",
+                "SOAK_SUCCESS_RATE",
+                f"success rate {success_rate:.3f} below {success_threshold:.3f}",
+            )
+        )
+    if not checks["final_vram_growth"]:
+        findings.append(
+            _finding(
+                "error",
+                "SOAK_VRAM_GROWTH",
+                f"final VRAM growth {final_growth} MiB exceeds {vram_growth_mib_max} MiB",
+            )
+        )
+    if not no_oom:
+        findings.append(_finding("error", "SOAK_OOM", "one or more requests reported OOM"))
+    return {
+        "ok": all(checks.values()),
+        "duration_seconds": duration_seconds,
+        "workers": workers,
+        "request_count": total,
+        "ok_count": ok_count,
+        "success_rate": success_rate,
+        "gpu_sample_count": len(samples),
+        "final_vram_growth_mib": final_growth,
+        "checks": checks,
+        "findings": findings,
+    }
+
+
+def _chat_prompt_record(
+    *,
+    prompt: dict[str, Any],
+    router_url: str,
+    run_id: str,
+    worker_id: int,
+    request_timeout: int,
+) -> dict[str, Any]:
+    lane = str(prompt.get("lane"))
+    payload = {
+        "lane": lane,
+        "messages": [{"role": "user", "content": str(prompt["prompt"])}],
+        "temperature": 0,
+        "max_tokens": int(prompt.get("max_tokens") or 32),
+        "metadata": {"run_id": run_id, "prompt_id": str(prompt["id"]), "worker_id": worker_id},
+    }
+    started = time.monotonic()
+    response = _post_json(
+        f"{router_url.rstrip('/')}/v1/chat/completions",
+        payload,
+        timeout=request_timeout,
+    )
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+    data = response.get("json") if isinstance(response.get("json"), dict) else {}
+    choices = data.get("choices") if isinstance(data.get("choices"), list) else []
+    content = None
+    if choices and isinstance(choices[0], dict):
+        message = choices[0].get("message")
+        if isinstance(message, dict):
+            content = message.get("content")
+    model_id = data.get("model")
+    expected_model = "k1s-code-expert" if lane == "expert" else "general-coordinator"
+    checks = {
+        "http_ok": response.get("status") == 200,
+        "expected_model": model_id == expected_model,
+        "content_present": isinstance(content, str) and bool(content.strip()),
+    }
+    return {
+        "id": str(prompt["id"]),
+        "suite": "mixed-soak",
+        "worker_id": worker_id,
+        "status": response.get("status"),
+        "elapsed_ms": elapsed_ms,
+        "lane": lane,
+        "model_id": model_id,
+        "content_chars": len(content or ""),
+        "checks": checks,
+        "ok": all(checks.values()),
+        "error": response.get("error"),
+        "recorded_at": _utc_now(),
+    }
+
+
+def _run_lora_plumbing(
+    *,
+    root: Path,
+    storage_root: Path,
+    track: str,
+    router_url: str,
+    run_id: str,
+    requests_path: Path,
+    request_timeout: int,
+) -> dict[str, Any]:
+    tracks = _load_json(root / "model-tracks.json").get("tracks")
+    track_config = tracks.get(track) if isinstance(tracks, dict) else None
+    findings: list[dict[str, str]] = []
+    if not isinstance(track_config, dict):
+        return {
+            "ok": False,
+            "findings": [_finding("error", "LORA_TRACK", f"missing track {track}")],
+        }
+    adapter_dir = storage_root / "adapters" / "expert"
+    record = _chat_prompt_record(
+        prompt={
+            "id": "lora-plumbing-expert-smoke",
+            "lane": "expert",
+            "prompt": "Return the word ok.",
+            "max_tokens": 4,
+        },
+        router_url=router_url,
+        run_id=run_id,
+        worker_id=0,
+        request_timeout=request_timeout,
+    )
+    record["suite"] = "lora-plumbing"
+    _append_jsonl(requests_path, record)
+    checks = {
+        "coordinator_lora_disabled": track_config["coordinator"].get("enable_lora") is False,
+        "expert_lora_enabled": track_config["expert"].get("enable_lora") is True,
+        "adapter_dir_present": adapter_dir.is_dir(),
+        "expert_request_ok": bool(record.get("ok")),
+        "expert_model_alias": record.get("model_id") == "k1s-code-expert",
+    }
+    for key, value in checks.items():
+        if not value:
+            findings.append(_finding("error", "LORA_PLUMBING", key))
+    return {
+        "ok": all(checks.values()),
+        "track": track,
+        "adapter_dir": str(adapter_dir),
+        "checks": checks,
+        "request": record,
+        "findings": findings,
+    }
+
+
+def _run_evidence_closeout(*, das_url: str, f5_evidence_path: Path) -> dict[str, Any]:
+    payload = _get_json(f"{das_url.rstrip('/')}/v1/f5/evidence?limit=30", timeout=20)
+    f5_evidence_path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    records = payload.get("records") if isinstance(payload.get("records"), list) else []
+    kinds = sorted({str(item.get("kind")) for item in records if isinstance(item, dict)})
+    required = {"das_cell_bundle", "das_query_trace", "cognitive_signal"}
+    missing = sorted(required - set(kinds))
+    findings = [
+        _finding("error", "F5_EVIDENCE_MISSING", ",".join(missing))
+    ] if missing else []
+    return {
+        "ok": bool(payload.get("ok")) and not missing,
+        "record_count": len(records),
+        "kinds": kinds,
+        "missing": missing,
+        "path": str(f5_evidence_path),
+        "findings": findings,
+    }
+
+
+def _post_json(url: str, payload: dict[str, Any], *, timeout: int) -> dict[str, Any]:
+    body = json.dumps(payload).encode("utf-8")
+    request = Request(  # noqa: S310 - lab validation targets local user-provided URLs.
+        url,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=timeout) as response:  # noqa: S310
+            raw = response.read().decode("utf-8")
+            return {"ok": True, "status": response.status, "json": json.loads(raw)}
+    except HTTPError as exc:
+        return {
+            "ok": False,
+            "status": exc.code,
+            "json": {},
+            "error": exc.read().decode("utf-8", errors="replace"),
+        }
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return {"ok": False, "status": None, "json": {}, "error": str(exc)}
+
+
+def _get_json(url: str, *, timeout: int) -> dict[str, Any]:
+    try:
+        with urlopen(url, timeout=timeout) as response:  # noqa: S310
+            raw = response.read().decode("utf-8")
+            payload = json.loads(raw)
+            return payload if isinstance(payload, dict) else {"ok": False, "error": "invalid_json"}
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        return {"ok": False, "error": str(exc), "url": url}
+
+
+def _gpu_sample() -> dict[str, Any]:
+    result = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-gpu=name,memory.used,memory.free",
+            "--format=csv,noheader",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    sample: dict[str, Any] = {
+        "sampled_at": _utc_now(),
+        "epoch_seconds": time.time(),
+        "ok": result.returncode == 0,
+    }
+    if result.returncode != 0:
+        sample["error"] = result.stderr.strip() or result.stdout.strip()
+        return sample
+    line = result.stdout.strip().splitlines()[0] if result.stdout.strip() else ""
+    parts = [item.strip() for item in line.split(",")]
+    sample["raw"] = line
+    if len(parts) >= 3:
+        sample["gpu_name"] = parts[0]
+        sample["memory_used_mib"] = _parse_mib(parts[1])
+        sample["memory_free_mib"] = _parse_mib(parts[2])
+    return sample
+
+
+def _parse_mib(value: str) -> int | None:
+    token = value.strip().split()[0] if value.strip() else ""
+    try:
+        return int(token)
+    except ValueError:
+        return None
+
+
+def _final_vram_growth_mib(
+    samples: list[dict[str, Any]],
+    *,
+    window_seconds: int,
+) -> int | None:
+    usable = [
+        item
+        for item in samples
+        if isinstance(item.get("memory_used_mib"), int)
+        and isinstance(item.get("epoch_seconds"), float)
+    ]
+    if not usable:
+        return None
+    last_epoch = float(usable[-1]["epoch_seconds"])
+    window = [
+        item
+        for item in usable
+        if float(item["epoch_seconds"]) >= last_epoch - window_seconds
+    ]
+    if len(window) < 2:
+        window = usable
+    return int(window[-1]["memory_used_mib"]) - int(window[0]["memory_used_mib"])
+
+
+def _append_jsonl(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, sort_keys=True) + "\n")
+
+
+def _runtime_timestamp() -> str:
+    return datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
 
 
 def _iter_corpus_files(source_root: Path, source_name: str):

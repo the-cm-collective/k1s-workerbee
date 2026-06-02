@@ -12,7 +12,7 @@ spec:
   replicas: 1
   env:
     - name: AI_ROUTER_CONFIG_REV
-      value: symbolic-baseline-v2
+      value: symbolic-lora-plumbing-v2
     - name: COORDINATOR_URL
       value: http://ai-coordinator.ai-fabric-lab.svc.cluster.local:8001/v1/chat/completions
     - name: EXPERT_URL
@@ -23,8 +23,6 @@ spec:
       value: http://das-bridge.ai-fabric-lab.svc.cluster.local:8081
     - name: QDRANT_URL
       value: http://qdrant.ai-fabric-lab.svc.cluster.local:6333
-    - name: AI_ROUTER_ADVISORY_MODEL_TIMEOUT
-      value: "180"
   ports:
     - name: http
       containerPort: 8080

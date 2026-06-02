@@ -13,7 +13,7 @@ spec:
   runtimeClassName: nvidia
   env:
     - name: AI_FABRIC_TRACK
-      value: baseline
+      value: lora-plumbing
     - name: AI_FABRIC_LANE
       value: coordinator
     - name: AI_FABRIC_CONFIG
@@ -27,7 +27,7 @@ spec:
     - name: VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
       value: "0"
     - name: AI_FABRIC_CONFIG_REV
-      value: qwen-baseline-v2
+      value: qwen-lora-plumbing-v2
   ports:
     - name: http
       containerPort: 8001

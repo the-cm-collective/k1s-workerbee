@@ -27,6 +27,31 @@
         "enable_lora": false
       }
     },
+    "lora-plumbing": {
+      "description": "LoRA plumbing validation track using the small all-Qwen profile with expert LoRA support enabled and a lower context budget for resident startup.",
+      "coordinator": {
+        "alias": "coordinator-qwen25-3b-awq",
+        "model": "Qwen/Qwen2.5-3B-Instruct-AWQ",
+        "revision": "3559b226e8ce77211e2c1bd7ddfb7686fec4d6dd",
+        "port": 8001,
+        "served_model_name": "general-coordinator",
+        "max_model_len": 4096,
+        "gpu_memory_utilization": 0.38,
+        "quantization": "awq",
+        "enable_lora": false
+      },
+      "expert": {
+        "alias": "expert-qwen25-coder-7b-awq-lora-plumbing",
+        "model": "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ",
+        "revision": "8e8ed243bbe6f9a5aff549a0924562fc719b2b8a",
+        "port": 8002,
+        "served_model_name": "k1s-code-expert",
+        "max_model_len": 4096,
+        "gpu_memory_utilization": 0.44,
+        "quantization": "awq",
+        "enable_lora": true
+      }
+    },
     "baseline": {
       "description": "Primary all-Qwen development baseline: stronger coordinator plus 14B code expert.",
       "coordinator": {
@@ -36,7 +61,7 @@
         "port": 8001,
         "served_model_name": "general-coordinator",
         "max_model_len": 8192,
-        "gpu_memory_utilization": 0.28,
+        "gpu_memory_utilization": 0.34,
         "quantization": "awq",
         "enable_lora": false
       },
@@ -61,7 +86,7 @@
         "port": 8001,
         "served_model_name": "general-coordinator",
         "max_model_len": 8192,
-        "gpu_memory_utilization": 0.28,
+        "gpu_memory_utilization": 0.34,
         "quantization": "awq",
         "enable_lora": false
       },
@@ -103,7 +128,7 @@
       }
     }
   },
-  "expected_tracks": ["smoke", "baseline", "quality", "legacy-smollm-smoke"],
+  "expected_tracks": ["smoke", "lora-plumbing", "baseline", "quality", "legacy-smollm-smoke"],
   "run_defaults": {
     "download_dir": "/models/hf-cache",
     "startup_stagger_seconds": 20,

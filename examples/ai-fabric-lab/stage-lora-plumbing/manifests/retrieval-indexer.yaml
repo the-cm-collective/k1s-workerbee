@@ -1,0 +1,47 @@
+apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: retrieval-indexer
+  namespace: ai-fabric-lab
+  labels:
+    app: retrieval-indexer
+    workerbee.k1s.dev/project: ai-fabric-lab
+spec:
+  image: localhost/workerbee-ai-fabric-retrieval-indexer:dev
+  imagePullPolicy: Never
+  replicas: 1
+  env:
+    - name: AI_INDEXER_CONFIG_REV
+      value: retrieval-v1
+    - name: AI_INDEXER_SERVE
+      value: "1"
+    - name: QDRANT_URL
+      value: http://qdrant.ai-fabric-lab.svc.cluster.local:6333
+    - name: CORPUS_ROOT
+      value: /corpus
+    - name: ARTIFACTS_ROOT
+      value: /artifacts
+  ports:
+    - name: http
+      containerPort: 8082
+  service:
+    port: 18182
+    targetPort: 8082
+  health:
+    readiness:
+      httpGet: { path: /healthz, port: 8082 }
+      initialDelaySeconds: 1
+      periodSeconds: 5
+  resources:
+    requests:
+      cpu: 0.25
+      memory: 256Mi
+    limits:
+      cpu: 2
+      memory: 4Gi
+  volumes:
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/corpus
+      mountPath: /corpus
+      readOnly: true
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/artifacts/indexes
+      mountPath: /artifacts

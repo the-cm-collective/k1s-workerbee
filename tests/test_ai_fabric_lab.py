@@ -62,7 +62,13 @@ def test_ai_fabric_lab_static_bundle_validates() -> None:
 
     assert payload["ok"] is True
     assert payload["default_track"] == "baseline"
-    assert payload["tracks"] == ["baseline", "legacy-smollm-smoke", "quality", "smoke"]
+    assert payload["tracks"] == [
+        "baseline",
+        "legacy-smollm-smoke",
+        "lora-plumbing",
+        "quality",
+        "smoke",
+    ]
     assert payload["stage"]["ok"] is True
 
 
@@ -71,15 +77,26 @@ def test_ai_fabric_lab_has_quality_track_with_qwen_coordinator() -> None:
     smoke = model_tracks["tracks"]["smoke"]
     baseline = model_tracks["tracks"]["baseline"]
     quality = model_tracks["tracks"]["quality"]
+    lora_plumbing = model_tracks["tracks"]["lora-plumbing"]
     legacy = model_tracks["tracks"]["legacy-smollm-smoke"]
 
     assert model_tracks["run_defaults"]["attention_backend"] == "TRITON_ATTN"
     assert smoke["coordinator"]["model"] == "Qwen/Qwen2.5-3B-Instruct-AWQ"
     assert smoke["expert"]["model"] == "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ"
     assert baseline["coordinator"]["model"] == "Qwen/Qwen2.5-7B-Instruct-AWQ"
+    assert baseline["coordinator"]["gpu_memory_utilization"] == 0.34
     assert baseline["expert"]["model"] == "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ"
     assert quality["coordinator"]["model"] == "Qwen/Qwen2.5-7B-Instruct-AWQ"
+    assert quality["coordinator"]["gpu_memory_utilization"] == 0.34
     assert quality["expert"]["model"] == "Qwen/Qwen2.5-Coder-14B-Instruct-AWQ"
+    assert lora_plumbing["coordinator"]["model"] == "Qwen/Qwen2.5-3B-Instruct-AWQ"
+    assert lora_plumbing["coordinator"]["enable_lora"] is False
+    assert lora_plumbing["coordinator"]["max_model_len"] == 4096
+    assert lora_plumbing["coordinator"]["gpu_memory_utilization"] == 0.38
+    assert lora_plumbing["expert"]["model"] == "Qwen/Qwen2.5-Coder-7B-Instruct-AWQ"
+    assert lora_plumbing["expert"]["enable_lora"] is True
+    assert lora_plumbing["expert"]["max_model_len"] == 4096
+    assert lora_plumbing["expert"]["gpu_memory_utilization"] == 0.44
     assert legacy["coordinator"]["model"] == "HuggingFaceTB/SmolLM3-3B"
     for track in model_tracks["tracks"].values():
         for lane in ("coordinator", "expert"):
@@ -151,13 +168,59 @@ def test_ai_fabric_lab_baseline_stage_is_workerbee_valid() -> None:
     )
 
 
+def test_ai_fabric_lab_lora_plumbing_stage_is_workerbee_valid() -> None:
+    validation = validate_stage(EXAMPLE_ROOT / "stage-lora-plumbing")
+
+    assert validation["ok"] is True
+    assert validation["input_kinds"] == ["native-k1s"]
+    assert "localhost/workerbee-ai-fabric-models:dev" in validation["images"]
+    assert "ai-fabric-lab/ai-coordinator" in validation["required_controller_scopes"]
+    assert "ai-fabric-lab/ai-expert" in validation["required_controller_scopes"]
+    assert (
+        _env_value(
+            EXAMPLE_ROOT / "stage-lora-plumbing" / "manifests" / "ai-coordinator.yaml",
+            "AI_FABRIC_TRACK",
+        )
+        == "lora-plumbing"
+    )
+    assert (
+        _env_value(
+            EXAMPLE_ROOT / "stage-lora-plumbing" / "manifests" / "ai-expert.yaml",
+            "AI_FABRIC_TRACK",
+        )
+        == "lora-plumbing"
+    )
+
+
 def test_ai_fabric_lab_stages_use_dedicated_workerbee_service_ports() -> None:
-    for stage in ("stage", "stage-baseline", "stage-plumbing"):
+    for stage in ("stage", "stage-baseline", "stage-lora-plumbing", "stage-plumbing"):
         manifests = EXAMPLE_ROOT / stage / "manifests"
 
         assert _service_port(manifests / "ai-router.yaml") == 18180
         assert _service_port(manifests / "das-bridge.yaml") == 18181
         assert _service_port(manifests / "retrieval-indexer.yaml") == 18182
+
+
+def test_ai_fabric_lab_runtime_prompt_fixture_is_valid() -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_runtime_prompt_test")
+    prompts = lab._load_prompt_suite(EXAMPLE_ROOT / "prompts" / "validation-suite.jsonl")
+
+    assert {item["suite"] for item in prompts} == {"mixed-soak", "quality-contract"}
+    assert {"coordinator", "expert"} == {item["lane"] for item in prompts}
+    assert len({item["id"] for item in prompts}) == len(prompts)
+
+
+def test_ai_fabric_lab_runtime_output_files_contract() -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_runtime_output_test")
+
+    assert set(lab.RUNTIME_OUTPUT_FILES) == {
+        "summary.json",
+        "requests.jsonl",
+        "gpu-samples.jsonl",
+        "health.json",
+        "f5-evidence.json",
+        "workerbee-status.json",
+    }
 
 
 def test_ai_fabric_lab_init_storage_can_target_temp_root(tmp_path: Path) -> None:

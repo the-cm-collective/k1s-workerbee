@@ -1,10 +1,10 @@
 apiVersion: ae.dev/v1alpha1
 kind: Deployment
 metadata:
-  name: ai-coordinator
+  name: ai-expert
   namespace: ai-fabric-lab
   labels:
-    app: ai-coordinator
+    app: ai-expert
     workerbee.k1s.dev/project: ai-fabric-lab
 spec:
   image: localhost/workerbee-ai-fabric-models:dev
@@ -13,9 +13,9 @@ spec:
   runtimeClassName: nvidia
   env:
     - name: AI_FABRIC_TRACK
-      value: baseline
+      value: lora-plumbing
     - name: AI_FABRIC_LANE
-      value: coordinator
+      value: expert
     - name: AI_FABRIC_CONFIG
       value: /etc/ai-fabric/model-tracks.json
     - name: HF_HOME
@@ -27,21 +27,21 @@ spec:
     - name: VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
       value: "0"
     - name: AI_FABRIC_CONFIG_REV
-      value: qwen-baseline-v2
+      value: qwen-lora-plumbing-v2
   ports:
     - name: http
-      containerPort: 8001
+      containerPort: 8002
   service:
-    port: 8001
-    targetPort: 8001
+    port: 8002
+    targetPort: 8002
   resources:
     requests:
-      cpu: 2
-      memory: 12Gi
+      cpu: 4
+      memory: 16Gi
       nvidia.com/gpu: "1"
     limits:
-      cpu: 6
-      memory: 32Gi
+      cpu: 10
+      memory: 64Gi
       nvidia.com/gpu: "1"
   volumes:
     - hostPath: /srv/storage/k1s/ai-fabric-lab/config
