@@ -3,6 +3,8 @@ kind: Deployment
 metadata:
   name: ai-expert
   namespace: ai-fabric-lab
+  annotations:
+    fabric.k1s.io/runtime-profile-track: baseline
   labels:
     app: ai-expert
     workerbee.k1s.dev/project: ai-fabric-lab
