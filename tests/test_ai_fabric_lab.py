@@ -889,6 +889,131 @@ def test_ai_fabric_lab_runtime_output_files_contract() -> None:
     }
 
 
+def test_ai_fabric_lab_runtime_profile_records_mixed_soak_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_runtime_profile_soak_test")
+
+    monkeypatch.setattr(
+        lab,
+        "_resolve_runtime_endpoints",
+        lambda **kwargs: {
+            "router_url": kwargs["router_url"],
+            "das_url": kwargs["das_url"],
+            "retrieval_url": kwargs["retrieval_url"],
+        },
+    )
+    monkeypatch.setattr(
+        lab,
+        "_health_snapshot",
+        lambda **kwargs: {
+            "ok": True,
+            "checked_at": "2026-06-03T00:00:00+00:00",
+            "endpoints": {
+                "router": {"ok": True, "service": "ai-router"},
+                "das": {"ok": True, "service": "das-bridge", "fact_count": 12},
+                "retrieval": {
+                    "ok": True,
+                    "service": "retrieval-indexer",
+                    "document_count": 3,
+                    "chunk_count": 9,
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(
+        lab,
+        "_host_alias_snapshot",
+        lambda **kwargs: {"ok": True, "checked_at": "2026-06-03T00:00:00+00:00"},
+    )
+    monkeypatch.setattr(
+        lab,
+        "_lane_readiness_snapshot",
+        lambda **kwargs: {
+            "ok": True,
+            "lanes": {
+                "coordinator": {"ok": True, "model_id": "general-coordinator"},
+                "expert": {"ok": True, "model_id": "k1s-code-expert"},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        lab,
+        "_run_quality_contract",
+        lambda **kwargs: {"ok": True, "results": [], "findings": []},
+    )
+    monkeypatch.setattr(
+        lab,
+        "_run_mixed_soak",
+        lambda **kwargs: {
+            "ok": True,
+            "duration_seconds": kwargs["duration_seconds"],
+            "workers": kwargs["workers"],
+            "request_count": 10,
+            "ok_count": 10,
+            "success_rate": 1.0,
+            "gpu_sample_count": 2,
+            "final_vram_growth_mib": 12,
+            "vram_growth_mib_max": kwargs["vram_growth_mib_max"],
+            "findings": [],
+        },
+    )
+    monkeypatch.setattr(
+        lab,
+        "_run_evidence_closeout",
+        lambda **kwargs: {"ok": True, "record_count": 3, "findings": []},
+    )
+
+    result = lab.validate_runtime(
+        EXAMPLE_ROOT,
+        suite="all",
+        prompts=None,
+        storage_root=tmp_path,
+        run_id="baseline-soak-evidence-test",
+        track="baseline",
+        router_url="http://127.0.0.1:18180",
+        das_url="http://127.0.0.1:18181",
+        retrieval_url="http://127.0.0.1:18182",
+        duration_seconds=60,
+        workers=2,
+        worker_sleep_seconds=0,
+        gpu_sample_seconds=5,
+        request_timeout=1,
+        success_threshold=0.95,
+        vram_growth_mib_max=4096,
+    )
+
+    profile = json.loads(
+        (Path(result["run_dir"]) / "ai-runtime-profile.json").read_text(encoding="utf-8")
+    )
+    operator_report = json.loads(
+        (Path(result["run_dir"]) / "operator-report.json").read_text(encoding="utf-8")
+    )
+    soak = profile["evidence"]["soak"]
+
+    assert result["ok"] is True
+    assert profile["track"] == "baseline"
+    assert profile["observed_vram_growth_mib"] == 12
+    assert soak == {
+        "suite": "mixed-soak",
+        "track": "baseline",
+        "ok": True,
+        "duration_seconds": 60,
+        "workers": 2,
+        "request_count": 10,
+        "success_rate": 1.0,
+        "gpu_sample_count": 2,
+        "final_vram_growth_mib": 12,
+        "vram_growth_mib_max": 4096,
+        "promotion_duration_seconds": 1800,
+        "promotion_ready": False,
+    }
+    assert (
+        "Baseline or quality soak evidence is present but 60s is below the 1800s promotion threshold."
+        in operator_report["known_gaps"]
+    )
+
+
 def test_ai_fabric_lab_normalizes_workerbee_cli_project_status() -> None:
     lab = _load_module(SCRIPT, "ai_fabric_lab_workerbee_status_normalize_test")
 

@@ -53,6 +53,7 @@ ACCEPTANCE_RUN_API_VERSION = "workerbee.ai-fabric.acceptance-run/v1"
 OPERATOR_REPORT_API_VERSION = "workerbee.ai-fabric.operator-report/v1"
 AI_RUNTIME_PROFILE_API_VERSION = "k1s.fabric.ai-runtime-profile/v1"
 AI_RUNTIME_PROFILE_KIND = "AIFabricRuntimeProfile"
+SOAK_PROMOTION_DURATION_SECONDS = 1800
 ACCEPTANCE_CLOSEOUT_SUITES = (
     "adapter-preflight",
     "lora-adapter-smoke",
@@ -1066,7 +1067,7 @@ def _runtime_profile_evidence(summary: dict[str, Any]) -> dict[str, Any]:
     output_files = (
         summary.get("output_files") if isinstance(summary.get("output_files"), dict) else {}
     )
-    return {
+    evidence: dict[str, Any] = {
         "runtime_validation_ref": output_files.get("summary.json"),
         "workerbee_status_ref": output_files.get("workerbee-status.json"),
         "f5_evidence_ref": output_files.get("f5-evidence.json"),
@@ -1078,6 +1079,37 @@ def _runtime_profile_evidence(summary: dict[str, Any]) -> dict[str, Any]:
             "chunk_count": _int_or_none(retrieval.get("chunk_count")),
         },
         "advisory_trace_refs": _collect_advisory_trace_refs(summary.get("suites")),
+    }
+    soak = _runtime_profile_soak_evidence(summary)
+    if soak is not None:
+        evidence["soak"] = soak
+    return evidence
+
+
+def _runtime_profile_soak_evidence(summary: dict[str, Any]) -> dict[str, Any] | None:
+    suites = summary.get("suites") if isinstance(summary.get("suites"), dict) else {}
+    result = suites.get("mixed-soak")
+    if not isinstance(result, dict):
+        return None
+    duration_seconds = _int_or_none(result.get("duration_seconds"))
+    promotion_ready = (
+        result.get("ok") is True
+        and duration_seconds is not None
+        and duration_seconds >= SOAK_PROMOTION_DURATION_SECONDS
+    )
+    return {
+        "suite": "mixed-soak",
+        "track": str(summary.get("track") or ""),
+        "ok": bool(result.get("ok")),
+        "duration_seconds": duration_seconds,
+        "workers": _int_or_none(result.get("workers")),
+        "request_count": _int_or_none(result.get("request_count")),
+        "success_rate": _float_or_none(result.get("success_rate")),
+        "gpu_sample_count": _int_or_none(result.get("gpu_sample_count")),
+        "final_vram_growth_mib": _int_or_none(result.get("final_vram_growth_mib")),
+        "vram_growth_mib_max": _int_or_none(result.get("vram_growth_mib_max")),
+        "promotion_duration_seconds": SOAK_PROMOTION_DURATION_SECONDS,
+        "promotion_ready": promotion_ready,
     }
 
 
@@ -1245,6 +1277,24 @@ def _operator_report(
         gaps.append(
             "Final WorkerBee MCP project status should be refreshed in workerbee-status.json before promotion."
         )
+    evidence = (
+        runtime_profile.get("evidence")
+        if isinstance(runtime_profile.get("evidence"), dict)
+        else {}
+    )
+    soak = evidence.get("soak") if isinstance(evidence, dict) else None
+    track = str(runtime_profile.get("track") or "")
+    if track in {"baseline", "quality"}:
+        if not isinstance(soak, dict) or soak.get("ok") is not True:
+            gaps.append("Baseline or quality soak evidence is missing or not passing.")
+        elif soak.get("promotion_ready") is not True:
+            duration = _int_or_none(soak.get("duration_seconds"))
+            threshold = _int_or_none(soak.get("promotion_duration_seconds"))
+            gaps.append(
+                "Baseline or quality soak evidence is present but "
+                f"{duration or 0}s is below the {threshold or SOAK_PROMOTION_DURATION_SECONDS}s "
+                "promotion threshold."
+            )
     return {
         "api_version": OPERATOR_REPORT_API_VERSION,
         "kind": "AIFabricOperatorReport",
@@ -1829,6 +1879,7 @@ def _run_mixed_soak(
         "success_rate": success_rate,
         "gpu_sample_count": len(samples),
         "final_vram_growth_mib": final_growth,
+        "vram_growth_mib_max": vram_growth_mib_max,
         "checks": checks,
         "findings": findings,
     }
