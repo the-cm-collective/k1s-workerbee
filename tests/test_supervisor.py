@@ -142,6 +142,70 @@ def test_restart_workload_posts_directly_and_masks_token(
     assert "restartAt=2026-06-02T00:00:00+00:00" in result["restart"]["stdout"]
 
 
+def test_resolve_runtime_prefers_existing_stack_runtime_when_auto(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="auto")
+    captured: dict[str, str] = {}
+    sup._write_stack(_stack(tmp_path, runtime="containerd"))  # noqa: SLF001
+
+    def fake_resolve_runtime(requested: str) -> str:
+        captured["requested"] = requested
+        return requested
+
+    monkeypatch.setattr("workerbee.supervisor.resolve_runtime", fake_resolve_runtime)
+    assert sup._resolve_runtime() == "containerd"  # noqa: SLF001
+    assert captured["requested"] == "containerd"
+
+
+def test_start_restarts_healthy_stack_when_requested_runtime_changes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="docker")
+    sup._write_stack(_stack(tmp_path, runtime="podman"))  # noqa: SLF001
+    stopped: list[bool] = []
+    cleaned: list[str] = []
+
+    monkeypatch.setattr("workerbee.supervisor.resolve_runtime", lambda requested: requested)
+    monkeypatch.setattr(sup, "_controller_healthy", lambda _info: True)
+    monkeypatch.setattr(sup, "_apishim_healthy", lambda _info: True)
+    monkeypatch.setattr(sup, "_stack_requires_ingress_restart", lambda _info: False)
+    monkeypatch.setattr(
+        sup,
+        "stop",
+        lambda *, purge=False: stopped.append(purge) or {"ok": True},
+    )
+
+    def fake_cleanup_project_runtime_containers(
+        runtime: str,
+        *,
+        include_namespaces: bool,
+    ) -> None:
+        del include_namespaces
+        cleaned.append(runtime)
+
+    monkeypatch.setattr(
+        sup,
+        "_cleanup_project_runtime_containers",
+        fake_cleanup_project_runtime_containers,
+    )
+    monkeypatch.setattr(sup, "_ensure_network", lambda _runtime, _network: None)
+    monkeypatch.setattr(sup, "_allocate_poc_service_ports", lambda _runtime: {})
+    monkeypatch.setattr(sup, "_write_stack_ingress_sites", lambda **_kwargs: {})
+    monkeypatch.setattr(sup, "_start_apishim", lambda _info: 111)
+    monkeypatch.setattr(sup, "_start_controller", lambda _info: 222)
+    monkeypatch.setattr("workerbee.supervisor.wait_for_http", lambda *_args, **_kwargs: None)
+
+    info = sup.start()
+
+    assert stopped == [False]
+    assert cleaned == ["docker"]
+    assert info.runtime == "docker"
+
+
 def test_cleanup_runtime_removes_project_and_deploy_namespace_containers(
     tmp_path: Path,
     monkeypatch,

@@ -24,6 +24,9 @@ SRC_ROOT = REPO_ROOT / "src"
 REVISION_HEX_LEN = 40
 RUNTIME_OUTPUT_FILES = (
     "summary.json",
+    "acceptance.json",
+    "ai-runtime-profile.json",
+    "operator-report.json",
     "requests.jsonl",
     "gpu-samples.jsonl",
     "health.json",
@@ -34,6 +37,7 @@ RUNTIME_OUTPUT_FILES = (
 )
 RUNTIME_SUITE_CHOICES = (
     "all",
+    "acceptance-closeout",
     "mixed-soak",
     "quality-contract",
     "lora-plumbing",
@@ -44,6 +48,19 @@ RUNTIME_SUITE_CHOICES = (
     "stress-burst",
     "recovery-smoke",
     "advisor-scenarios",
+)
+ACCEPTANCE_RUN_API_VERSION = "workerbee.ai-fabric.acceptance-run/v1"
+OPERATOR_REPORT_API_VERSION = "workerbee.ai-fabric.operator-report/v1"
+AI_RUNTIME_PROFILE_API_VERSION = "k1s.fabric.ai-runtime-profile/v1"
+AI_RUNTIME_PROFILE_KIND = "AIFabricRuntimeProfile"
+ACCEPTANCE_CLOSEOUT_SUITES = (
+    "adapter-preflight",
+    "lora-adapter-smoke",
+    "quality-comparison",
+    "stress-burst",
+    "recovery-smoke",
+    "advisor-scenarios",
+    "evidence-closeout",
 )
 RUNTIME_ENDPOINT_SUITES = {
     "mixed-soak",
@@ -136,6 +153,21 @@ CORPUS_IGNORE_DIRS = {
     "build",
     "dist",
     "node_modules",
+}
+
+RUNTIME_URL_FALLBACKS = {
+    "router": {
+        "service_name": "ai-router.ai-fabric-lab.svc.cluster.local",
+        "container_port": 8080,
+    },
+    "das": {
+        "service_name": "das-bridge.ai-fabric-lab.svc.cluster.local",
+        "container_port": 8081,
+    },
+    "retrieval": {
+        "service_name": "retrieval-indexer.ai-fabric-lab.svc.cluster.local",
+        "container_port": 8082,
+    },
 }
 CORPUS_SOURCE_PATHS = {
     "workerbee": [
@@ -596,6 +628,7 @@ def validate_runtime(
     target_root = storage_root or Path(str(storage_layout["root"]))
     target_root = target_root.expanduser().resolve()
     selected_suites = _selected_runtime_suites(suite)
+    selected_track = track or ("lora-adapter-smoke" if suite == "acceptance-closeout" else None)
     runtime_defaults = _runtime_defaults_for_suite(
         suite=suite,
         duration_seconds=duration_seconds,
@@ -656,6 +689,16 @@ def validate_runtime(
         and (item != "lora-adapter-smoke" or lora_adapter_ready)
         for item in selected_suites
     )
+    if requires_runtime:
+        resolved = _resolve_runtime_endpoints(
+            router_url=router_url,
+            das_url=das_url,
+            retrieval_url=retrieval_url,
+            timeout_seconds=max(1, min(5, request_timeout)),
+        )
+        router_url = resolved["router_url"]
+        das_url = resolved["das_url"]
+        retrieval_url = resolved["retrieval_url"]
     health = (
         _health_snapshot(router_url=router_url, das_url=das_url, retrieval_url=retrieval_url)
         if requires_runtime
@@ -722,7 +765,7 @@ def validate_runtime(
         "run_dir": str(run_dir),
         "suite": suite,
         "selected_suites": selected_suites,
-        "track": track,
+        "track": selected_track,
         "created_at": _utc_now(),
         "router_url": router_url,
         "das_url": das_url,
@@ -787,7 +830,7 @@ def validate_runtime(
             result = _run_lora_plumbing(
                 root=root,
                 storage_root=target_root,
-                track=track or "lora-plumbing",
+                track=selected_track or "lora-plumbing",
                 router_url=router_url,
                 run_id=selected_run_id,
                 requests_path=paths["requests.jsonl"],
@@ -845,6 +888,33 @@ def validate_runtime(
     summary["ok"] = not [item for item in findings if item.get("level") == "error"] and all(
         bool(item.get("ok")) for item in summary["suites"].values() if isinstance(item, dict)
     )
+    runtime_profile = _ai_runtime_profile(
+        root=root,
+        summary=summary,
+        runtime_profile_path=paths["ai-runtime-profile.json"],
+    )
+    paths["ai-runtime-profile.json"].write_text(
+        json.dumps(runtime_profile, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    acceptance = _acceptance_run_summary(
+        summary=summary,
+        runtime_profile=runtime_profile,
+        paths=paths,
+    )
+    paths["acceptance.json"].write_text(
+        json.dumps(acceptance, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    operator_report = _operator_report(
+        summary=summary,
+        acceptance=acceptance,
+        runtime_profile=runtime_profile,
+    )
+    paths["operator-report.json"].write_text(
+        json.dumps(operator_report, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
     paths["summary.json"].write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -853,7 +923,11 @@ def validate_runtime(
 
 
 def _selected_runtime_suites(suite: str) -> list[str]:
-    return ["quality-contract", "mixed-soak", "evidence-closeout"] if suite == "all" else [suite]
+    if suite == "all":
+        return ["quality-contract", "mixed-soak", "evidence-closeout"]
+    if suite == "acceptance-closeout":
+        return list(ACCEPTANCE_CLOSEOUT_SUITES)
+    return [suite]
 
 
 def _runtime_defaults_for_suite(
@@ -863,7 +937,7 @@ def _runtime_defaults_for_suite(
     workers: int | None,
     gpu_sample_seconds: int | None,
 ) -> dict[str, int]:
-    if suite == "stress-burst":
+    if suite in {"stress-burst", "acceptance-closeout"}:
         return {
             "duration_seconds": duration_seconds or 900,
             "workers": workers or 6,
@@ -874,6 +948,277 @@ def _runtime_defaults_for_suite(
         "workers": workers or 3,
         "gpu_sample_seconds": gpu_sample_seconds or 30,
     }
+
+
+def _ai_runtime_profile(
+    *,
+    root: Path,
+    summary: dict[str, Any],
+    runtime_profile_path: Path,
+) -> dict[str, Any]:
+    track_name, track_config = _runtime_profile_track(root=root, summary=summary)
+    return {
+        "api_version": AI_RUNTIME_PROFILE_API_VERSION,
+        "kind": AI_RUNTIME_PROFILE_KIND,
+        "run_id": str(summary.get("run_id") or ""),
+        "track": track_name,
+        "suite": str(summary.get("suite") or ""),
+        "created_at": _utc_now(),
+        "runtime_profile_path": str(runtime_profile_path),
+        "authoritative": False,
+        "controller_authority": "k1s",
+        "model_lanes": _runtime_profile_model_lanes(track_config),
+        "context_budget_tokens": _runtime_profile_context_budgets(track_config),
+        "adapter_hotset": _runtime_profile_adapter_hotset(track_config, summary),
+        "observed_vram_growth_mib": _runtime_profile_vram_growth(summary),
+        "evidence": _runtime_profile_evidence(summary),
+    }
+
+
+def _runtime_profile_track(
+    *,
+    root: Path,
+    summary: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    model_tracks = _load_json(root / "model-tracks.json")
+    tracks = model_tracks.get("tracks") if isinstance(model_tracks.get("tracks"), dict) else {}
+    default_track = str(model_tracks.get("default_track") or "baseline")
+    track_name = str(summary.get("track") or default_track)
+    track_config = tracks.get(track_name) if isinstance(tracks, dict) else None
+    if not isinstance(track_config, dict):
+        track_config = tracks.get(default_track) if isinstance(tracks, dict) else {}
+        track_name = default_track
+    return track_name, track_config if isinstance(track_config, dict) else {}
+
+
+def _runtime_profile_model_lanes(track_config: dict[str, Any]) -> dict[str, Any]:
+    lanes: dict[str, Any] = {}
+    for lane in ("coordinator", "expert"):
+        config = track_config.get(lane) if isinstance(track_config.get(lane), dict) else {}
+        lanes[lane] = {
+            "lane": lane,
+            "model": config.get("model"),
+            "revision": config.get("revision"),
+            "served_model_name": config.get("served_model_name") or _expected_chat_model(lane),
+            "context_budget_tokens": _int_or_none(config.get("max_model_len")),
+            "gpu_memory_utilization": _float_or_none(config.get("gpu_memory_utilization")),
+            "quantization": config.get("quantization"),
+            "lora_enabled": bool(config.get("enable_lora")),
+        }
+    return lanes
+
+
+def _runtime_profile_context_budgets(track_config: dict[str, Any]) -> dict[str, int | None]:
+    budgets: dict[str, int | None] = {}
+    for lane in ("coordinator", "expert"):
+        config = track_config.get(lane) if isinstance(track_config.get(lane), dict) else {}
+        budgets[lane] = _int_or_none(config.get("max_model_len"))
+    return budgets
+
+
+def _runtime_profile_adapter_hotset(
+    track_config: dict[str, Any],
+    summary: dict[str, Any],
+) -> list[dict[str, Any]]:
+    suites = summary.get("suites") if isinstance(summary.get("suites"), dict) else {}
+    adapter_result = suites.get("lora-adapter-smoke") if isinstance(suites, dict) else {}
+    preflight = (
+        adapter_result.get("preflight")
+        if isinstance(adapter_result, dict) and isinstance(adapter_result.get("preflight"), dict)
+        else suites.get("adapter-preflight")
+    )
+    preflight_state = (
+        str(preflight.get("state"))
+        if isinstance(preflight, dict) and preflight.get("state") is not None
+        else "unknown"
+    )
+    hotset: list[dict[str, Any]] = []
+    for lane in ("coordinator", "expert"):
+        config = track_config.get(lane) if isinstance(track_config.get(lane), dict) else {}
+        modules = config.get("lora_modules") if isinstance(config.get("lora_modules"), list) else []
+        for module in modules:
+            if not isinstance(module, dict):
+                continue
+            hotset.append(
+                {
+                    "lane": lane,
+                    "name": module.get("name"),
+                    "path": module.get("path"),
+                    "base_model_name": module.get("base_model_name"),
+                    "max_lora_rank": _int_or_none(module.get("max_lora_rank")),
+                    "state": preflight_state,
+                    "claim_scope": "runtime-smoke-only",
+                }
+            )
+    return hotset
+
+
+def _runtime_profile_vram_growth(summary: dict[str, Any]) -> int | None:
+    suites = summary.get("suites") if isinstance(summary.get("suites"), dict) else {}
+    for name in ("stress-burst", "mixed-soak"):
+        result = suites.get(name)
+        if isinstance(result, dict) and isinstance(result.get("final_vram_growth_mib"), int):
+            return int(result["final_vram_growth_mib"])
+    return None
+
+
+def _runtime_profile_evidence(summary: dict[str, Any]) -> dict[str, Any]:
+    health = summary.get("health") if isinstance(summary.get("health"), dict) else {}
+    endpoints = health.get("endpoints") if isinstance(health.get("endpoints"), dict) else {}
+    das = endpoints.get("das") if isinstance(endpoints.get("das"), dict) else {}
+    retrieval = endpoints.get("retrieval") if isinstance(endpoints.get("retrieval"), dict) else {}
+    output_files = (
+        summary.get("output_files") if isinstance(summary.get("output_files"), dict) else {}
+    )
+    return {
+        "runtime_validation_ref": output_files.get("summary.json"),
+        "workerbee_status_ref": output_files.get("workerbee-status.json"),
+        "f5_evidence_ref": output_files.get("f5-evidence.json"),
+        "advisor_scenarios_ref": output_files.get("advisor-scenarios.json"),
+        "das_fact_count": _int_or_none(das.get("fact_count")),
+        "das_f5_evidence_count": _int_or_none(das.get("f5_evidence_count")),
+        "retrieval_corpus_count": {
+            "document_count": _int_or_none(retrieval.get("document_count")),
+            "chunk_count": _int_or_none(retrieval.get("chunk_count")),
+        },
+        "advisory_trace_refs": _collect_advisory_trace_refs(summary.get("suites")),
+    }
+
+
+def _collect_advisory_trace_refs(value: Any) -> list[dict[str, str]]:
+    refs: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+
+    def visit(item: Any) -> None:
+        if isinstance(item, dict):
+            trace_id = item.get("trace_id")
+            trace_path = item.get("trace_path")
+            if isinstance(trace_id, str) or isinstance(trace_path, str):
+                key = (str(trace_id or ""), str(trace_path or ""))
+                if key not in seen:
+                    seen.add(key)
+                    refs.append(
+                        {
+                            "trace_id": str(trace_id or ""),
+                            "trace_path": str(trace_path or ""),
+                        }
+                    )
+            for child in item.values():
+                visit(child)
+        elif isinstance(item, list):
+            for child in item:
+                visit(child)
+
+    visit(value)
+    return refs
+
+
+def _acceptance_run_summary(
+    *,
+    summary: dict[str, Any],
+    runtime_profile: dict[str, Any],
+    paths: dict[str, Path],
+) -> dict[str, Any]:
+    suites = summary.get("suites") if isinstance(summary.get("suites"), dict) else {}
+    suite_status = []
+    missing = []
+    for suite_name in ACCEPTANCE_CLOSEOUT_SUITES:
+        result = suites.get(suite_name) if isinstance(suites, dict) else None
+        if not isinstance(result, dict):
+            missing.append(suite_name)
+            suite_status.append({"suite": suite_name, "ok": False, "state": "missing"})
+            continue
+        suite_status.append(
+            {
+                "suite": suite_name,
+                "ok": bool(result.get("ok")),
+                "state": str(result.get("state") or ("passed" if result.get("ok") else "failed")),
+            }
+        )
+    is_acceptance = summary.get("suite") == "acceptance-closeout"
+    error_findings = [
+        item
+        for item in summary.get("findings", [])
+        if isinstance(item, dict) and item.get("level") == "error"
+    ]
+    blocked_items = (
+        summary.get("blocked_items") if isinstance(summary.get("blocked_items"), list) else []
+    )
+    ok = bool(
+        is_acceptance
+        and summary.get("ok")
+        and not missing
+        and not blocked_items
+        and not error_findings
+        and all(item["ok"] for item in suite_status)
+    )
+    return {
+        "api_version": ACCEPTANCE_RUN_API_VERSION,
+        "kind": "AIFabricAcceptanceRun",
+        "run_id": str(summary.get("run_id") or ""),
+        "suite": str(summary.get("suite") or ""),
+        "track": runtime_profile.get("track"),
+        "acceptance": is_acceptance,
+        "ok": ok,
+        "created_at": summary.get("created_at"),
+        "completed_at": summary.get("completed_at"),
+        "required_suites": list(ACCEPTANCE_CLOSEOUT_SUITES),
+        "suite_status": suite_status,
+        "missing_suites": missing,
+        "blocked_items": blocked_items,
+        "findings": summary.get("findings", []),
+        "runtime_profile_ref": str(paths["ai-runtime-profile.json"]),
+        "artifacts": {name: str(path) for name, path in sorted(paths.items())},
+    }
+
+
+def _operator_report(
+    *,
+    summary: dict[str, Any],
+    acceptance: dict[str, Any],
+    runtime_profile: dict[str, Any],
+) -> dict[str, Any]:
+    suite_status = acceptance.get("suite_status")
+    validation = suite_status if isinstance(suite_status, list) else []
+    gaps = [
+        "LoRA adapter payload is validated only as a runtime smoke adapter.",
+        "k1s scheduler/admission behavior does not consume this runtime profile yet.",
+        "Final WorkerBee MCP project status should be refreshed in workerbee-status.json before promotion.",
+    ]
+    return {
+        "api_version": OPERATOR_REPORT_API_VERSION,
+        "kind": "AIFabricOperatorReport",
+        "run_id": str(summary.get("run_id") or ""),
+        "stage": "examples/ai-fabric-lab/stage-lora-adapter-smoke",
+        "track": runtime_profile.get("track"),
+        "ok": bool(acceptance.get("ok")) if acceptance.get("acceptance") else bool(summary.get("ok")),
+        "validation": validation,
+        "known_gaps": gaps,
+        "recommended_next_action": (
+            "promote the ai-runtime-profile contract into k1s scheduling/admission design"
+            if acceptance.get("ok")
+            else "resolve failed or blocked validation suites before fabric contract promotion"
+        ),
+        "runtime_profile_ref": acceptance.get("runtime_profile_ref"),
+    }
+
+
+def _int_or_none(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(value: Any) -> float | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _load_prompt_suite(path: Path) -> list[dict[str, Any]]:
@@ -945,6 +1290,43 @@ def _load_advisor_scenarios(path: Path) -> list[dict[str, Any]]:
     if not scenarios:
         raise ValueError(f"{path} did not contain advisor scenarios")
     return scenarios
+
+
+def _resolve_runtime_endpoints(
+    *,
+    router_url: str,
+    das_url: str,
+    retrieval_url: str,
+    timeout_seconds: int,
+) -> dict[str, str]:
+    return {
+        "router_url": _resolve_runtime_endpoint(router_url, "router", timeout_seconds),
+        "das_url": _resolve_runtime_endpoint(das_url, "das", timeout_seconds),
+        "retrieval_url": _resolve_runtime_endpoint(
+            retrieval_url, "retrieval", timeout_seconds
+        ),
+    }
+
+
+def _resolve_runtime_endpoint(url: str, role: str, timeout_seconds: int) -> str:
+    for candidate in _runtime_url_candidates(url=url, role=role):
+        if _endpoint_ok(candidate, timeout_seconds=timeout_seconds):
+            return candidate
+    return url
+
+
+def _runtime_url_candidates(*, url: str, role: str) -> list[str]:
+    candidates = [url]
+    parsed = urlparse(url)
+    fallback = RUNTIME_URL_FALLBACKS.get(role)
+    if parsed.hostname and _is_local_url(url) and fallback is not None:
+        scheme = parsed.scheme or "http"
+        candidates.append(f"{scheme}://{fallback['service_name']}:{fallback['container_port']}")
+    return candidates
+
+
+def _endpoint_ok(url: str, timeout_seconds: int) -> bool:
+    return bool(_get_json(f"{url.rstrip('/')}/healthz", timeout=timeout_seconds).get("ok"))
 
 
 def _health_snapshot(*, router_url: str, das_url: str, retrieval_url: str) -> dict[str, Any]:

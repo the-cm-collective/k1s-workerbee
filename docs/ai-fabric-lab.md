@@ -324,6 +324,30 @@ python3 scripts/dev/ai_fabric_lab.py validate-runtime --suite recovery-smoke
 python3 scripts/dev/ai_fabric_lab.py validate-runtime --suite advisor-scenarios
 ```
 
+For the full acceptance pass that should feed k1s fabric contract work, deploy
+`stage-lora-adapter-smoke` and run:
+
+```bash
+python3 scripts/dev/ai_fabric_lab.py validate-runtime \
+  --suite acceptance-closeout \
+  --run-id ai-fabric-acceptance-$(date -u +%Y%m%dT%H%M%SZ)
+```
+
+If the legacy host-node ports `18180/18181/18182` are not exposed in the
+current runtime, the runner probes the in-stage service DNS aliases
+`ai-router.ai-fabric-lab.svc.cluster.local:8080`,
+`das-bridge.ai-fabric-lab.svc.cluster.local:8081`, and
+`retrieval-indexer.ai-fabric-lab.svc.cluster.local:8082` before failing the
+runtime suites.
+
+The acceptance suite runs adapter preflight, LoRA adapter smoke, quality
+comparison, stress burst, recovery smoke, advisor scenarios, and F5 evidence
+closeout. It writes `acceptance.json`,
+`ai-runtime-profile.json`, and `operator-report.json` in addition to the normal
+runtime validation outputs. The runtime profile uses
+`k1s.fabric.ai-runtime-profile/v1` and is evidence-only; it does not change
+k1s scheduler or admission behavior.
+
 `adapter-preflight` checks
 `/srv/storage/k1s/ai-fabric-lab/adapters/expert/validation` for a real adapter
 payload. If no payload exists, it records `state=blocked` and leaves the run
@@ -343,8 +367,9 @@ do not treat the current `k1s-code-expert-lora-smoke` adapter as an ops-quality
 claim.
 
 The runner writes `summary.json`, `requests.jsonl`, `gpu-samples.jsonl`,
-`health.json`, `lane-readiness.json`, `f5-evidence.json`, and a
-`workerbee-status.json` placeholder under
+`health.json`, `lane-readiness.json`, `f5-evidence.json`, `acceptance.json`,
+`ai-runtime-profile.json`, `operator-report.json`, and a `workerbee-status.json`
+placeholder under
 `/srv/storage/k1s/ai-fabric-lab/runs/<run-id>/`. Capture final WorkerBee MCP
 project status during closeout and store it in that placeholder path when a run
 is promoted to acceptance evidence. Runtime summaries also record selected

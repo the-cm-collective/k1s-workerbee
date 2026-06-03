@@ -131,6 +131,7 @@ def serve_mcp(
     daemon = WorkerBeeDaemon(
         state_root=state_root or state_dir,
         runtime=runtime,
+        containerd_privilege=containerd_privilege,
         default_project=project,
         ingress_settings=ingress_settings,
     )

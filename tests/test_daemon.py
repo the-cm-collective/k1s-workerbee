@@ -17,6 +17,7 @@ from workerbee.daemon import (
     _handle_dashboard_action,
     _profile_control_plane_checks,
     _render_dashboard,
+    _runtime_mismatch,
     _send_bytes,
     _send_ca_download,
     _send_html,
@@ -29,6 +30,7 @@ from workerbee.ingress import (
     GlobalIngress,
     GlobalIngressInfo,
     IngressSettings,
+    ProjectIngressConfig,
     global_ingress_status,
 )
 from workerbee.k1s_runtime import K1sRuntime
@@ -52,6 +54,123 @@ def test_daemon_uses_state_root_for_project_supervisors(tmp_path: Path, monkeypa
 
     assert sup.project == "my-project"
     assert sup.state_dir == tmp_path / "projects" / "my-project"
+
+
+def test_build_supervisor_auto_runtime_falls_back_to_latest_deployment_alias_runtime(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="auto")
+
+    captured: dict[str, str] = {}
+
+    class FakeSupervisor:
+        def __init__(
+            self,
+            project: str,
+            state_dir: Path,
+            runtime: str,
+            cwd: Path,
+            ingress: ProjectIngressConfig | None,
+        ) -> None:
+            _ = state_dir, cwd, ingress
+            captured["project"] = project
+            captured["runtime"] = runtime
+
+    monkeypatch.setattr(
+        daemon,
+        "_latest_deployment",
+        lambda _project: {
+            "runtime": None,
+            "alias_refresh": {"runtime": "containerd"},
+        },
+    )
+    monkeypatch.setattr("workerbee.daemon.WorkerBeeSupervisor", FakeSupervisor)
+
+    supervisor = daemon._build_supervisor("legacy-proj", ingress=None)
+
+    assert isinstance(supervisor, FakeSupervisor)
+    assert captured["project"] == "legacy-proj"
+    assert captured["runtime"] == "containerd"
+
+
+def test_record_deployment_records_runtime(tmp_path: Path) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="auto")
+    stage_dir = tmp_path / "stage"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+
+    deployment = daemon._record_deployment(
+        project="demo",
+        stage=Path("examples/ai-fabric-lab/stage-lora-adapter-smoke"),
+        stage_dir=stage_dir,
+        target="workerbee",
+        profile=None,
+        namespace=None,
+        runtime="containerd",
+        result={"ok": True},
+    )
+
+    latest = daemon._latest_deployment("demo")
+    assert latest is not None
+    assert latest["runtime"] == "containerd"
+    assert deployment["runtime"] == "containerd"
+
+
+def test_runtime_mismatch_compares_stack_and_legacy_deployment_alias_runtime() -> None:
+    mismatch = _runtime_mismatch(
+        {"running": True, "stack": {"runtime": "podman"}},
+        {"id": "deploy-1", "alias_refresh": {"runtime": "containerd"}},
+    )
+
+    assert mismatch == {
+        "stack_runtime": "podman",
+        "deployment_runtime": "containerd",
+        "deployment_id": "deploy-1",
+        "message": (
+            "running stack runtime differs from latest deployment runtime; restart the project "
+            "or redeploy under the selected runtime"
+        ),
+    }
+
+
+def test_start_supervisor_prepares_containerd_privilege(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(
+        state_root=tmp_path,
+        runtime="auto",
+        containerd_privilege="sudo-helper",
+    )
+    captured: dict[str, object] = {}
+    nerdctl_wrapper = str(tmp_path / "workerbee-nerdctl")
+
+    class FakeSupervisor:
+        def _resolve_runtime(self) -> str:
+            return "containerd"
+
+        def start(self) -> SimpleNamespace:
+            captured["env"] = os.environ.get("WORKERBEE_NERDCTL_BIN")
+            return SimpleNamespace(runtime="containerd")
+
+    def fake_ensure_containerd_privilege(**kwargs: object) -> dict[str, object]:
+        captured["privilege"] = kwargs
+        return {"env": {"WORKERBEE_NERDCTL_BIN": nerdctl_wrapper}}
+
+    monkeypatch.setattr(
+        "workerbee.daemon.ensure_containerd_privilege",
+        fake_ensure_containerd_privilege,
+    )
+
+    result = daemon._start_supervisor(FakeSupervisor())  # noqa: SLF001
+
+    assert result.runtime == "containerd"
+    assert captured["env"] == nerdctl_wrapper
+    assert captured["privilege"] == {
+        "state_root": tmp_path,
+        "runtime": "containerd",
+        "mode": "sudo-helper",
+    }
 
 
 def test_capabilities_surface_probe_and_image_build_hints(tmp_path: Path, monkeypatch) -> None:
@@ -1591,6 +1710,9 @@ def test_dashboard_start_projects_schedules_ingress_sync_after_response(
 
         def status(self) -> dict[str, object]:
             return {"running": False}
+
+        def _resolve_runtime(self) -> str:
+            return "docker"
 
         def start(self) -> FakeInfo:
             starts.append(self.project)

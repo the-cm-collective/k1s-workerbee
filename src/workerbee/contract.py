@@ -273,6 +273,8 @@ def _feedback_summary(
         running = _running_state(data)
         selected_project = project or data.get("project") or "default"
         app_status = _app_status(data)
+        if _runtime_mismatch(data):
+            return f"WorkerBee project `{selected_project}` has a runtime mismatch."
         if running is True and app_status.get("state") == "no_workload_deployed":
             return (
                 f"WorkerBee project `{selected_project}` control plane is running, "
@@ -372,6 +374,13 @@ def _feedback_observations(
     running = _running_state(data)
     if running is not None:
         observations.append(f"running: {str(running).lower()}")
+    runtime_mismatch = _runtime_mismatch(data)
+    if runtime_mismatch:
+        stack_runtime = runtime_mismatch.get("stack_runtime")
+        deployment_runtime = runtime_mismatch.get("deployment_runtime")
+        observations.append(
+            f"runtime mismatch: stack={stack_runtime} deployment={deployment_runtime}"
+        )
     ready = (
         data.get("ready")
         if isinstance(data.get("ready"), bool)
@@ -719,6 +728,8 @@ def _running_state(data: dict[str, Any]) -> bool | None:
 def _data_reports_problem(data: dict[str, Any]) -> bool:
     if data.get("ok") is False:
         return True
+    if _runtime_mismatch(data):
+        return True
     if data.get("ready") is False:
         return True
     wait = data.get("wait")
@@ -730,6 +741,18 @@ def _data_reports_problem(data: dict[str, Any]) -> bool:
     status_matches = data.get("status_matches")
     body_matches = data.get("body_matches")
     return status_matches is False or body_matches is False
+
+
+def _runtime_mismatch(data: dict[str, Any]) -> dict[str, Any]:
+    mismatch = data.get("runtime_mismatch")
+    if isinstance(mismatch, dict):
+        return mismatch
+    project_status = data.get("project_status")
+    if isinstance(project_status, dict) and isinstance(
+        project_status.get("runtime_mismatch"), dict
+    ):
+        return project_status["runtime_mismatch"]
+    return {}
 
 
 def _data_reports_success(data: dict[str, Any]) -> bool:

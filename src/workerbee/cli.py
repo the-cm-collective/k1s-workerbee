@@ -38,7 +38,6 @@ from workerbee.daemon import WorkerBeeDaemon
 from workerbee.ingress import export_global_ingress_ca
 from workerbee.k1s_runtime import resolve_k1s_runtime
 from workerbee.manifests import (
-    deploy_local_stage,
     deploy_remote_k1s_stage,
     export_bundle,
     prepare_stage,
@@ -578,12 +577,18 @@ def main(argv: list[str] | None = None) -> int:
                 return _print(mcp_daemon_status(config), json_out=args.json)
             return 0
         if args.cmd == "projects":
-            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime, cwd=args.cwd)
+            daemon = WorkerBeeDaemon(
+                state_root=args.state_root,
+                runtime=args.runtime,
+                containerd_privilege=containerd_privilege,
+                cwd=args.cwd,
+            )
             return _print(daemon.projects(), json_out=args.json)
         if args.cmd == "profile":
             daemon = WorkerBeeDaemon(
                 state_root=args.state_root,
                 runtime=args.runtime,
+                containerd_privilege=containerd_privilege,
                 default_project=args.project or "default",
                 cwd=args.cwd,
             )
@@ -619,6 +624,7 @@ def main(argv: list[str] | None = None) -> int:
             daemon = WorkerBeeDaemon(
                 state_root=args.state_root,
                 runtime=args.runtime,
+                containerd_privilege=containerd_privilege,
                 default_project=args.project or "default",
                 cwd=args.cwd,
             )
@@ -662,6 +668,7 @@ def main(argv: list[str] | None = None) -> int:
             daemon = WorkerBeeDaemon(
                 state_root=args.state_root,
                 runtime=args.runtime,
+                containerd_privilege=containerd_privilege,
                 default_project=args.project or "default",
                 cwd=args.cwd,
             )
@@ -722,6 +729,7 @@ def main(argv: list[str] | None = None) -> int:
             daemon = WorkerBeeDaemon(
                 state_root=args.state_root,
                 runtime=args.runtime,
+                containerd_privilege=containerd_privilege,
                 default_project=project,
                 cwd=cwd,
             )
@@ -738,12 +746,22 @@ def main(argv: list[str] | None = None) -> int:
             if args.project_cmd == "status":
                 return _print(daemon.project_mode_get(project), json_out=args.json)
         if args.cmd == "global-dashboard":
-            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime, cwd=args.cwd)
+            daemon = WorkerBeeDaemon(
+                state_root=args.state_root,
+                runtime=args.runtime,
+                containerd_privilege=containerd_privilege,
+                cwd=args.cwd,
+            )
             return _print(daemon.global_dashboard(), json_out=args.json)
         if args.cmd == "ingress":
             root = args.state_root or args.state_dir or default_state_root()
             if args.ingress_cmd == "status":
-                daemon = WorkerBeeDaemon(state_root=root, runtime=args.runtime, cwd=args.cwd)
+                daemon = WorkerBeeDaemon(
+                    state_root=root,
+                    runtime=args.runtime,
+                    containerd_privilege=containerd_privilege,
+                    cwd=args.cwd,
+                )
                 return _print(daemon.global_dashboard(), json_out=args.json)
             if args.ingress_cmd == "ca":
                 return _print(
@@ -759,7 +777,12 @@ def main(argv: list[str] | None = None) -> int:
             if args.trust_cmd == "uninstall":
                 return _print(trust_uninstall(root, target=args.target), json_out=args.json)
         if args.cmd == "cleanup":
-            daemon = WorkerBeeDaemon(state_root=args.state_root, runtime=args.runtime, cwd=args.cwd)
+            daemon = WorkerBeeDaemon(
+                state_root=args.state_root,
+                runtime=args.runtime,
+                containerd_privilege=containerd_privilege,
+                cwd=args.cwd,
+            )
             privilege = ensure_containerd_privilege(
                 state_root=args.state_root or default_state_root(),
                 runtime=args.runtime,
@@ -821,6 +844,7 @@ def main(argv: list[str] | None = None) -> int:
                     daemon = WorkerBeeDaemon(
                         state_root=args.state_root,
                         runtime=args.runtime,
+                        containerd_privilege=containerd_privilege,
                         default_project=args.project or "default",
                         cwd=args.cwd,
                     )
@@ -842,21 +866,32 @@ def main(argv: list[str] | None = None) -> int:
                         )
                         result["containerd_privilege"] = containerd_privilege_summary(privilege)
                         return _print(result, json_out=args.json)
-                return _print(
-                    _run_supervisor_action(
-                        args=args,
-                        supervisor=sup,
-                        containerd_privilege=containerd_privilege,
-                        action=lambda: deploy_local_stage(
-                            supervisor=sup,
-                            stage_dir=resolve_stage_dir(sup, args.stage),
-                            namespace=args.namespace,
-                            timeout=args.timeout,
-                            prune=args.prune,
-                        ),
-                    ),
-                    json_out=args.json,
+                daemon = WorkerBeeDaemon(
+                    state_root=args.state_root,
+                    runtime=args.runtime,
+                    containerd_privilege=containerd_privilege,
+                    default_project=args.project or "default",
+                    cwd=args.cwd,
                 )
+                result = daemon.manifest_deploy_local(
+                    stage=args.stage,
+                    target="workerbee",
+                    project=args.project,
+                    namespace=args.namespace,
+                    timeout=args.timeout,
+                    prune=args.prune,
+                )
+                if str(args.runtime).lower() == CONTAINERD_RUNTIME:
+                    privilege = ensure_containerd_privilege(
+                        state_root=args.state_root or default_state_root(),
+                        runtime=args.runtime,
+                        mode=containerd_privilege,
+                    )
+                    result.setdefault(
+                        "containerd_privilege",
+                        containerd_privilege_summary(privilege),
+                    )
+                return _print(result, json_out=args.json)
             if args.manifest_cmd == "deploy-k1s":
                 return _print(
                     deploy_remote_k1s_stage(
@@ -898,6 +933,7 @@ def main(argv: list[str] | None = None) -> int:
             daemon = WorkerBeeDaemon(
                 state_root=args.state_root,
                 runtime=args.runtime,
+                containerd_privilege=containerd_privilege,
                 default_project=args.project or "default",
                 cwd=args.cwd,
             )

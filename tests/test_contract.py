@@ -76,6 +76,27 @@ def test_agent_feedback_summarizes_status_with_safe_links_and_artifacts() -> Non
     assert feedback["next_actions"][0]["tool"] == "workerbee_v1_logs"
 
 
+def test_agent_feedback_warns_on_runtime_mismatch() -> None:
+    result = ok(
+        kind="ProjectStatus",
+        project="alpha",
+        data={
+            "running": True,
+            "mode": "start",
+            "runtime_mismatch": {
+                "stack_runtime": "podman",
+                "deployment_runtime": "containerd",
+                "deployment_id": "deploy-1",
+            },
+        },
+    )
+
+    feedback = result["data"]["agent_feedback"]
+    assert feedback["severity"] == "warning"
+    assert feedback["summary"] == "WorkerBee project `alpha` has a runtime mismatch."
+    assert "runtime mismatch: stack=podman deployment=containerd" in feedback["observations"]
+
+
 def test_agent_feedback_recommends_diagnostics_for_probe_mismatch() -> None:
     result = ok(
         kind="IngressProbe",

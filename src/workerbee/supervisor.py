@@ -126,8 +126,9 @@ class WorkerBeeSupervisor:
     # Lifecycle -----------------------------------------------------
     def start(self) -> StackInfo:
         existing = self.load_stack()
+        runtime = self._resolve_runtime()
         if existing and self._controller_healthy(existing) and self._apishim_healthy(existing):
-            if self._stack_requires_ingress_restart(existing):
+            if existing.runtime != runtime or self._stack_requires_ingress_restart(existing):
                 self.stop(purge=False)
             else:
                 if self.ingress:
@@ -136,7 +137,6 @@ class WorkerBeeSupervisor:
         elif existing:
             self.stop(purge=False)
 
-        runtime = self._resolve_runtime()
         self._ensure_dirs()
         self._cleanup_project_runtime_containers(runtime, include_namespaces=False)
         state_root = self.state_dir.parent.parent
@@ -1174,6 +1174,10 @@ https://{api_host} {{
         write_private_json(self.stack_file, asdict(info))
 
     def _resolve_runtime(self) -> str:
+        if str(self.runtime_requested).lower() == "auto":
+            existing = self.load_stack()
+            if existing is not None:
+                return resolve_runtime(existing.runtime)
         return resolve_runtime(self.runtime_requested)
 
     def _ensure_network(self, runtime: str, network: str) -> None:

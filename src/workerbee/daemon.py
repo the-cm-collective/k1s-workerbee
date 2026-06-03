@@ -30,7 +30,13 @@ from workerbee.agent import (
     runbook_payload,
     user_message_for_session,
 )
-from workerbee.containerd_helper import containerd_privilege_status, containerd_privilege_summary
+from workerbee.containerd_helper import (
+    containerd_privilege_env,
+    containerd_privilege_status,
+    containerd_privilege_summary,
+    ensure_containerd_privilege,
+    temporary_containerd_privilege_env,
+)
 from workerbee.contract import WorkerBeeError
 from workerbee.dns import WorkerBeeDNSServer
 from workerbee.edge_link import K1sEdgeLinkRunner
@@ -56,6 +62,7 @@ from workerbee.ports import choose_port
 from workerbee.probe import build_probe_url, probe_workerbee_url
 from workerbee.profiles import K1sProfileRunner, builtin_profiles, is_edge_link_profile
 from workerbee.runtime_support import (
+    CONTAINERD_RUNTIME,
     cleanup_runtime,
     resolve_runtime,
     runtime_diagnostics,
@@ -127,12 +134,14 @@ class WorkerBeeDaemon:
         *,
         state_root: Path | None = None,
         runtime: str = "auto",
+        containerd_privilege: str = "auto",
         default_project: str = "default",
         cwd: Path | None = None,
         ingress_settings: IngressSettings | None = None,
     ) -> None:
         self.state_root = (state_root or default_state_root()).resolve()
         self.runtime_requested = runtime
+        self.containerd_privilege = containerd_privilege
         self.default_project = project_slug(default_project)
         self.ingress_settings = ingress_settings or resolve_ingress_settings()
         self.cwd = (cwd or Path.cwd()).resolve()
@@ -199,13 +208,36 @@ class WorkerBeeDaemon:
         *,
         ingress: ProjectIngressConfig | None,
     ) -> WorkerBeeSupervisor:
+        runtime = self.runtime_requested
+        if runtime == "auto":
+            latest = self._latest_deployment(project)
+            deployment_runtime = ""
+            if isinstance(latest, dict):
+                raw_runtime = latest.get("runtime") or latest.get("alias_refresh", {}).get(
+                    "runtime"
+                )
+                deployment_runtime = str(raw_runtime or "")
+            if deployment_runtime:
+                runtime = deployment_runtime
         return WorkerBeeSupervisor(
             project=project,
             state_dir=daemon_project_state_dir(project, state_root=self.state_root),
-            runtime=self.runtime_requested,
+            runtime=runtime,
             cwd=self._project_cwd(project),
             ingress=ingress,
         )
+
+    def _start_supervisor(self, supervisor: WorkerBeeSupervisor) -> Any:
+        runtime = supervisor._resolve_runtime()  # noqa: SLF001 - daemon owns supervisor lifecycle.
+        if runtime != CONTAINERD_RUNTIME:
+            return supervisor.start()
+        privilege = ensure_containerd_privilege(
+            state_root=self.state_root,
+            runtime=CONTAINERD_RUNTIME,
+            mode=self.containerd_privilege,
+        )
+        with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
+            return supervisor.start()
 
     def with_project(
         self,
@@ -228,7 +260,7 @@ class WorkerBeeDaemon:
                 if require_active:
                     running = bool(sup.status().get("running"))
                     if autostart:
-                        info = sup.start()
+                        info = self._start_supervisor(sup)
                         if not running:
                             events.append(
                                 _stack_started_event(
@@ -280,7 +312,7 @@ class WorkerBeeDaemon:
                 events: list[dict[str, Any]] = []
                 if mode == "start":
                     running = bool(sup.status().get("running"))
-                    info = sup.start()
+                    info = self._start_supervisor(sup)
                     if not running:
                         events.append(
                             _stack_started_event(project=name, info=info, reason="session_start")
@@ -351,7 +383,7 @@ class WorkerBeeDaemon:
         name = project_slug(project or self.default_project)
 
         def start_and_summarize(supervisor: WorkerBeeSupervisor) -> dict[str, Any]:
-            result = supervisor.start().public_dict()
+            result = self._start_supervisor(supervisor).public_dict()
             result["running"] = True
             latest = self._latest_deployment(name)
             result["latest_deployment"] = latest
@@ -360,6 +392,7 @@ class WorkerBeeDaemon:
                 latest_deployment=latest,
                 running=True,
             )
+            _annotate_runtime_mismatch(result, latest)
             return result
 
         result = self.with_project(
@@ -423,7 +456,7 @@ class WorkerBeeDaemon:
                     )
                 elif selected_mode == "start":
                     running = bool(sup.status().get("running"))
-                    info = sup.start()
+                    info = self._start_supervisor(sup)
                     if not running:
                         events.append(
                             _stack_started_event(project=name, info=info, reason="mode_set")
@@ -522,6 +555,7 @@ class WorkerBeeDaemon:
             if isinstance(profile, dict) and profile_urls.get("dashboard"):
                 profile_dashboard_url = str(profile_urls["dashboard"])
             stack_dashboard_url = (stack or {}).get("dashboard_url") if stack else None
+            runtime_mismatch = _runtime_mismatch(status, latest_deployment)
             stack_running = bool(status.get("running"))
             profile_running = bool(profile_status.get("running"))
             running = stack_running or profile_running
@@ -573,6 +607,7 @@ class WorkerBeeDaemon:
                     "profile_status": profile_status,
                     "ingress": (stack or {}).get("ingress") if stack else None,
                     "latest_deployment": latest_deployment,
+                    "runtime_mismatch": runtime_mismatch,
                     "app_status": app_status,
                     "error": error,
                 }
@@ -602,6 +637,7 @@ class WorkerBeeDaemon:
                 latest_deployment=latest,
                 running=bool(status.get("running")),
             )
+            _annotate_runtime_mismatch(status, latest)
             return status
 
         status = self.with_project(name, status_and_summarize)
@@ -1095,6 +1131,7 @@ class WorkerBeeDaemon:
                     previous_deployment=previous,
                     prune=prune,
                 )
+                stack = supervisor.load_stack()
                 deployment = self._record_deployment(
                     project=name,
                     stage=stage,
@@ -1102,6 +1139,7 @@ class WorkerBeeDaemon:
                     target=target,
                     profile=profile,
                     namespace=namespace,
+                    runtime=str(stack.runtime) if stack is not None else None,
                     result=result,
                 )
                 return {**result, "deployment": deployment}
@@ -1130,6 +1168,7 @@ class WorkerBeeDaemon:
                     timeout=timeout,
                     sync_ingress=self._sync_ingress_projects_result,
                 )
+                stack = supervisor.load_stack()
                 deployment = self._record_deployment(
                     project=name,
                     stage=stage,
@@ -1137,6 +1176,7 @@ class WorkerBeeDaemon:
                     target=target,
                     profile=str(result.get("profile") or profile or ""),
                     namespace=namespace,
+                    runtime=str(stack.runtime) if stack is not None else None,
                     result=result,
                 )
                 return {**result, "project": name, "deployment": deployment}
@@ -1298,6 +1338,7 @@ class WorkerBeeDaemon:
         target: str,
         profile: str | None,
         namespace: str | None,
+        runtime: str | None,
         result: dict[str, Any],
     ) -> dict[str, Any]:
         timestamp = _utc_timestamp_iso()
@@ -1309,6 +1350,7 @@ class WorkerBeeDaemon:
             "target": target,
             "profile": profile or None,
             "namespace": namespace,
+            "runtime": runtime,
             "stage": str(stage),
             "stage_dir": str(stage_dir.expanduser().resolve()),
             "created_at": timestamp,
@@ -1759,7 +1801,7 @@ class WorkerBeeDaemon:
                         )
                         sup = self._build_supervisor(name, ingress=self._project_ingress(name))
                         was_running = bool(sup.status().get("running"))
-                        info = sup.start()
+                        info = self._start_supervisor(sup)
                         self._register_project(
                             name,
                             cwd_hint=str(sup.cwd),
@@ -2974,6 +3016,54 @@ def _project_status_kind(*, stack_running: bool, profile_running: bool) -> str:
     if stack_running:
         return "stack"
     return "stopped"
+
+
+def _annotate_runtime_mismatch(
+    status: dict[str, Any],
+    latest_deployment: dict[str, Any] | None,
+) -> None:
+    mismatch = _runtime_mismatch(status, latest_deployment)
+    if mismatch is not None:
+        status["runtime_mismatch"] = mismatch
+
+
+def _runtime_mismatch(
+    status: dict[str, Any],
+    latest_deployment: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    stack_runtime = _status_stack_runtime(status)
+    deployment_runtime = _deployment_runtime(latest_deployment)
+    if not stack_runtime or not deployment_runtime or stack_runtime == deployment_runtime:
+        return None
+    return {
+        "stack_runtime": stack_runtime,
+        "deployment_runtime": deployment_runtime,
+        "deployment_id": latest_deployment.get("id") if latest_deployment else None,
+        "message": (
+            "running stack runtime differs from latest deployment runtime; restart the project "
+            "or redeploy under the selected runtime"
+        ),
+    }
+
+
+def _status_stack_runtime(status: dict[str, Any]) -> str:
+    raw_runtime = status.get("runtime")
+    if raw_runtime:
+        return str(raw_runtime)
+    stack = status.get("stack") if isinstance(status.get("stack"), dict) else {}
+    return str(stack.get("runtime") or "")
+
+
+def _deployment_runtime(latest_deployment: dict[str, Any] | None) -> str:
+    if not isinstance(latest_deployment, dict):
+        return ""
+    raw_runtime = latest_deployment.get("runtime")
+    if raw_runtime:
+        return str(raw_runtime)
+    alias_refresh = latest_deployment.get("alias_refresh")
+    if isinstance(alias_refresh, dict) and alias_refresh.get("runtime"):
+        return str(alias_refresh["runtime"])
+    return ""
 
 
 def _stack_started_event(*, project: str, info: Any, reason: str) -> dict[str, Any]:
