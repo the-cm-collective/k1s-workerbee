@@ -251,8 +251,8 @@ not make the Hyperon/DAS substrate authoritative.
 
 `import-runtime-facts` seeds live local snapshots when local host aliases are
 available: router/DAS/retrieval readiness, host alias health, model lane
-readiness, retrieval corpus counts, DAS fact counts, and optional WorkerBee
-project status from a `workerbee-status.json` file.
+readiness, retrieval corpus counts, DAS fact counts, and optional normalized
+WorkerBee project status from a `workerbee-status.json` file.
 
 Emit a durable F5 evidence bundle for import or review without starting the
 runtime:
@@ -368,11 +368,25 @@ claim.
 
 The runner writes `summary.json`, `requests.jsonl`, `gpu-samples.jsonl`,
 `health.json`, `lane-readiness.json`, `f5-evidence.json`, `acceptance.json`,
-`ai-runtime-profile.json`, `operator-report.json`, and a `workerbee-status.json`
-placeholder under
-`/srv/storage/k1s/ai-fabric-lab/runs/<run-id>/`. Capture final WorkerBee MCP
-project status during closeout and store it in that placeholder path when a run
-is promoted to acceptance evidence. Runtime summaries also record selected
-defaults, blocked items, host alias health for the validated router, DAS, and
-retrieval endpoints, and model lane readiness for suites that exercise
-coordinator or expert chat/advisory calls.
+`ai-runtime-profile.json`, `operator-report.json`, and
+`workerbee-status.json` under
+`/srv/storage/k1s/ai-fabric-lab/runs/<run-id>/`. For promoted evidence, capture
+project status before closeout and pass it to the runner:
+
+```bash
+.venv/bin/workerbee --json \
+  --project k1s-workerbee-dev-2592c13f5e \
+  project status > /tmp/workerbee-project-status.json
+
+python3 scripts/dev/ai_fabric_lab.py validate-runtime \
+  --suite acceptance-closeout \
+  --workerbee-status /tmp/workerbee-project-status.json
+```
+
+The runner normalizes both WorkerBee MCP `ProjectStatus` JSON and WorkerBee CLI
+`project status --json` wrappers into a top-level `ProjectStatus` artifact.
+Without `--workerbee-status`, it still writes an explicit placeholder with
+`ok: null`. Runtime summaries also record selected defaults, blocked items, host
+alias health for the validated router, DAS, and retrieval endpoints, and model
+lane readiness for suites that exercise coordinator or expert chat/advisory
+calls.

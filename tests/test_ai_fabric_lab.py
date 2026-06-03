@@ -889,6 +889,51 @@ def test_ai_fabric_lab_runtime_output_files_contract() -> None:
     }
 
 
+def test_ai_fabric_lab_normalizes_workerbee_cli_project_status() -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_workerbee_status_normalize_test")
+
+    status = lab._normalize_workerbee_status_payload(
+        {
+            "project": "k1s-workerbee-dev-2592c13f5e",
+            "mode": "start",
+            "project_status": {
+                "running": True,
+                "stack": {"runtime": "containerd"},
+                "app_status": {
+                    "ready": True,
+                    "ready_workload_count": 8,
+                    "degraded_workload_count": 0,
+                },
+            },
+        }
+    )
+
+    assert status["api_version"] == "workerbee.mcp/v1"
+    assert status["kind"] == "ProjectStatus"
+    assert status["ok"] is True
+    assert status["source"] == "workerbee.cli.project_status"
+    assert status["data"]["app_status"]["ready_workload_count"] == 8
+
+
+def test_ai_fabric_lab_normalizes_workerbee_mcp_project_status() -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_workerbee_mcp_status_normalize_test")
+
+    status = lab._normalize_workerbee_status_payload(
+        {
+            "api_version": "workerbee.mcp/v1",
+            "kind": "ProjectStatus",
+            "ok": True,
+            "project": "k1s-workerbee-dev-2592c13f5e",
+            "data": {"running": True, "app_status": {"ready": True}},
+        }
+    )
+
+    assert status["api_version"] == "workerbee.mcp/v1"
+    assert status["kind"] == "ProjectStatus"
+    assert status["ok"] is True
+    assert status["source"] == "workerbee.mcp.project_status"
+
+
 def test_ai_fabric_lab_acceptance_closeout_writes_contract_artifacts(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -1040,9 +1085,15 @@ def test_ai_fabric_lab_acceptance_closeout_writes_contract_artifacts(
     assert profile["evidence"]["advisory_trace_refs"][0]["trace_id"] == "trace-acceptance"
     assert operator_report["api_version"] == "workerbee.ai-fabric.operator-report/v1"
     assert operator_report["recommended_next_action"].startswith("promote")
+    assert (
+        "Final WorkerBee MCP project status should be refreshed in workerbee-status.json before promotion."
+        in operator_report["known_gaps"]
+    )
     workerbee_status = json.loads(
         (run_dir / "workerbee-status.json").read_text(encoding="utf-8")
     )
+    assert workerbee_status["api_version"] == "workerbee.mcp/v1"
+    assert workerbee_status["kind"] == "ProjectStatus"
     assert workerbee_status["ok"] is None
 
 
@@ -1182,10 +1233,20 @@ def test_ai_fabric_lab_acceptance_closeout_copies_workerbee_status(
     copied = json.loads(
         (Path(result["run_dir"]) / "workerbee-status.json").read_text(encoding="utf-8")
     )
+    operator_report = json.loads(
+        (Path(result["run_dir"]) / "operator-report.json").read_text(encoding="utf-8")
+    )
 
     assert result["ok"] is True
+    assert copied["api_version"] == "workerbee.mcp/v1"
+    assert copied["kind"] == "ProjectStatus"
     assert copied["ok"] is True
+    assert copied["source"] == "workerbee.mcp.project_status"
     assert copied["data"]["app_status"]["ready_workload_count"] == 8
+    assert (
+        "Final WorkerBee MCP project status should be refreshed in workerbee-status.json before promotion."
+        not in operator_report["known_gaps"]
+    )
 
 
 def test_ai_fabric_lab_lane_readiness_retries_until_models_answer() -> None:

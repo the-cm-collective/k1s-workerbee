@@ -645,15 +645,7 @@ def validate_runtime(
     run_dir = target_root / "runs" / selected_run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     paths = {name: run_dir / name for name in RUNTIME_OUTPUT_FILES}
-    workerbee_status_payload = (
-        _load_json(workerbee_status.expanduser().resolve())
-        if workerbee_status is not None
-        else {
-            "ok": None,
-            "note": "capture WorkerBee MCP project_status after runtime validation",
-            "created_at": _utc_now(),
-        }
-    )
+    workerbee_status_payload = _workerbee_status_payload(workerbee_status)
     paths["workerbee-status.json"].write_text(
         json.dumps(workerbee_status_payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
@@ -913,6 +905,7 @@ def validate_runtime(
         summary=summary,
         acceptance=acceptance,
         runtime_profile=runtime_profile,
+        workerbee_status=workerbee_status_payload,
     )
     paths["operator-report.json"].write_text(
         json.dumps(operator_report, indent=2, sort_keys=True) + "\n",
@@ -1088,6 +1081,66 @@ def _runtime_profile_evidence(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _workerbee_status_payload(workerbee_status: Path | None) -> dict[str, Any]:
+    if workerbee_status is None:
+        return _normalize_workerbee_status_payload(
+            {
+                "ok": None,
+                "note": "capture WorkerBee project_status after runtime validation",
+                "created_at": _utc_now(),
+            }
+        )
+    return _normalize_workerbee_status_payload(_load_json(workerbee_status.expanduser().resolve()))
+
+
+def _normalize_workerbee_status_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    if isinstance(payload.get("data"), dict) and payload.get("kind") == "ProjectStatus":
+        data = payload["data"]
+        ok = payload.get("ok")
+        if ok is None:
+            ok = _workerbee_project_status_ok(data)
+        return {
+            "api_version": str(payload.get("api_version") or "workerbee.mcp/v1"),
+            "kind": "ProjectStatus",
+            "ok": ok,
+            "project": payload.get("project"),
+            "data": data,
+            "source": "workerbee.mcp.project_status",
+        }
+
+    project_status = payload.get("project_status")
+    if isinstance(project_status, dict):
+        return {
+            "api_version": "workerbee.mcp/v1",
+            "kind": "ProjectStatus",
+            "ok": _workerbee_project_status_ok(project_status),
+            "project": payload.get("project"),
+            "data": project_status,
+            "source": "workerbee.cli.project_status",
+        }
+
+    return {
+        "api_version": "workerbee.mcp/v1",
+        "kind": "ProjectStatus",
+        "ok": payload.get("ok"),
+        "project": payload.get("project"),
+        "data": payload.get("data") if isinstance(payload.get("data"), dict) else {},
+        "note": payload.get("note"),
+        "created_at": payload.get("created_at"),
+        "source": str(payload.get("source") or "workerbee.status.placeholder"),
+    }
+
+
+def _workerbee_project_status_ok(status: dict[str, Any]) -> bool:
+    app_status = status.get("app_status") if isinstance(status.get("app_status"), dict) else {}
+    degraded = _int_or_none(app_status.get("degraded_workload_count"))
+    return bool(
+        status.get("running")
+        and app_status.get("ready")
+        and (degraded is None or degraded == 0)
+    )
+
+
 def _collect_advisory_trace_refs(value: Any) -> list[dict[str, str]]:
     refs: list[dict[str, str]] = []
     seen: set[tuple[str, str]] = set()
@@ -1180,14 +1233,18 @@ def _operator_report(
     summary: dict[str, Any],
     acceptance: dict[str, Any],
     runtime_profile: dict[str, Any],
+    workerbee_status: dict[str, Any],
 ) -> dict[str, Any]:
     suite_status = acceptance.get("suite_status")
     validation = suite_status if isinstance(suite_status, list) else []
     gaps = [
         "LoRA adapter payload is validated only as a runtime smoke adapter.",
         "k1s scheduler/admission behavior does not consume this runtime profile yet.",
-        "Final WorkerBee MCP project status should be refreshed in workerbee-status.json before promotion.",
     ]
+    if workerbee_status.get("ok") is not True:
+        gaps.append(
+            "Final WorkerBee MCP project status should be refreshed in workerbee-status.json before promotion."
+        )
     return {
         "api_version": OPERATOR_REPORT_API_VERSION,
         "kind": "AIFabricOperatorReport",
