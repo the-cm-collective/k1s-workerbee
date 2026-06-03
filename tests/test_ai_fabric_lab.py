@@ -1040,6 +1040,152 @@ def test_ai_fabric_lab_acceptance_closeout_writes_contract_artifacts(
     assert profile["evidence"]["advisory_trace_refs"][0]["trace_id"] == "trace-acceptance"
     assert operator_report["api_version"] == "workerbee.ai-fabric.operator-report/v1"
     assert operator_report["recommended_next_action"].startswith("promote")
+    workerbee_status = json.loads(
+        (run_dir / "workerbee-status.json").read_text(encoding="utf-8")
+    )
+    assert workerbee_status["ok"] is None
+
+
+def test_ai_fabric_lab_acceptance_closeout_copies_workerbee_status(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_acceptance_closeout_status_test")
+    storage_root = tmp_path / "lab"
+    adapter = storage_root / "adapters" / "expert" / "validation"
+    adapter.mkdir(parents=True)
+    (adapter / "adapter_config.json").write_text(
+        json.dumps(
+            {
+                "base_model_name_or_path": "Qwen/Qwen2.5-Coder-7B-Instruct",
+                "r": 16,
+                "target_modules": ["q_proj", "k_proj"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    (adapter / "adapter_model.safetensors").write_text("", encoding="utf-8")
+    status_path = tmp_path / "project-status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "api_version": "workerbee.mcp/v1",
+                "kind": "ProjectStatus",
+                "ok": True,
+                "data": {"app_status": {"ready": True, "ready_workload_count": 8}},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        lab,
+        "_health_snapshot",
+        lambda **kwargs: {
+            "ok": True,
+            "checked_at": "2026-06-02T00:00:00+00:00",
+            "endpoints": {
+                "router": {"ok": True, "service": "ai-router"},
+                "das": {
+                    "ok": True,
+                    "service": "das-bridge",
+                    "fact_count": 12,
+                    "f5_evidence_count": 7,
+                },
+                "retrieval": {
+                    "ok": True,
+                    "service": "retrieval-indexer",
+                    "document_count": 3,
+                    "chunk_count": 9,
+                },
+            },
+        },
+    )
+    monkeypatch.setattr(
+        lab,
+        "_host_alias_snapshot",
+        lambda **kwargs: {"ok": True, "checked_at": "2026-06-02T00:00:00+00:00"},
+    )
+    monkeypatch.setattr(
+        lab,
+        "_lane_readiness_snapshot",
+        lambda **kwargs: {
+            "ok": True,
+            "lanes": {
+                "coordinator": {"ok": True, "model_id": "general-coordinator"},
+                "expert": {"ok": True, "model_id": "k1s-code-expert"},
+            },
+        },
+    )
+    monkeypatch.setattr(
+        lab,
+        "_run_lora_adapter_smoke",
+        lambda **kwargs: {
+            "ok": True,
+            "preflight": kwargs["preflight"],
+            "adapter_model": "k1s-code-expert-lora-smoke",
+            "base_model": "k1s-code-expert",
+            "findings": [],
+        },
+    )
+    monkeypatch.setattr(
+        lab,
+        "_run_quality_comparison",
+        lambda **kwargs: {"ok": True, "results": [], "findings": []},
+    )
+    monkeypatch.setattr(
+        lab,
+        "_run_stress_burst",
+        lambda **kwargs: {
+            "ok": True,
+            "final_vram_growth_mib": 12,
+            "request_count": 4,
+            "ok_count": 4,
+            "findings": [],
+        },
+    )
+    monkeypatch.setattr(
+        lab,
+        "_run_recovery_smoke",
+        lambda **kwargs: {"ok": True, "results": [], "findings": []},
+    )
+    monkeypatch.setattr(
+        lab,
+        "_run_advisor_scenarios",
+        lambda **kwargs: {"ok": True, "scenario_count": 2, "findings": []},
+    )
+    monkeypatch.setattr(
+        lab,
+        "_run_evidence_closeout",
+        lambda **kwargs: {"ok": True, "record_count": 3, "findings": []},
+    )
+
+    result = lab.validate_runtime(
+        EXAMPLE_ROOT,
+        suite="acceptance-closeout",
+        prompts=None,
+        storage_root=storage_root,
+        run_id="acceptance-closeout-status-test",
+        track=None,
+        router_url="http://127.0.0.1:18180",
+        das_url="http://127.0.0.1:18181",
+        retrieval_url="http://127.0.0.1:18182",
+        duration_seconds=None,
+        workers=None,
+        worker_sleep_seconds=0,
+        gpu_sample_seconds=None,
+        request_timeout=1,
+        success_threshold=0.95,
+        vram_growth_mib_max=4096,
+        workerbee_status=status_path,
+    )
+
+    copied = json.loads(
+        (Path(result["run_dir"]) / "workerbee-status.json").read_text(encoding="utf-8")
+    )
+
+    assert result["ok"] is True
+    assert copied["ok"] is True
+    assert copied["data"]["app_status"]["ready_workload_count"] == 8
 
 
 def test_ai_fabric_lab_lane_readiness_retries_until_models_answer() -> None:

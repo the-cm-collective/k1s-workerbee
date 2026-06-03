@@ -275,6 +275,7 @@ def main(argv: list[str] | None = None) -> int:
     runtime_validate.add_argument("--request-timeout", type=int, default=300)
     runtime_validate.add_argument("--success-threshold", type=float, default=0.95)
     runtime_validate.add_argument("--vram-growth-mib-max", type=int, default=4096)
+    runtime_validate.add_argument("--workerbee-status", type=Path, default=None)
     runtime_validate.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
 
     args = parser.parse_args(argv)
@@ -347,6 +348,7 @@ def main(argv: list[str] | None = None) -> int:
             request_timeout=args.request_timeout,
             success_threshold=args.success_threshold,
             vram_growth_mib_max=args.vram_growth_mib_max,
+            workerbee_status=args.workerbee_status,
         )
         return _emit(result, json_out=args.json)
     return 2
@@ -623,6 +625,7 @@ def validate_runtime(
     request_timeout: int,
     success_threshold: float,
     vram_growth_mib_max: int,
+    workerbee_status: Path | None = None,
 ) -> dict[str, Any]:
     storage_layout = _load_json(root / "storage-layout.json")
     target_root = storage_root or Path(str(storage_layout["root"]))
@@ -642,17 +645,17 @@ def validate_runtime(
     run_dir = target_root / "runs" / selected_run_id
     run_dir.mkdir(parents=True, exist_ok=True)
     paths = {name: run_dir / name for name in RUNTIME_OUTPUT_FILES}
+    workerbee_status_payload = (
+        _load_json(workerbee_status.expanduser().resolve())
+        if workerbee_status is not None
+        else {
+            "ok": None,
+            "note": "capture WorkerBee MCP project_status after runtime validation",
+            "created_at": _utc_now(),
+        }
+    )
     paths["workerbee-status.json"].write_text(
-        json.dumps(
-            {
-                "ok": None,
-                "note": "capture WorkerBee MCP project_status after runtime validation",
-                "created_at": _utc_now(),
-            },
-            indent=2,
-            sort_keys=True,
-        )
-        + "\n",
+        json.dumps(workerbee_status_payload, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
     prompt_path = (prompts or root / "prompts" / "validation-suite.jsonl").expanduser().resolve()
