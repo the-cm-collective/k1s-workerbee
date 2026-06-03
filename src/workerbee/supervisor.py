@@ -846,6 +846,20 @@ class WorkerBeeSupervisor:
                 return result
         except Exception as exc:  # noqa: BLE001
             k1s_error = str(exc)
+        apishim_error = None
+        try:
+            result = self._apishim_logs(
+                info,
+                app=resolved_app,
+                namespace=resolved_namespace,
+                tail=tail,
+            )
+            if result["stdout"].strip() or result["stderr"].strip():
+                if k1s_error:
+                    result["k1s_error"] = k1s_error
+                return result
+        except Exception as exc:  # noqa: BLE001
+            apishim_error = str(exc)
         result = self._runtime_logs(
             info,
             app=resolved_app,
@@ -855,6 +869,8 @@ class WorkerBeeSupervisor:
         )
         if k1s_error:
             result["k1s_error"] = k1s_error
+        if apishim_error:
+            result["apishim_error"] = apishim_error
         return result
 
     def run_exec(
@@ -1864,6 +1880,72 @@ https://{api_host} {{
             "stdout": "".join(stdout_parts),
             "stderr": "".join(stderr_parts),
         }
+
+    def _apishim_logs(
+        self,
+        info: StackInfo,
+        *,
+        app: str,
+        namespace: str,
+        tail: int,
+    ) -> dict[str, Any]:
+        base = info.apishim_url.rstrip("/")
+        pods_resp = request(
+            f"{base}/api/v1/namespaces/{quote(namespace, safe='')}/pods",
+            token=info.apishim_token,
+            timeout=10,
+            verify_tls=False,
+        )
+        if pods_resp.status >= 400:
+            raise RuntimeError(pods_resp.text.strip() or f"apishim pods failed: {pods_resp.status}")
+        payload = pods_resp.json()
+        pods = payload.get("items", []) if isinstance(payload, dict) else []
+        candidates = [
+            item
+            for item in pods
+            if isinstance(item, dict) and self._apishim_pod_matches_app(item, app)
+        ]
+        if not candidates:
+            raise RuntimeError(f"no API shim pod found for app {namespace}/{app}")
+        stdout_parts: list[str] = []
+        stderr_parts: list[str] = []
+        pod_names: list[str] = []
+        for pod in candidates:
+            metadata = pod.get("metadata") if isinstance(pod.get("metadata"), dict) else {}
+            pod_name = str(metadata.get("name") or "")
+            if not pod_name:
+                continue
+            path = (
+                f"{base}/api/v1/namespaces/{quote(namespace, safe='')}/pods/"
+                f"{quote(pod_name, safe='')}/log?tailLines={int(tail)}"
+            )
+            resp = request(path, token=info.apishim_token, timeout=30, verify_tls=False)
+            pod_names.append(pod_name)
+            if resp.status >= 400:
+                stderr_parts.append(resp.text)
+            else:
+                stdout_parts.append(resp.text)
+        if not pod_names:
+            raise RuntimeError(f"no named API shim pod found for app {namespace}/{app}")
+        return {
+            "source": "apishim",
+            "resolved_namespace": namespace,
+            "resolved_app": app,
+            "pods": pod_names,
+            "returncode": 0 if not stderr_parts else 1,
+            "stdout": "".join(stdout_parts),
+            "stderr": "".join(stderr_parts),
+        }
+
+    @staticmethod
+    def _apishim_pod_matches_app(pod: dict[str, Any], app: str) -> bool:
+        metadata = pod.get("metadata") if isinstance(pod.get("metadata"), dict) else {}
+        labels = metadata.get("labels") if isinstance(metadata.get("labels"), dict) else {}
+        app_key = str(labels.get("app") or labels.get("ae.app") or "")
+        if app_key == app:
+            return True
+        name = str(metadata.get("name") or "")
+        return name == app or name.startswith(f"{app}-")
 
     def _runtime_exec(
         self,

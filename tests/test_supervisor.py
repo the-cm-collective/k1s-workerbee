@@ -285,6 +285,112 @@ def test_logs_falls_back_to_exited_runtime_container(
     assert any(cmd[:3] == ["docker", "ps", "-aq"] for cmd in calls)
 
 
+def test_logs_uses_apishim_before_runtime_fallback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="containerd")
+    requested: list[str] = []
+
+    def fake_run_ae(
+        _self,
+        args: list[str],
+        *,
+        info: StackInfo,
+        timeout: int = 30,
+    ) -> dict[str, Any]:
+        _ = (args, info, timeout)
+        raise RuntimeError("controller logs unavailable")
+
+    def fake_request(url: str, **kwargs: Any) -> SimpleNamespace:
+        requested.append(url)
+        assert kwargs["token"] == "-".join(["apishim", "token"])
+        if url.endswith("/api/v1/namespaces/demo/pods"):
+            return SimpleNamespace(
+                status=200,
+                text='{"items":[]}',
+                json=lambda: {
+                    "items": [
+                        {
+                            "metadata": {
+                                "name": "api-rev1-0",
+                                "labels": {"app": "api"},
+                            }
+                        }
+                    ]
+                },
+            )
+        if url.endswith("/api/v1/namespaces/demo/pods/api-rev1-0/log?tailLines=12"):
+            return SimpleNamespace(status=200, text="api shim logs\n", json=lambda: None)
+        raise AssertionError(f"unexpected URL {url}")
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> SimpleNamespace:
+        raise AssertionError(f"runtime logs should not run: {cmd}")
+
+    sup.start = lambda: _stack(tmp_path, runtime="containerd")  # type: ignore[method-assign]
+    sup.run_ae = MethodType(fake_run_ae, sup)  # type: ignore[method-assign]
+    monkeypatch.setattr("workerbee.supervisor.request", fake_request)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = sup.logs(app="api", namespace="demo", tail=12)
+
+    assert result["source"] == "apishim"
+    assert result["resolved_namespace"] == "demo"
+    assert result["resolved_app"] == "api"
+    assert result["pods"] == ["api-rev1-0"]
+    assert result["stdout"] == "api shim logs\n"
+    assert result["k1s_error"] == "controller logs unavailable"
+    assert len(requested) == 2
+
+
+def test_logs_falls_back_to_runtime_when_apishim_has_no_pod(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="docker")
+    calls: list[list[str]] = []
+
+    def fake_run_ae(
+        _self,
+        args: list[str],
+        *,
+        info: StackInfo,
+        timeout: int = 30,
+    ) -> dict[str, Any]:
+        _ = (args, info, timeout)
+        raise RuntimeError("controller logs unavailable")
+
+    def fake_request(_url: str, **_kwargs: Any) -> SimpleNamespace:
+        return SimpleNamespace(
+            status=200,
+            text='{"items":[]}',
+            json=lambda: {"items": []},
+        )
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> SimpleNamespace:
+        calls.append(cmd)
+        if cmd[:3] == ["docker", "ps", "-q"]:
+            return SimpleNamespace(returncode=0, stdout="cid-api\n", stderr="")
+        if cmd[:2] == ["docker", "logs"]:
+            return SimpleNamespace(returncode=0, stdout="runtime logs\n", stderr="")
+        raise AssertionError(f"unexpected command: {cmd}")
+
+    sup.start = lambda: _stack(tmp_path)  # type: ignore[method-assign]
+    sup.run_ae = MethodType(fake_run_ae, sup)  # type: ignore[method-assign]
+    monkeypatch.setattr("workerbee.supervisor.request", fake_request)
+    monkeypatch.setattr(subprocess, "run", fake_run)
+
+    result = sup.logs(app="api", namespace="demo")
+
+    assert result["source"] == "docker"
+    assert result["stdout"] == "runtime logs\n"
+    assert result["k1s_error"] == "controller logs unavailable"
+    assert result["apishim_error"] == "no API shim pod found for app demo/api"
+    assert any(cmd[:3] == ["docker", "ps", "-q"] for cmd in calls)
+
+
 def _patch_runtime(monkeypatch) -> None:
     monkeypatch.setattr(
         "workerbee.supervisor.resolve_k1s_runtime",
