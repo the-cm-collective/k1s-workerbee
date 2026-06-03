@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import socket
 from pathlib import Path
 from typing import Any
 
@@ -8,6 +9,7 @@ from workerbee.contract import WorkerBeeError
 from workerbee.mcp_daemon import (
     MCPDaemonConfig,
     _dashboard_health_url,
+    _mcp_port_available,
     _wait_for_port_release,
     _wait_ready,
     mcp_daemon_status,
@@ -18,6 +20,34 @@ from workerbee.mcp_daemon import (
 )
 
 REMOTE_BIND_HOST = "0.0.0.0"  # noqa: S104
+
+
+def test_mcp_port_available_allows_reuseaddr_probe(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: dict[str, object] = {}
+
+    class FakeSocket:
+        def __enter__(self) -> FakeSocket:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def setsockopt(self, level: int, option: int, value: int) -> None:
+            calls["setsockopt"] = (level, option, value)
+
+        def bind(self, address: tuple[str, int]) -> None:
+            calls["bind"] = address
+
+    monkeypatch.setattr("workerbee.mcp_daemon.socket.socket", lambda *_args: FakeSocket())
+
+    result = _mcp_port_available(MCPDaemonConfig(state_root=tmp_path, runtime="docker", port=9876))
+
+    assert result == {"ok": True}
+    assert calls["setsockopt"] == (socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    assert calls["bind"] == ("127.0.0.1", 9876)
 
 
 def test_mcp_daemon_status_reports_stale_metadata(

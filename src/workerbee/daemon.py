@@ -239,6 +239,22 @@ class WorkerBeeDaemon:
         with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
             return supervisor.start()
 
+    def _run_project_action(
+        self,
+        supervisor: WorkerBeeSupervisor,
+        fn: Callable[[WorkerBeeSupervisor], T],
+    ) -> T:
+        runtime = supervisor._resolve_runtime()  # noqa: SLF001 - daemon owns supervisor lifecycle.
+        if runtime != CONTAINERD_RUNTIME:
+            return fn(supervisor)
+        privilege = ensure_containerd_privilege(
+            state_root=self.state_root,
+            runtime=CONTAINERD_RUNTIME,
+            mode=self.containerd_privilege,
+        )
+        with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
+            return fn(supervisor)
+
     def with_project(
         self,
         project: str | None,
@@ -280,7 +296,7 @@ class WorkerBeeDaemon:
                             ),
                             retryable=True,
                         )
-                result = fn(sup)
+                result = self._run_project_action(sup, fn)
                 if events and isinstance(result, dict):
                     result = _with_events(result, events)
                 self._register_project(name, cwd_hint=str(sup.cwd))

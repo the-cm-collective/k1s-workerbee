@@ -173,6 +173,52 @@ def test_start_supervisor_prepares_containerd_privilege(
     }
 
 
+def test_with_project_prepares_containerd_privilege_for_actions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(
+        state_root=tmp_path,
+        runtime="containerd",
+        containerd_privilege="sudo-helper",
+    )
+    nerdctl_wrapper = str(tmp_path / "workerbee-nerdctl")
+    captured: dict[str, object] = {}
+
+    class FakeSupervisor:
+        cwd = tmp_path
+
+        def _resolve_runtime(self) -> str:
+            return "containerd"
+
+    def fake_ensure_containerd_privilege(**kwargs: object) -> dict[str, object]:
+        captured["privilege"] = kwargs
+        return {"env": {"WORKERBEE_NERDCTL_BIN": nerdctl_wrapper}}
+
+    def action(supervisor: FakeSupervisor) -> dict[str, object]:
+        captured["supervisor"] = supervisor
+        captured["env"] = os.environ.get("WORKERBEE_NERDCTL_BIN")
+        return {"ok": True}
+
+    monkeypatch.delenv("WORKERBEE_NERDCTL_BIN", raising=False)
+    monkeypatch.setattr(daemon, "supervisor", lambda _name: FakeSupervisor())
+    monkeypatch.setattr(
+        "workerbee.daemon.ensure_containerd_privilege",
+        fake_ensure_containerd_privilege,
+    )
+
+    result = daemon.with_project("demo", action)
+
+    assert result == {"ok": True}
+    assert captured["env"] == nerdctl_wrapper
+    assert os.environ.get("WORKERBEE_NERDCTL_BIN") is None
+    assert captured["privilege"] == {
+        "state_root": tmp_path,
+        "runtime": "containerd",
+        "mode": "sudo-helper",
+    }
+
+
 def test_capabilities_surface_probe_and_image_build_hints(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(
         "workerbee.daemon.runtime_diagnostics",

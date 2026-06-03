@@ -557,6 +557,7 @@ def _tcp_ready(host: str, port: int) -> bool:
 def _mcp_port_available(config: MCPDaemonConfig) -> dict[str, Any]:
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((config.host, int(config.port)))
     except OSError as exc:
         return {
