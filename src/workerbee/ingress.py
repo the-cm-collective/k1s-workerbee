@@ -265,9 +265,9 @@ class GlobalIngress:
         self.info_file.write_text(json.dumps(info.public_dict(), indent=2), encoding="utf-8")
         return info
 
-    def sync_projects(self, projects: list[str]) -> None:
+    def sync_projects(self, projects: list[str]) -> dict[str, Any]:
         self._write_caddyfile(projects)
-        self.reload()
+        return self.reload()
 
     def reload(self) -> dict[str, Any]:
         if not self._container_running():

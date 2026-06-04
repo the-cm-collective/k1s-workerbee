@@ -1073,7 +1073,7 @@ def test_projects_removes_stale_stopped_profile_ingress_route(
     assert item["profile_status"]["ingress_refresh"]["route_removed"] is True
 
 
-def test_projects_keeps_profile_route_when_profile_metadata_exists(
+def test_projects_removes_profile_route_when_only_profile_metadata_exists(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1092,6 +1092,7 @@ def test_projects_keeps_profile_route_when_profile_metadata_exists(
         "https://k1s.alpha.workerbee.localhost { reverse_proxy 127.0.0.1:19608 }\n",
         encoding="utf-8",
     )
+    sync_calls: list[bool] = []
 
     class FakeSupervisor:
         state_dir = tmp_path / "projects" / "alpha"
@@ -1128,12 +1129,24 @@ def test_projects_keeps_profile_route_when_profile_metadata_exists(
 
     monkeypatch.setattr(daemon, "_project_ingress", lambda _name: ingress)
     monkeypatch.setattr(daemon, "_build_supervisor", lambda _name, **_kwargs: FakeSupervisor())
+    monkeypatch.setattr(
+        daemon,
+        "_sync_ingress_projects_result",
+        lambda: sync_calls.append(True) or {"scheduled": False, "synced": True},
+    )
     monkeypatch.setattr("workerbee.daemon.K1sProfileRunner", FakeProfileRunner)
 
-    item = daemon.projects()["projects"][0]
+    result = daemon.projects()
+    item = result["projects"][0]
 
-    assert route.exists()
-    assert item["profile_status"]["ingress_refresh"]["route_removed"] is False
+    assert not route.exists()
+    assert sync_calls == [True]
+    assert result["ingress_sync"] == {"scheduled": False, "synced": True, "needed": True}
+    assert item["profile_dashboard_url"] is None
+    assert item["last_profile_dashboard_url"] == (
+        "https://k1s.alpha.workerbee.localhost:19443/dashboard"
+    )
+    assert item["profile_status"]["ingress_refresh"]["route_removed"] is True
 
 
 def test_projects_removes_stale_stopped_stack_ingress_route(
@@ -1198,7 +1211,7 @@ def test_projects_removes_stale_stopped_stack_ingress_route(
     assert item["exposed_route_count"] == 0
 
 
-def test_projects_keeps_stack_route_when_stack_metadata_exists(
+def test_projects_removes_stack_route_when_only_stack_metadata_exists(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1217,6 +1230,7 @@ def test_projects_keeps_stack_route_when_stack_metadata_exists(
         "https://k1s.alpha.workerbee.localhost { reverse_proxy 127.0.0.1:19108 }\n",
         encoding="utf-8",
     )
+    sync_calls: list[bool] = []
 
     class FakeSupervisor:
         state_dir = tmp_path / "projects" / "alpha"
@@ -1246,12 +1260,24 @@ def test_projects_keeps_stack_route_when_stack_metadata_exists(
 
     monkeypatch.setattr(daemon, "_project_ingress", lambda _name: ingress)
     monkeypatch.setattr(daemon, "_build_supervisor", lambda _name, **_kwargs: FakeSupervisor())
+    monkeypatch.setattr(
+        daemon,
+        "_sync_ingress_projects_result",
+        lambda: sync_calls.append(True) or {"scheduled": False, "synced": True},
+    )
     monkeypatch.setattr("workerbee.daemon.K1sProfileRunner", FakeProfileRunner)
 
-    item = daemon.projects()["projects"][0]
+    result = daemon.projects()
+    item = result["projects"][0]
 
-    assert route.exists()
-    assert item["stack_dashboard_url"] == "https://k1s.alpha.workerbee.localhost:19443/dashboard"
+    assert not route.exists()
+    assert sync_calls == [True]
+    assert result["ingress_sync"] == {"scheduled": False, "synced": True, "needed": True}
+    assert item["stack_dashboard_url"] is None
+    assert item["last_stack_dashboard_url"] == (
+        "https://k1s.alpha.workerbee.localhost:19443/dashboard"
+    )
+    assert item["stack_ingress_refresh"]["route_removed"] is True
 
 
 def test_projects_reports_exposed_caddy_routes(tmp_path: Path, monkeypatch) -> None:
@@ -1468,7 +1494,7 @@ def test_ingress_probe_tls_failure_recovers_after_caddy_tls_state_reset(
     assert result["probe_recovery"]["caddy_recovery"]["ok"] is True
 
 
-def test_ingress_probe_non_tls_failure_does_not_recover(
+def test_ingress_probe_route_failure_reports_stopped_project(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -1499,10 +1525,57 @@ def test_ingress_probe_non_tls_failure_does_not_recover(
 
     monkeypatch.setattr("workerbee.daemon.probe_workerbee_url", fake_probe)
 
-    with pytest.raises(WorkerBeeError):
+    with pytest.raises(WorkerBeeError) as exc_info:
         daemon.ingress_probe(project="demo", host="app.demo.workerbee.localhost")
 
+    assert exc_info.value.code == "PROJECT_NOT_RUNNING"
     assert calls == ["probe"]
+
+
+def test_ingress_probe_502_result_recovers_after_route_reload(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="podman", default_project="demo")
+    ca = tmp_path / "global" / "caddy-local-root.crt"
+    ca.parent.mkdir(parents=True)
+    ca.write_text("cert", encoding="utf-8")
+    calls: list[str] = []
+    monkeypatch.setattr(
+        daemon,
+        "global_dashboard",
+        lambda: {"enabled": True, "running": True, "https_port": 19443, "ca_bundle": str(ca)},
+    )
+    monkeypatch.setattr(
+        daemon,
+        "project_status",
+        lambda _project: calls.append("status") or {"running": True},
+    )
+    monkeypatch.setattr(
+        daemon,
+        "_sync_ingress_projects_result",
+        lambda: calls.append("reload") or {"scheduled": False, "synced": True},
+    )
+
+    def fake_probe(**kwargs):
+        calls.append("probe")
+        if calls.count("probe") == 1:
+            return {
+                "ok": False,
+                "url": kwargs["url"],
+                "probe_method": "direct",
+                "status": 502,
+            }
+        return {"ok": True, "url": kwargs["url"], "probe_method": "direct", "status": 200}
+
+    monkeypatch.setattr("workerbee.daemon.probe_workerbee_url", fake_probe)
+
+    result = daemon.ingress_probe(project="demo", host="app.demo.workerbee.localhost")
+
+    assert result["ok"] is True
+    assert calls == ["probe", "status", "reload", "probe"]
+    assert result["probe_recovery"]["reason"] == "route_probe_failure"
+    assert result["probe_recovery"]["initial_result"]["status"] == 502
 
 
 def test_ingress_probe_status_mismatch_does_not_recover(

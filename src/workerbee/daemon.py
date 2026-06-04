@@ -519,13 +519,31 @@ class WorkerBeeDaemon:
                 sup = self._build_supervisor(name, ingress=project_ingress)
                 state_dir = str(sup.state_dir)
                 status = sup.status()
+                stack_route_removed = False
                 if (
                     project_ingress is not None
                     and not bool(status.get("running"))
-                    and not isinstance(status.get("stack"), dict)
                     and _remove_generated_stack_ingress_site(project_ingress.sites_dir)
                 ):
+                    stack_route_removed = True
                     ingress_sync_needed = True
+                stack = status.get("stack") if isinstance(status, dict) else None
+                stack_ingress_refresh = _stack_ingress_refresh_metadata(
+                    refresh_ingress=project_ingress is not None,
+                    running=bool(status.get("running")),
+                    stack=stack,
+                    route_removed=stack_route_removed,
+                    site_path=(
+                        project_ingress.sites_dir / "k1s-stack.caddy"
+                        if project_ingress is not None
+                        else None
+                    ),
+                    site_exists=(
+                        (project_ingress.sites_dir / "k1s-stack.caddy").is_file()
+                        if project_ingress is not None
+                        else False
+                    ),
+                )
                 latest_deployment = self._latest_deployment(name)
                 app_status = _project_app_status(
                     supervisor=sup,
@@ -538,6 +556,20 @@ class WorkerBeeDaemon:
                     "apishim_running": False,
                     "error": str(exc),
                 }
+                stack = None
+                stack_ingress_refresh = _stack_ingress_refresh_metadata(
+                    refresh_ingress=project_ingress is not None,
+                    running=False,
+                    stack=None,
+                    route_removed=False,
+                    site_path=(
+                        project_ingress.sites_dir / "k1s-stack.caddy"
+                        if project_ingress is not None
+                        else None
+                    ),
+                    site_exists=False,
+                    error=str(exc),
+                )
                 latest_deployment = self._latest_deployment(name)
                 app_status = {
                     "state": "unknown",
@@ -556,7 +588,6 @@ class WorkerBeeDaemon:
             )
             if ingress_refresh.get("sync_needed"):
                 ingress_sync_needed = True
-            stack = status.get("stack") if isinstance(status, dict) else None
             profile = (
                 profile_status.get("profile")
                 if isinstance(profile_status.get("profile"), dict)
@@ -575,7 +606,9 @@ class WorkerBeeDaemon:
             stack_running = bool(status.get("running"))
             profile_running = bool(profile_status.get("running"))
             running = stack_running or profile_running
-            dashboard_url = profile_dashboard_url or stack_dashboard_url
+            active_profile_dashboard_url = profile_dashboard_url if profile_running else None
+            active_stack_dashboard_url = stack_dashboard_url if stack_running else None
+            dashboard_url = active_profile_dashboard_url or active_stack_dashboard_url
             exposed_routes = _project_exposed_routes(Path(state_dir), https_port=https_port)
             exposed_hosts = sorted(
                 {
@@ -609,8 +642,10 @@ class WorkerBeeDaemon:
                     "status_kind": status_kind,
                     "apishim_running": bool(status.get("apishim_running")),
                     "dashboard_url": dashboard_url,
-                    "stack_dashboard_url": stack_dashboard_url,
-                    "profile_dashboard_url": profile_dashboard_url,
+                    "stack_dashboard_url": active_stack_dashboard_url,
+                    "profile_dashboard_url": active_profile_dashboard_url,
+                    "last_stack_dashboard_url": stack_dashboard_url,
+                    "last_profile_dashboard_url": profile_dashboard_url,
                     "ingress_ready": ingress_ready,
                     "ingress_status": ingress_status,
                     "exposed_routes": exposed_routes,
@@ -621,6 +656,7 @@ class WorkerBeeDaemon:
                     "profile_urls": profile_urls,
                     "profile": profile,
                     "profile_status": profile_status,
+                    "stack_ingress_refresh": stack_ingress_refresh,
                     "ingress": (stack or {}).get("ingress") if stack else None,
                     "latest_deployment": latest_deployment,
                     "runtime_mismatch": runtime_mismatch,
@@ -646,6 +682,30 @@ class WorkerBeeDaemon:
 
         def status_and_summarize(supervisor: WorkerBeeSupervisor) -> dict[str, Any]:
             status = supervisor.status()
+            stack = status.get("stack") if isinstance(status.get("stack"), dict) else None
+            route_removed = False
+            if (
+                supervisor.ingress is not None
+                and not bool(status.get("running"))
+                and _remove_generated_stack_ingress_site(supervisor.ingress.sites_dir)
+            ):
+                route_removed = True
+            status["stack_ingress_refresh"] = _stack_ingress_refresh_metadata(
+                refresh_ingress=supervisor.ingress is not None,
+                running=bool(status.get("running")),
+                stack=stack,
+                route_removed=route_removed,
+                site_path=(
+                    supervisor.ingress.sites_dir / "k1s-stack.caddy"
+                    if supervisor.ingress is not None
+                    else None
+                ),
+                site_exists=(
+                    (supervisor.ingress.sites_dir / "k1s-stack.caddy").is_file()
+                    if supervisor.ingress is not None
+                    else False
+                ),
+            )
             latest = self._latest_deployment(name)
             status["latest_deployment"] = latest
             status["app_status"] = _project_app_status(
@@ -657,6 +717,8 @@ class WorkerBeeDaemon:
             return status
 
         status = self.with_project(name, status_and_summarize)
+        if status.get("stack_ingress_refresh", {}).get("sync_needed"):
+            status["ingress_sync"] = self._sync_ingress_projects_result()
         status["mode"] = self.project_mode(name)
         return status
 
@@ -2003,13 +2065,30 @@ class WorkerBeeDaemon:
             "timeout": timeout,
         }
         try:
-            return self._ingress_probe_once(
+            result = self._ingress_probe_once(
                 project=name,
                 info=info,
                 probe_url=probe_url,
                 probe_args=probe_args,
             )
+            if _ingress_probe_route_result_failure(result):
+                return self._recover_ingress_probe_route_failure(
+                    project=name,
+                    info=info,
+                    probe_url=probe_url,
+                    probe_args=probe_args,
+                    initial_result=result,
+                )
+            return result
         except WorkerBeeError as exc:
+            if _ingress_probe_route_failure(exc):
+                return self._recover_ingress_probe_route_failure(
+                    project=name,
+                    info=info,
+                    probe_url=probe_url,
+                    probe_args=probe_args,
+                    initial_error=exc,
+                )
             if not _ingress_probe_tls_failure(exc):
                 raise
             return self._recover_ingress_probe_tls_failure(
@@ -2019,6 +2098,74 @@ class WorkerBeeDaemon:
                 probe_args=probe_args,
                 initial_error=exc,
             )
+
+    def _recover_ingress_probe_route_failure(
+        self,
+        *,
+        project: str,
+        info: dict[str, Any],
+        probe_url: str,
+        probe_args: dict[str, Any],
+        initial_error: WorkerBeeError | None = None,
+        initial_result: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        diagnostics = self._project_route_diagnostics(project, info=info, probe_url=probe_url)
+        recovery: dict[str, Any] = {
+            "reason": "route_probe_failure",
+            "initial_error": initial_error.public_dict() if initial_error else None,
+            "initial_result": initial_result,
+            "project_status": None,
+            "reload": None,
+        }
+        try:
+            recovery["project_status"] = self.project_status(project)
+        except Exception as exc:  # noqa: BLE001 - final probe/error should carry context
+            recovery["project_status"] = {"ok": False, "error": str(exc)}
+        if isinstance(recovery["project_status"], dict) and not recovery["project_status"].get(
+            "running"
+        ):
+            reload_result = recovery["project_status"].get("ingress_sync")
+            if isinstance(reload_result, dict):
+                recovery["reload"] = reload_result
+            elif diagnostics.get("files"):
+                try:
+                    recovery["reload"] = self._sync_ingress_projects_result()
+                except Exception as exc:  # noqa: BLE001
+                    recovery["reload"] = {"ok": False, "error": str(exc)}
+            error = WorkerBeeError(
+                code="PROJECT_NOT_RUNNING",
+                message=f"WorkerBee project `{project}` is not running",
+                details={
+                    "project": project,
+                    "url": probe_url,
+                    "probe_recovery": recovery,
+                    "route_diagnostics": diagnostics,
+                },
+                remediation=(
+                    f"Start the project with workerbee_v1_project_start(project={project!r}) "
+                    "before probing project-scoped k1s URLs."
+                ),
+                retryable=True,
+            )
+            raise error
+        if recovery["reload"] is None:
+            try:
+                recovery["reload"] = self._sync_ingress_projects_result()
+            except Exception as exc:  # noqa: BLE001 - retry below will carry the failure
+                recovery["reload"] = {"ok": False, "error": str(exc)}
+
+        info = self.global_dashboard()
+        try:
+            result = self._ingress_probe_once(
+                project=project,
+                info=info,
+                probe_url=probe_url,
+                probe_args=probe_args,
+            )
+            return _probe_result_with_recovery(result, recovery, diagnostics)
+        except WorkerBeeError as final_error:
+            recovery["final_error"] = final_error.public_dict()
+            raise _probe_error_with_recovery(final_error, recovery, diagnostics) from final_error
 
     def _ingress_probe_once(
         self,
@@ -2244,8 +2391,6 @@ class WorkerBeeDaemon:
             if (
                 refresh_ingress
                 and not bool(result.get("running"))
-                and before_dashboard_url is None
-                and not isinstance(result.get("profile"), dict)
                 and _remove_generated_profile_ingress_site(site_path, after_site_text)
             ):
                 route_removed = True
@@ -2307,14 +2452,23 @@ class WorkerBeeDaemon:
             project_names.update(path.name for path in self.projects_dir.iterdir() if path.is_dir())
         return sorted(project_names)
 
-    def _sync_ingress_projects(self) -> None:
+    def _sync_ingress_projects(self) -> dict[str, Any]:
         ingress = self._active_ingress()
-        if ingress is not None:
-            ingress.sync_projects(self._known_projects())
+        if ingress is None:
+            return {"ok": False, "reason": "global ingress is not running"}
+        return ingress.sync_projects(self._known_projects())
 
     def _sync_ingress_projects_result(self) -> dict[str, Any]:
-        self._sync_ingress_projects()
-        return {"scheduled": False, "synced": self.ingress is not None}
+        reload_result = self._sync_ingress_projects()
+        if not isinstance(reload_result, dict):
+            reload_result = {"ok": self.ingress is not None}
+        reload_ok = reload_result.get("ok") is not False
+        return {
+            "scheduled": False,
+            "synced": bool(self.ingress is not None and reload_ok),
+            "ok": reload_ok,
+            "reload": reload_result,
+        }
 
     def _active_ingress(self) -> GlobalIngress | None:
         if self.ingress is not None:
@@ -2773,6 +2927,41 @@ def _ingress_probe_tls_failure(exc: WorkerBeeError) -> bool:
     )
 
 
+def _ingress_probe_route_failure(exc: WorkerBeeError) -> bool:
+    if exc.code != "PROBE_FAILED":
+        return False
+    haystack = " ".join(
+        [
+            exc.message,
+            str(exc.details.get("primary_error") or ""),
+            str(exc.details.get("loopback_error") or ""),
+        ]
+    ).lower()
+    return any(
+        token in haystack
+        for token in (
+            "connection refused",
+            "connection reset",
+            "bad gateway",
+            "service unavailable",
+            "gateway timeout",
+            "502",
+            "503",
+            "504",
+        )
+    )
+
+
+def _ingress_probe_route_result_failure(result: dict[str, Any]) -> bool:
+    if result.get("ok"):
+        return False
+    try:
+        status = int(result.get("status") or 0)
+    except (TypeError, ValueError):
+        return False
+    return status in {502, 503, 504}
+
+
 def _dashboard_host_allowed(
     handler: BaseHTTPRequestHandler,
     *,
@@ -3017,6 +3206,8 @@ def _project_app_status(
 
 
 def _dashboard_url(status: dict[str, Any]) -> str | None:
+    if not status.get("running"):
+        return None
     stack = status.get("stack") if isinstance(status.get("stack"), dict) else None
     if not stack:
         return None
@@ -3311,7 +3502,7 @@ def _profile_ingress_refresh_metadata(
         reason = "profile ingress current"
     return {
         "attempted": refresh_ingress,
-        "active": refresh_ingress,
+        "active": bool(refresh_ingress and running and after_site_text),
         "running": running,
         "site": str(site_path) if site_path is not None else None,
         "site_existed_before": before_site_text is not None,
@@ -3321,6 +3512,47 @@ def _profile_ingress_refresh_metadata(
         "repaired": repaired,
         "route_removed": route_removed,
         "sync_needed": repaired or route_removed,
+        "reason": reason,
+    }
+
+
+def _stack_ingress_refresh_metadata(
+    *,
+    refresh_ingress: bool,
+    running: bool,
+    stack: object,
+    route_removed: bool,
+    site_path: Path | None,
+    site_exists: bool,
+    error: str | None = None,
+) -> dict[str, Any]:
+    stack_data = stack if isinstance(stack, dict) else {}
+    dashboard_url = (
+        str(stack_data["dashboard_url"])
+        if isinstance(stack_data.get("dashboard_url"), str) and stack_data.get("dashboard_url")
+        else None
+    )
+    if error:
+        reason = error
+    elif route_removed:
+        reason = "stopped stack ingress route removed"
+    elif not refresh_ingress:
+        reason = "global ingress unavailable"
+    elif not running:
+        reason = "stack not running"
+    elif site_exists:
+        reason = "stack ingress current"
+    else:
+        reason = "stack ingress missing"
+    return {
+        "attempted": refresh_ingress,
+        "active": refresh_ingress and running and site_exists,
+        "running": running,
+        "site": str(site_path) if site_path is not None else None,
+        "site_exists": site_exists,
+        "dashboard_url": dashboard_url,
+        "route_removed": route_removed,
+        "sync_needed": route_removed,
         "reason": reason,
     }
 
