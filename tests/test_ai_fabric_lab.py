@@ -1749,6 +1749,171 @@ def test_ai_fabric_k1s_advisory_import_posts_traces_and_f5_evidence(
     assert calls[0]["payload"]["records"][0]["kind"] == "das_cell_bundle"
 
 
+def test_ai_fabric_f1_f2_locality_closeout_seeds_controller_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_f1_f2_closeout_test")
+    post_calls: list[dict[str, object]] = []
+    get_calls: list[str] = []
+
+    def fake_post_json(
+        url: str,
+        payload: dict[str, object],
+        *,
+        timeout: int,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        post_calls.append({"url": url, "payload": payload, "timeout": timeout, "headers": headers})
+        assert url.endswith("/fabric/advisory/import")
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "ok": True,
+                "imported_count": 4,
+                "counts": {
+                    "fabric_nodes": 1,
+                    "fabric_chunks": 1,
+                    "fabric_residencies": 1,
+                    "fabric_movements": 1,
+                },
+                "findings": [],
+            },
+        }
+
+    def fake_get_json(
+        url: str,
+        *,
+        timeout: int,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        del timeout, headers
+        get_calls.append(url)
+        if url.endswith("/nodes"):
+            return {
+                "ok": True,
+                "count": 1,
+                "nodes": [
+                    {
+                        "node_id": "node-a",
+                        "name": "node-a",
+                        "status": "Ready",
+                        "labels": {
+                            "gpu.present": "true",
+                            "gpu.count": "1",
+                            "gpu.models": "RTX 8000",
+                        },
+                        "capabilities": {
+                            "accelerators": [
+                                {
+                                    "id": "gpu-0",
+                                    "vendor": "nvidia",
+                                    "family": "RTX 8000",
+                                    "device_count": 1,
+                                    "execution_role": "execution",
+                                }
+                            ]
+                        },
+                    }
+                ],
+            }
+        if "/fabric/chunks" in url:
+            return {"ok": True, "items": [{"chunk_id": "sha256:" + ("a" * 64)}], "count": 1}
+        if url.endswith("/fabric/residencies"):
+            return {"ok": True, "items": [{"node_id": "node-a"}], "count": 1}
+        if url.endswith("/fabric/movements"):
+            return {"ok": True, "items": [{"movement_id": "movement-0"}], "count": 1}
+        if url.endswith("/fabric/advisory/state"):
+            return {"ok": True, "mode": "advisory_only"}
+        assert url.endswith("/fabric/phase-assurance")
+        return {
+            "api_version": "k1s.fabric.phase-assurance/v1",
+            "kind": "FabricPhaseAssuranceReport",
+            "source": "k1s-controller-state",
+            "controller_authority": "k1s",
+            "authoritative": True,
+            "advisory_authoritative": False,
+            "phases": {
+                "F1": {
+                    "status": "present",
+                    "present": [
+                        "typed_node_capabilities",
+                        "typed_accelerators",
+                        "typed_storage_media",
+                        "typed_link_topology",
+                        "typed_rnic_rdma",
+                        "identity_role_separation",
+                        "gpu_label_projection",
+                    ],
+                    "missing": [],
+                    "gate": {"ready": False, "blocked_by": ["F0"]},
+                },
+                "F2": {
+                    "status": "present",
+                    "present": [
+                        "content_addressed_chunks",
+                        "residency_state",
+                        "controlled_push_pull",
+                        "integrity_epoch_semantics",
+                    ],
+                    "missing": [],
+                    "gate": {"ready": True, "blocked_by": []},
+                },
+                "F3": {
+                    "status": "present",
+                    "present": ["advisory_contract"],
+                    "missing": [],
+                    "gate": {"ready": True, "blocked_by": []},
+                },
+            },
+        }
+
+    monkeypatch.setattr(lab, "_post_json", fake_post_json)
+    monkeypatch.setattr(lab, "_get_json", fake_get_json)
+    workerbee_status = {
+        "api_version": "workerbee.mcp/v1",
+        "kind": "ProjectStatus",
+        "ok": True,
+        "data": {
+            "stack": {
+                "controller_url": "http://127.0.0.1:19108",
+                "service_ports": {"api": 25971},
+            }
+        },
+    }
+    status_path = tmp_path / "workerbee-status.json"
+    status_path.write_text(json.dumps(workerbee_status), encoding="utf-8")
+
+    result = lab.closeout_f1_f2_locality(
+        EXAMPLE_ROOT,
+        storage_root=tmp_path / "storage",
+        run_id="f1-f2-closeout-test",
+        project="workerbee-project",
+        workerbee_status=status_path,
+        k1s_url="",
+        k1s_token="admin-token",  # noqa: S106 - dummy bearer token for request-header assertion.
+        request_timeout=3,
+    )
+
+    assert result["api_version"] == lab.F1_F2_LOCALITY_CLOSEOUT_API_VERSION
+    assert result["ok"] is True
+    assert result["node_id"] == "node-a"
+    assert result["checks"]["f1_node_imported"] is True
+    assert result["checks"]["f1_evidence_present"] is True
+    assert result["checks"]["f2_evidence_present"] is True
+    assert result["k1s_phase_assurance"]["f3_gate_ready"] is True
+    assert Path(result["artifacts"]["f1-f2-locality-closeout-summary.json"]).is_file()
+    assert post_calls[0]["url"] == "http://127.0.0.1:19108/fabric/advisory/import"
+    assert post_calls[0]["headers"] == {"Authorization": "Bearer admin-token"}
+    records = post_calls[0]["payload"]["records"]
+    assert records["fabric_nodes"][0]["capabilities"]["storage_devices"][0]["medium"] == "nvme"
+    assert records["fabric_nodes"][0]["capabilities"]["identity_roles"]["fabric"].endswith("/fabric")
+    assert records["fabric_chunks"][0]["namespace"] == "ai-fabric-lab"
+    assert records["fabric_residencies"][0]["node_id"] == "node-a"
+    assert records["fabric_movements"][0]["direction"] == "pull"
+    assert "http://127.0.0.1:19108/nodes" in get_calls
+
+
 def test_ai_fabric_f3_advisory_closeout_writes_phase_assurance_artifacts(
     tmp_path: Path, monkeypatch
 ) -> None:

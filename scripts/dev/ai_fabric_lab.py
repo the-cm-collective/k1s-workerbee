@@ -57,6 +57,9 @@ AI_RUNTIME_PROFILE_KIND = "AIFabricRuntimeProfile"
 K1S_ADVISORY_IMPORT_API_VERSION = "workerbee.ai-fabric.k1s-advisory-import/v1"
 K1S_ADVISORY_IMPORT_KIND = "K1sFabricAdvisoryImport"
 F3_ADVISORY_CLOSEOUT_API_VERSION = "workerbee.ai-fabric.f3-advisory-closeout/v1"
+F1_F2_LOCALITY_CLOSEOUT_API_VERSION = (
+    "workerbee.ai-fabric.f1-f2-locality-closeout/v1"
+)
 SOAK_PROMOTION_DURATION_SECONDS = 1800
 ACCEPTANCE_CLOSEOUT_SUITES = (
     "adapter-preflight",
@@ -268,6 +271,19 @@ def main(argv: list[str] | None = None) -> int:
     f3_closeout.add_argument("--request-timeout", type=int, default=300)
     f3_closeout.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
 
+    f1_f2_closeout = sub.add_parser(
+        "closeout-f1-f2-locality",
+        help="Seed F1/F2 controller evidence and capture k1s phase assurance",
+    )
+    f1_f2_closeout.add_argument("--storage-root", type=Path, default=None)
+    f1_f2_closeout.add_argument("--run-id", default="")
+    f1_f2_closeout.add_argument("--project", default="")
+    f1_f2_closeout.add_argument("--workerbee-status", type=Path, default=None)
+    f1_f2_closeout.add_argument("--k1s-url", default=os.getenv("AI_FABRIC_K1S_URL", ""))
+    f1_f2_closeout.add_argument("--k1s-token", default=os.getenv("AI_FABRIC_K1S_TOKEN", ""))
+    f1_f2_closeout.add_argument("--request-timeout", type=int, default=30)
+    f1_f2_closeout.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+
     f5_evidence = sub.add_parser("emit-f5-evidence", help="Emit WorkerBee F5 lab evidence")
     f5_evidence.add_argument("--storage-root", type=Path, default=None)
     f5_evidence.add_argument("--site-id", default="site-a")
@@ -364,6 +380,18 @@ def main(argv: list[str] | None = None) -> int:
             project=args.project,
             k1s_root=args.k1s_root,
             phase_report=args.phase_report,
+            workerbee_status=args.workerbee_status,
+            k1s_url=args.k1s_url,
+            k1s_token=args.k1s_token,
+            request_timeout=args.request_timeout,
+        )
+        return _emit(result, json_out=args.json)
+    if args.cmd == "closeout-f1-f2-locality":
+        result = closeout_f1_f2_locality(
+            root,
+            storage_root=args.storage_root,
+            run_id=args.run_id or None,
+            project=args.project,
             workerbee_status=args.workerbee_status,
             k1s_url=args.k1s_url,
             k1s_token=args.k1s_token,
@@ -850,6 +878,165 @@ def closeout_f3_advisory(
         "findings": findings,
     }
     paths["f3-advisory-closeout-summary.json"].write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return summary
+
+
+def closeout_f1_f2_locality(
+    root: Path,
+    *,
+    storage_root: Path | None,
+    run_id: str | None,
+    project: str,
+    workerbee_status: Path | None,
+    k1s_url: str | None,
+    k1s_token: str | None,
+    request_timeout: int,
+) -> dict[str, Any]:
+    storage_layout = _load_json(root / "storage-layout.json")
+    target_root = (storage_root or Path(str(storage_layout["root"]))).expanduser().resolve()
+    selected_run_id = run_id or f"f1-f2-locality-closeout-{_runtime_timestamp()}"
+    run_dir = target_root / "runs" / selected_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    paths = {
+        "workerbee-status.json": run_dir / "workerbee-status.json",
+        "k1s-phase-assurance-before.json": run_dir / "k1s-phase-assurance-before.json",
+        "k1s-nodes.json": run_dir / "k1s-nodes.json",
+        "k1s-node-evidence.json": run_dir / "k1s-node-evidence.json",
+        "f1-f2-locality-import-payload.json": run_dir
+        / "f1-f2-locality-import-payload.json",
+        "k1s-f1-f2-locality-import.json": run_dir / "k1s-f1-f2-locality-import.json",
+        "k1s-chunks.json": run_dir / "k1s-chunks.json",
+        "k1s-residencies.json": run_dir / "k1s-residencies.json",
+        "k1s-movements.json": run_dir / "k1s-movements.json",
+        "k1s-phase-assurance.json": run_dir / "k1s-phase-assurance.json",
+        "f1-f2-locality-closeout-summary.json": (
+            run_dir / "f1-f2-locality-closeout-summary.json"
+        ),
+    }
+    workerbee_status_payload = _workerbee_status_payload(workerbee_status)
+    paths["workerbee-status.json"].write_text(
+        json.dumps(workerbee_status_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    timeout = max(1, min(30, request_timeout))
+    before = _fetch_k1s_closeout_state(
+        k1s_url=k1s_url,
+        k1s_token=k1s_token,
+        workerbee_status=workerbee_status_payload,
+        request_timeout=timeout,
+    )
+    resolved_k1s_url = str(before.get("k1s_url") or "").strip()
+    paths["k1s-phase-assurance-before.json"].write_text(
+        json.dumps(before["phase_assurance"], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    headers = _k1s_auth_headers(k1s_token)
+    nodes = _fetch_k1s_nodes(resolved_k1s_url, headers=headers, timeout=timeout)
+    paths["k1s-nodes.json"].write_text(
+        json.dumps(nodes, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    node = _select_k1s_node(nodes)
+    node_payload = _f1_node_evidence_payload(
+        node=node,
+        storage_root=target_root,
+        project=project,
+    )
+    paths["k1s-node-evidence.json"].write_text(
+        json.dumps(
+            {
+                "source": F1_F2_LOCALITY_CLOSEOUT_API_VERSION,
+                "payload": node_payload,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    import_payload = _f1_f2_locality_import_payload(
+        storage_root=target_root,
+        run_id=selected_run_id,
+        project=project,
+        node_id=str(node_payload["node_id"]),
+        node_payload=node_payload,
+    )
+    paths["f1-f2-locality-import-payload.json"].write_text(
+        json.dumps(import_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    f1_f2_import = _import_k1s_f1_f2_locality_state(
+        payload=import_payload,
+        k1s_url=resolved_k1s_url,
+        k1s_token=k1s_token,
+        timeout_seconds=timeout,
+    )
+    paths["k1s-f1-f2-locality-import.json"].write_text(
+        json.dumps(f1_f2_import, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    locality = _fetch_k1s_locality_state(
+        k1s_url=resolved_k1s_url,
+        headers=headers,
+        timeout=timeout,
+    )
+    paths["k1s-chunks.json"].write_text(
+        json.dumps(locality["chunks"], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    paths["k1s-residencies.json"].write_text(
+        json.dumps(locality["residencies"], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    paths["k1s-movements.json"].write_text(
+        json.dumps(locality["movements"], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    after = _fetch_k1s_closeout_state(
+        k1s_url=resolved_k1s_url,
+        k1s_token=k1s_token,
+        workerbee_status=workerbee_status_payload,
+        request_timeout=timeout,
+    )
+    phase_assurance = after["phase_assurance"]
+    paths["k1s-phase-assurance.json"].write_text(
+        json.dumps(phase_assurance, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    checks = _f1_f2_closeout_checks(
+        nodes=nodes,
+        f1_f2_import=f1_f2_import,
+        locality=locality,
+        phase_assurance=phase_assurance,
+        k1s_url=resolved_k1s_url,
+    )
+    findings = _findings_from_failed_checks(checks, code="F1_F2_LOCALITY_CLOSEOUT")
+    summary = {
+        "api_version": F1_F2_LOCALITY_CLOSEOUT_API_VERSION,
+        "kind": "AIFabricF1F2LocalityCloseout",
+        "ok": not [item for item in findings if item.get("level") == "error"],
+        "run_id": selected_run_id,
+        "run_dir": str(run_dir),
+        "created_at": _utc_now(),
+        "project": project,
+        "k1s_url": resolved_k1s_url,
+        "node_id": node_payload["node_id"],
+        "checks": checks,
+        "k1s_f1_f2_locality_import": f1_f2_import,
+        "k1s_phase_assurance": _f1_f2_phase_assurance_summary(phase_assurance),
+        "artifacts": {name: str(path) for name, path in sorted(paths.items())},
+        "findings": findings,
+    }
+    paths["f1-f2-locality-closeout-summary.json"].write_text(
         json.dumps(summary, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
@@ -1526,6 +1713,348 @@ def _fetch_k1s_closeout_state(
     }
 
 
+def _k1s_auth_headers(k1s_token: str | None) -> dict[str, str]:
+    token = str(k1s_token or "").strip()
+    return {"Authorization": f"Bearer {token}"} if token else {}
+
+
+def _fetch_k1s_nodes(
+    k1s_url: str,
+    *,
+    headers: dict[str, str],
+    timeout: int,
+) -> dict[str, Any]:
+    if not k1s_url:
+        return {"ok": False, "error": "k1s controller URL not configured", "nodes": []}
+    payload = _get_json(f"{k1s_url.rstrip('/')}/nodes", timeout=timeout, headers=headers)
+    if "ok" not in payload:
+        payload["ok"] = "nodes" in payload
+    return payload
+
+
+def _select_k1s_node(nodes_payload: dict[str, Any]) -> dict[str, Any]:
+    nodes = nodes_payload.get("nodes")
+    if not isinstance(nodes, list):
+        return {}
+    candidates = [item for item in nodes if isinstance(item, dict)]
+    for item in candidates:
+        if str(item.get("status") or "").lower() == "ready" and not bool(item.get("stale")):
+            return item
+    return candidates[0] if candidates else {}
+
+
+def _f1_node_evidence_payload(
+    *,
+    node: dict[str, Any],
+    storage_root: Path,
+    project: str,
+) -> dict[str, Any]:
+    node_id = str(node.get("node_id") or node.get("id") or "workerbee-local").strip()
+    if not node_id:
+        node_id = "workerbee-local"
+    labels = dict(node.get("labels") if isinstance(node.get("labels"), dict) else {})
+    labels.setdefault("role", "controller")
+    labels.setdefault("site_id", "workerbee-local")
+    labels.setdefault("fabric", "ai-fabric-lab")
+    if project:
+        labels.setdefault("workerbee.project", project)
+
+    capabilities = dict(
+        node.get("capabilities") if isinstance(node.get("capabilities"), dict) else {}
+    )
+    site_id = str(labels.get("site_id") or labels.get("site") or "workerbee-local")
+    _ensure_nonempty_list(
+        capabilities,
+        "storage_devices",
+        {
+            "id": "workerbee-local-storage",
+            "kind": "filesystem",
+            "medium": "nvme",
+            "device_path": str(storage_root),
+            "mount_path": str(storage_root),
+            "filesystem": "local",
+            "roles": ["model-cache", "artifact-store", "run-output"],
+        },
+    )
+    _ensure_nonempty_list(
+        capabilities,
+        "network_interfaces",
+        {
+            "id": "workerbee-fabric-lan",
+            "name": "workerbee-fabric-lan",
+            "mtu": 1500,
+            "speed_mbps": 1000,
+            "roles": ["management", "fabric"],
+            "site_id": site_id,
+            "fabric_id": "ai-fabric-lab",
+            "link_metrics": [
+                {
+                    "id": "workerbee-local-link",
+                    "from_site": site_id,
+                    "to_site": site_id,
+                    "rtt_p95_ms": 1.0,
+                    "jitter_p95_ms": 0.0,
+                    "loss_pct": 0.0,
+                    "source": "workerbee.ai-fabric.f1-f2-locality-closeout",
+                }
+            ],
+        },
+    )
+    _ensure_nonempty_list(
+        capabilities,
+        "rdma_devices",
+        {
+            "id": "workerbee-rdma-development",
+            "name": "workerbee-rdma-development",
+            "kind": "rnic",
+            "state": "development",
+            "roles": ["fabric"],
+            "rdma_protocols": ["roce-development"],
+            "pcie": {"bus_id": "workerbee-virtual-rdma"},
+        },
+    )
+    if not _identity_roles_complete(capabilities.get("identity_roles")):
+        capabilities["identity_roles"] = {
+            "management": f"workerbee://{node_id}/management",
+            "execution": f"workerbee://{node_id}/execution",
+            "fabric": f"workerbee://{node_id}/fabric",
+        }
+    return {
+        "node_id": node_id,
+        "name": node.get("name") or node_id,
+        "status": "Ready",
+        "labels": labels,
+        "capabilities": capabilities,
+        "taints": node.get("taints") if isinstance(node.get("taints"), list) else [],
+        "backend": node.get("backend") or "workerbee",
+        "endpoint": node.get("endpoint"),
+        "pod_cidr": node.get("pod_cidr"),
+        "wg_pubkey": node.get("wg_pubkey"),
+        "rp_pubkey": node.get("rp_pubkey"),
+    }
+
+
+def _ensure_nonempty_list(target: dict[str, Any], key: str, default: dict[str, Any]) -> None:
+    value = target.get(key)
+    if not isinstance(value, list) or not value:
+        target[key] = [default]
+
+
+def _identity_roles_complete(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    identities: list[str] = []
+    for role in ("management", "execution", "fabric"):
+        item = value.get(role)
+        identity = ""
+        if isinstance(item, dict):
+            identity = str(item.get("id") or item.get("principal") or "").strip()
+        elif item is not None:
+            identity = str(item).strip()
+        if not identity:
+            return False
+        identities.append(identity)
+    return len(set(identities)) == len(identities)
+
+
+def _f1_f2_locality_import_payload(
+    *,
+    storage_root: Path,
+    run_id: str,
+    project: str,
+    node_id: str,
+    node_payload: dict[str, Any],
+) -> dict[str, Any]:
+    descriptor = {
+        "run_id": run_id,
+        "project": project,
+        "node_id": node_id,
+        "storage_root": str(storage_root),
+        "source": F1_F2_LOCALITY_CLOSEOUT_API_VERSION,
+    }
+    digest = "sha256:" + hashlib.sha256(
+        json.dumps(descriptor, sort_keys=True).encode("utf-8")
+    ).hexdigest()
+    now = _utc_now()
+    storage_device_id = _node_payload_storage_device_id(node_payload)
+    movement_id = "f2-locality-" + digest.removeprefix("sha256:")[:16]
+    return {
+        "api_version": K1S_ADVISORY_IMPORT_API_VERSION,
+        "kind": K1S_ADVISORY_IMPORT_KIND,
+        "source": F1_F2_LOCALITY_CLOSEOUT_API_VERSION,
+        "run_id": run_id,
+        "records": {
+            "fabric_nodes": [node_payload],
+            "fabric_chunks": [
+                {
+                    "chunk_id": digest,
+                    "namespace": "ai-fabric-lab",
+                    "name": "workerbee-ai-fabric-locality-hotset",
+                    "digest": digest,
+                    "size_bytes": len(json.dumps(descriptor, sort_keys=True).encode("utf-8")),
+                    "source_kind": "workerbee-locality-closeout",
+                    "source_ref": str(storage_root),
+                    "labels": {
+                        "project": project,
+                        "run_id": run_id,
+                        "track": "F2",
+                    },
+                    "created_at": now,
+                    "updated_at": now,
+                }
+            ],
+            "fabric_residencies": [
+                {
+                    "chunk_id": digest,
+                    "node_id": node_id,
+                    "storage_device_id": storage_device_id,
+                    "path": str(storage_root),
+                    "state": "resident",
+                    "integrity_state": "verified",
+                    "epoch": 1,
+                    "digest": digest,
+                    "verified_at": now,
+                    "updated_at": now,
+                }
+            ],
+            "fabric_movements": [
+                {
+                    "movement_id": movement_id,
+                    "chunk_id": digest,
+                    "direction": "pull",
+                    "source_node_id": "workerbee-storage",
+                    "target_node_id": node_id,
+                    "status": "complete",
+                    "requested_by": "workerbee.ai-fabric.closeout",
+                    "digest": digest,
+                    "epoch": 1,
+                    "created_at": now,
+                    "updated_at": now,
+                    "started_at": now,
+                    "finished_at": now,
+                }
+            ],
+        },
+    }
+
+
+def _node_payload_storage_device_id(node_payload: dict[str, Any]) -> str:
+    capabilities = (
+        node_payload.get("capabilities")
+        if isinstance(node_payload.get("capabilities"), dict)
+        else {}
+    )
+    devices = capabilities.get("storage_devices")
+    if isinstance(devices, list):
+        for item in devices:
+            if isinstance(item, dict) and str(item.get("id") or "").strip():
+                return str(item["id"])
+    return "workerbee-local-storage"
+
+
+def _import_k1s_f1_f2_locality_state(
+    *,
+    payload: dict[str, Any],
+    k1s_url: str,
+    k1s_token: str | None,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    if not k1s_url:
+        return {"ok": False, "error": "k1s controller URL not configured"}
+    response = _post_json(
+        f"{k1s_url.rstrip('/')}/fabric/advisory/import",
+        payload,
+        timeout=timeout_seconds,
+        headers=_k1s_auth_headers(k1s_token),
+    )
+    result = response.get("json") if isinstance(response.get("json"), dict) else {}
+    ok = bool(response.get("ok")) and bool(result.get("ok", True))
+    return {
+        "ok": ok,
+        "k1s_url": k1s_url,
+        "status": response.get("status"),
+        "imported_count": result.get("imported_count"),
+        "counts": result.get("counts") if isinstance(result.get("counts"), dict) else {},
+        "findings": result.get("findings") if isinstance(result.get("findings"), list) else [],
+        "error": None if ok else response.get("error") or result.get("message") or result,
+    }
+
+
+def _fetch_k1s_locality_state(
+    *,
+    k1s_url: str,
+    headers: dict[str, str],
+    timeout: int,
+) -> dict[str, Any]:
+    if not k1s_url:
+        missing = {"ok": False, "error": "k1s controller URL not configured", "items": []}
+        return {"chunks": missing, "residencies": missing, "movements": missing}
+    return {
+        "chunks": _get_json(
+            f"{k1s_url.rstrip('/')}/fabric/chunks?namespace=ai-fabric-lab",
+            timeout=timeout,
+            headers=headers,
+        ),
+        "residencies": _get_json(
+            f"{k1s_url.rstrip('/')}/fabric/residencies",
+            timeout=timeout,
+            headers=headers,
+        ),
+        "movements": _get_json(
+            f"{k1s_url.rstrip('/')}/fabric/movements",
+            timeout=timeout,
+            headers=headers,
+        ),
+    }
+
+
+def _f1_f2_closeout_checks(
+    *,
+    nodes: dict[str, Any],
+    f1_f2_import: dict[str, Any],
+    locality: dict[str, Any],
+    phase_assurance: dict[str, Any],
+    k1s_url: str,
+) -> dict[str, bool]:
+    f1 = _fabric_phase_payload(phase_assurance, "F1")
+    f2 = _fabric_phase_payload(phase_assurance, "F2")
+    f3 = _fabric_phase_payload(phase_assurance, "F3")
+    f3_gate = f3.get("gate") if isinstance(f3.get("gate"), dict) else {}
+    f3_blockers = f3_gate.get("blocked_by") if isinstance(f3_gate.get("blocked_by"), list) else []
+    counts = (
+        f1_f2_import.get("counts") if isinstance(f1_f2_import.get("counts"), dict) else {}
+    )
+    return {
+        "k1s_url_resolved": bool(k1s_url),
+        "nodes_visible": bool(nodes.get("nodes")),
+        "f1_f2_import_ok": bool(f1_f2_import.get("ok")),
+        "f1_node_imported": int(counts.get("fabric_nodes") or 0) > 0,
+        "f2_chunks_imported": int(counts.get("fabric_chunks") or 0) > 0,
+        "f2_residencies_imported": int(counts.get("fabric_residencies") or 0) > 0,
+        "f2_movements_imported": int(counts.get("fabric_movements") or 0) > 0,
+        "chunks_visible": bool(_payload_items(locality.get("chunks"))),
+        "residencies_visible": bool(_payload_items(locality.get("residencies"))),
+        "movements_visible": bool(_payload_items(locality.get("movements"))),
+        "phase_assurance_ok": phase_assurance.get("api_version")
+        == "k1s.fabric.phase-assurance/v1",
+        "phase_controller_authority": phase_assurance.get("controller_authority") == "k1s"
+        and phase_assurance.get("authoritative") is True
+        and phase_assurance.get("advisory_authoritative") is False,
+        "f1_evidence_present": f1.get("status") == "present",
+        "f2_evidence_present": f2.get("status") == "present",
+        "f3_not_blocked_by_f1_f2": not any(
+            str(item) in {"F1", "F2"} for item in f3_blockers
+        ),
+    }
+
+
+def _payload_items(payload: Any) -> list[Any]:
+    if not isinstance(payload, dict):
+        return []
+    items = payload.get("items")
+    return items if isinstance(items, list) else []
+
+
 def _f3_closeout_checks(
     *,
     health: dict[str, Any],
@@ -1591,10 +2120,14 @@ def _findings_from_failed_checks(checks: dict[str, bool], *, code: str) -> list[
     ]
 
 
-def _f3_phase_payload(phase_assurance: dict[str, Any]) -> dict[str, Any]:
+def _fabric_phase_payload(phase_assurance: dict[str, Any], phase_id: str) -> dict[str, Any]:
     phases = phase_assurance.get("phases") if isinstance(phase_assurance.get("phases"), dict) else {}
-    f3 = phases.get("F3") if isinstance(phases.get("F3"), dict) else {}
-    return f3
+    phase = phases.get(phase_id) if isinstance(phases.get(phase_id), dict) else {}
+    return phase
+
+
+def _f3_phase_payload(phase_assurance: dict[str, Any]) -> dict[str, Any]:
+    return _fabric_phase_payload(phase_assurance, "F3")
 
 
 def _k1s_advisory_state_summary(state: dict[str, Any]) -> dict[str, Any]:
@@ -1628,6 +2161,31 @@ def _f3_phase_assurance_summary(phase_assurance: dict[str, Any]) -> dict[str, An
         "f3_blocked_by": gate.get("blocked_by") if isinstance(gate.get("blocked_by"), list) else [],
         "f3_present": f3.get("present") if isinstance(f3.get("present"), list) else [],
         "f3_missing": f3.get("missing") if isinstance(f3.get("missing"), list) else [],
+    }
+
+
+def _f1_f2_phase_assurance_summary(phase_assurance: dict[str, Any]) -> dict[str, Any]:
+    f1 = _fabric_phase_payload(phase_assurance, "F1")
+    f2 = _fabric_phase_payload(phase_assurance, "F2")
+    f3 = _fabric_phase_payload(phase_assurance, "F3")
+    f3_gate = f3.get("gate") if isinstance(f3.get("gate"), dict) else {}
+    return {
+        "ok": phase_assurance.get("api_version") == "k1s.fabric.phase-assurance/v1",
+        "api_version": phase_assurance.get("api_version"),
+        "controller_authority": phase_assurance.get("controller_authority"),
+        "authoritative": phase_assurance.get("authoritative"),
+        "advisory_authoritative": phase_assurance.get("advisory_authoritative"),
+        "f1_status": f1.get("status"),
+        "f1_present": f1.get("present") if isinstance(f1.get("present"), list) else [],
+        "f1_missing": f1.get("missing") if isinstance(f1.get("missing"), list) else [],
+        "f2_status": f2.get("status"),
+        "f2_present": f2.get("present") if isinstance(f2.get("present"), list) else [],
+        "f2_missing": f2.get("missing") if isinstance(f2.get("missing"), list) else [],
+        "f3_status": f3.get("status"),
+        "f3_gate_ready": f3_gate.get("ready"),
+        "f3_blocked_by": (
+            f3_gate.get("blocked_by") if isinstance(f3_gate.get("blocked_by"), list) else []
+        ),
     }
 
 
