@@ -56,6 +56,7 @@ AI_RUNTIME_PROFILE_API_VERSION = "k1s.fabric.ai-runtime-profile/v1"
 AI_RUNTIME_PROFILE_KIND = "AIFabricRuntimeProfile"
 K1S_ADVISORY_IMPORT_API_VERSION = "workerbee.ai-fabric.k1s-advisory-import/v1"
 K1S_ADVISORY_IMPORT_KIND = "K1sFabricAdvisoryImport"
+F3_ADVISORY_CLOSEOUT_API_VERSION = "workerbee.ai-fabric.f3-advisory-closeout/v1"
 SOAK_PROMOTION_DURATION_SECONDS = 1800
 ACCEPTANCE_CLOSEOUT_SUITES = (
     "adapter-preflight",
@@ -247,6 +248,26 @@ def main(argv: list[str] | None = None) -> int:
     phase_facts.add_argument("--das-url", default="http://127.0.0.1:8081")
     phase_facts.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
 
+    f3_closeout = sub.add_parser(
+        "closeout-f3-advisory",
+        help="Run a stateful F3 advisory closeout and capture k1s phase assurance",
+    )
+    f3_closeout.add_argument("--stage", type=Path, default=None)
+    f3_closeout.add_argument("--storage-root", type=Path, default=None)
+    f3_closeout.add_argument("--run-id", default="")
+    f3_closeout.add_argument("--track", default="")
+    f3_closeout.add_argument("--router-url", default="http://127.0.0.1:18180")
+    f3_closeout.add_argument("--das-url", default="http://127.0.0.1:18181")
+    f3_closeout.add_argument("--retrieval-url", default="http://127.0.0.1:18182")
+    f3_closeout.add_argument("--project", default="")
+    f3_closeout.add_argument("--k1s-root", type=Path, default=REPO_ROOT.parent / "k1s")
+    f3_closeout.add_argument("--phase-report", type=Path, default=None)
+    f3_closeout.add_argument("--workerbee-status", type=Path, default=None)
+    f3_closeout.add_argument("--k1s-url", default=os.getenv("AI_FABRIC_K1S_URL", ""))
+    f3_closeout.add_argument("--k1s-token", default=os.getenv("AI_FABRIC_K1S_TOKEN", ""))
+    f3_closeout.add_argument("--request-timeout", type=int, default=300)
+    f3_closeout.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+
     f5_evidence = sub.add_parser("emit-f5-evidence", help="Emit WorkerBee F5 lab evidence")
     f5_evidence.add_argument("--storage-root", type=Path, default=None)
     f5_evidence.add_argument("--site-id", default="site-a")
@@ -328,6 +349,25 @@ def main(argv: list[str] | None = None) -> int:
         result = import_phase_facts(
             phase_report=args.phase_report,
             das_url=args.das_url,
+        )
+        return _emit(result, json_out=args.json)
+    if args.cmd == "closeout-f3-advisory":
+        result = closeout_f3_advisory(
+            root,
+            stage=args.stage,
+            storage_root=args.storage_root,
+            run_id=args.run_id or None,
+            track=args.track or None,
+            router_url=args.router_url,
+            das_url=args.das_url,
+            retrieval_url=args.retrieval_url,
+            project=args.project,
+            k1s_root=args.k1s_root,
+            phase_report=args.phase_report,
+            workerbee_status=args.workerbee_status,
+            k1s_url=args.k1s_url,
+            k1s_token=args.k1s_token,
+            request_timeout=args.request_timeout,
         )
         return _emit(result, json_out=args.json)
     if args.cmd == "emit-f5-evidence":
@@ -581,6 +621,239 @@ def import_phase_facts(*, phase_report: Path, das_url: str) -> dict[str, Any]:
         "posted": posted,
         "findings": findings,
     }
+
+
+def closeout_f3_advisory(
+    root: Path,
+    *,
+    stage: Path | None,
+    storage_root: Path | None,
+    run_id: str | None,
+    track: str | None,
+    router_url: str,
+    das_url: str,
+    retrieval_url: str,
+    project: str,
+    k1s_root: Path,
+    phase_report: Path | None,
+    workerbee_status: Path | None,
+    k1s_url: str | None,
+    k1s_token: str | None,
+    request_timeout: int,
+) -> dict[str, Any]:
+    storage_layout = _load_json(root / "storage-layout.json")
+    target_root = (storage_root or Path(str(storage_layout["root"]))).expanduser().resolve()
+    selected_run_id = run_id or f"f3-advisory-closeout-{_runtime_timestamp()}"
+    run_dir = target_root / "runs" / selected_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    paths = {
+        "workerbee-status.json": run_dir / "workerbee-status.json",
+        "health.json": run_dir / "health.json",
+        "host-aliases.json": run_dir / "host-aliases.json",
+        "fabric-phase-report-before.json": run_dir / "fabric-phase-report-before.json",
+        "import-runtime-facts.json": run_dir / "import-runtime-facts.json",
+        "router-advisory-request.json": run_dir / "router-advisory-request.json",
+        "router-advisory-response.json": run_dir / "router-advisory-response.json",
+        "f5-evidence.json": run_dir / "f5-evidence.json",
+        "k1s-advisory-import.json": run_dir / "k1s-advisory-import.json",
+        "k1s-advisory-state.json": run_dir / "k1s-advisory-state.json",
+        "k1s-phase-assurance.json": run_dir / "k1s-phase-assurance.json",
+        "f3-advisory-closeout-summary.json": run_dir / "f3-advisory-closeout-summary.json",
+    }
+    findings: list[dict[str, str]] = []
+    resolved = _resolve_runtime_endpoints(
+        router_url=router_url,
+        das_url=das_url,
+        retrieval_url=retrieval_url,
+        timeout_seconds=max(1, min(5, request_timeout)),
+    )
+    router_url = resolved["router_url"]
+    das_url = resolved["das_url"]
+    retrieval_url = resolved["retrieval_url"]
+    workerbee_status_payload = _workerbee_status_payload(workerbee_status)
+    paths["workerbee-status.json"].write_text(
+        json.dumps(workerbee_status_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    health = _health_snapshot(router_url=router_url, das_url=das_url, retrieval_url=retrieval_url)
+    host_aliases = _host_alias_snapshot(
+        router_url=router_url,
+        das_url=das_url,
+        retrieval_url=retrieval_url,
+    )
+    paths["health.json"].write_text(
+        json.dumps(health, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    paths["host-aliases.json"].write_text(
+        json.dumps(host_aliases, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    phase_report_path = _prepare_f3_phase_report(
+        k1s_root=k1s_root,
+        phase_report=phase_report,
+        output_path=paths["fabric-phase-report-before.json"],
+        findings=findings,
+    )
+    runtime_facts = import_runtime_facts(
+        root,
+        stage=stage,
+        das_url=das_url,
+        router_url=router_url,
+        retrieval_url=retrieval_url,
+        project=project,
+        track=track,
+        k1s_root=k1s_root,
+        phase_report=phase_report_path if phase_report_path.is_file() else None,
+        workerbee_status=paths["workerbee-status.json"],
+    )
+    paths["import-runtime-facts.json"].write_text(
+        json.dumps(runtime_facts, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    advisory_request = {
+        "query": (
+            "Using stored Hyperon DAS facts, review k1s.fabric.phase.F3 gate_ready, "
+            "blocked_by, missing evidence, and advisory-only next steps. Keep k1s authoritative."
+        ),
+        "lane": "expert",
+        "run_id": selected_run_id,
+        "subject_type": "k1s_fabric_phase",
+        "subject_id": "k1s.fabric.phase.F3",
+        "intent": "review_phase_gate",
+        "policy_mode": "advisory_only",
+        "max_candidates": 5,
+        "time_budget_ms": max(1, request_timeout) * 1000,
+        "metadata": {
+            "suite": "f3-advisory-closeout",
+            "phase_report_ref": str(phase_report_path),
+        },
+    }
+    paths["router-advisory-request.json"].write_text(
+        json.dumps(advisory_request, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    started = time.monotonic()
+    advisory_response_raw = _post_json(
+        f"{router_url.rstrip('/')}/v1/advisory/query",
+        advisory_request,
+        timeout=request_timeout,
+    )
+    advisory_elapsed_ms = int((time.monotonic() - started) * 1000)
+    advisory_response = (
+        advisory_response_raw.get("json")
+        if isinstance(advisory_response_raw.get("json"), dict)
+        else {}
+    )
+    paths["router-advisory-response.json"].write_text(
+        json.dumps(
+            {
+                "ok": bool(advisory_response_raw.get("ok")),
+                "status": advisory_response_raw.get("status"),
+                "elapsed_ms": advisory_elapsed_ms,
+                "response": advisory_response,
+                "error": advisory_response_raw.get("error"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    f5_evidence = _run_evidence_closeout(
+        das_url=das_url,
+        f5_evidence_path=paths["f5-evidence.json"],
+    )
+    advisory_record = {
+        "ok": bool(advisory_response_raw.get("ok")) and bool(advisory_response.get("ok", True)),
+        "state": "passed" if advisory_response_raw.get("ok") else "failed",
+        "trace_id": advisory_response.get("trace_id"),
+        "lane": advisory_response.get("lane"),
+        "authoritative": advisory_response.get("authoritative"),
+        "k1s_advisory_import": _k1s_advisory_import_payload_from_router_response(
+            advisory_response
+        ),
+    }
+    k1s_import_summary = {
+        "run_id": selected_run_id,
+        "suites": {"f3-advisory-closeout": advisory_record},
+    }
+    k1s_import = _import_k1s_advisory_state(
+        summary=k1s_import_summary,
+        f5_evidence_path=paths["f5-evidence.json"],
+        k1s_url=k1s_url,
+        k1s_token=k1s_token,
+        workerbee_status=workerbee_status_payload,
+        skip=False,
+        timeout_seconds=max(1, min(30, request_timeout)),
+    )
+    paths["k1s-advisory-import.json"].write_text(
+        json.dumps(k1s_import, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    k1s_json = _fetch_k1s_closeout_state(
+        k1s_url=k1s_url,
+        k1s_token=k1s_token,
+        workerbee_status=workerbee_status_payload,
+        request_timeout=request_timeout,
+    )
+    paths["k1s-advisory-state.json"].write_text(
+        json.dumps(k1s_json["advisory_state"], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    paths["k1s-phase-assurance.json"].write_text(
+        json.dumps(k1s_json["phase_assurance"], indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    checks = _f3_closeout_checks(
+        health=health,
+        host_aliases=host_aliases,
+        runtime_facts=runtime_facts,
+        advisory_response=advisory_response,
+        advisory_response_raw=advisory_response_raw,
+        f5_evidence=f5_evidence,
+        k1s_import=k1s_import,
+        advisory_state=k1s_json["advisory_state"],
+        phase_assurance=k1s_json["phase_assurance"],
+    )
+    findings.extend(_findings_from_failed_checks(checks, code="F3_ADVISORY_CLOSEOUT"))
+    summary = {
+        "api_version": F3_ADVISORY_CLOSEOUT_API_VERSION,
+        "kind": "AIFabricF3AdvisoryCloseout",
+        "ok": not [item for item in findings if item.get("level") == "error"],
+        "run_id": selected_run_id,
+        "run_dir": str(run_dir),
+        "created_at": _utc_now(),
+        "router_url": router_url,
+        "das_url": das_url,
+        "retrieval_url": retrieval_url,
+        "k1s_url": k1s_json.get("k1s_url"),
+        "trace_id": advisory_response.get("trace_id"),
+        "checks": checks,
+        "health": health,
+        "host_aliases": host_aliases,
+        "import_runtime_facts": runtime_facts,
+        "router_advisory": {
+            "ok": advisory_record["ok"],
+            "status": advisory_response_raw.get("status"),
+            "elapsed_ms": advisory_elapsed_ms,
+            "trace_id": advisory_response.get("trace_id"),
+            "lane": advisory_response.get("lane"),
+            "authoritative": advisory_response.get("authoritative"),
+        },
+        "f5_evidence": f5_evidence,
+        "k1s_advisory_import": k1s_import,
+        "k1s_advisory_state": _k1s_advisory_state_summary(k1s_json["advisory_state"]),
+        "k1s_phase_assurance": _f3_phase_assurance_summary(k1s_json["phase_assurance"]),
+        "artifacts": {name: str(path) for name, path in sorted(paths.items())},
+        "findings": findings,
+    }
+    paths["f3-advisory-closeout-summary.json"].write_text(
+        json.dumps(summary, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return summary
 
 
 def emit_f5_evidence(
@@ -1157,6 +1430,205 @@ def _workerbee_status_payload(workerbee_status: Path | None) -> dict[str, Any]:
             }
         )
     return _normalize_workerbee_status_payload(_load_json(workerbee_status.expanduser().resolve()))
+
+
+def _prepare_f3_phase_report(
+    *,
+    k1s_root: Path,
+    phase_report: Path | None,
+    output_path: Path,
+    findings: list[dict[str, str]],
+) -> Path:
+    if phase_report is not None:
+        source = phase_report.expanduser().resolve()
+        try:
+            shutil.copyfile(source, output_path)
+        except OSError as exc:
+            findings.append(_finding("error", "PHASE_REPORT_COPY", str(exc)))
+            output_path.write_text(
+                json.dumps({"ok": False, "error": str(exc), "source": str(source)}) + "\n",
+                encoding="utf-8",
+            )
+        return output_path
+
+    script = k1s_root.expanduser().resolve() / "scripts" / "dev" / "fabric_phase_assurance.py"
+    try:
+        result = subprocess.run(
+            [sys.executable, str(script), "--json"],
+            text=True,
+            capture_output=True,
+            check=False,
+            cwd=str(k1s_root.expanduser().resolve()),
+        )
+    except OSError as exc:
+        findings.append(_finding("error", "PHASE_REPORT_GENERATE", str(exc)))
+        output_path.write_text(
+            json.dumps({"ok": False, "error": str(exc), "script": str(script)}) + "\n",
+            encoding="utf-8",
+        )
+        return output_path
+    if result.returncode != 0:
+        findings.append(
+            _finding(
+                "error",
+                "PHASE_REPORT_GENERATE",
+                result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}",
+            )
+        )
+        output_path.write_text(
+            json.dumps(
+                {
+                    "ok": False,
+                    "returncode": result.returncode,
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "script": str(script),
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        return output_path
+    output_path.write_text(result.stdout.rstrip() + "\n", encoding="utf-8")
+    return output_path
+
+
+def _fetch_k1s_closeout_state(
+    *,
+    k1s_url: str | None,
+    k1s_token: str | None,
+    workerbee_status: dict[str, Any],
+    request_timeout: int,
+) -> dict[str, Any]:
+    resolved_url = _resolve_k1s_advisory_import_url(k1s_url, workerbee_status)
+    if not resolved_url:
+        missing = {"ok": False, "error": "k1s controller URL not configured"}
+        return {"k1s_url": "", "advisory_state": missing, "phase_assurance": missing}
+    headers: dict[str, str] = {}
+    token = str(k1s_token or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    timeout = max(1, min(30, request_timeout))
+    return {
+        "k1s_url": resolved_url,
+        "advisory_state": _get_json(
+            f"{resolved_url.rstrip('/')}/fabric/advisory/state",
+            timeout=timeout,
+            headers=headers,
+        ),
+        "phase_assurance": _get_json(
+            f"{resolved_url.rstrip('/')}/fabric/phase-assurance",
+            timeout=timeout,
+            headers=headers,
+        ),
+    }
+
+
+def _f3_closeout_checks(
+    *,
+    health: dict[str, Any],
+    host_aliases: dict[str, Any],
+    runtime_facts: dict[str, Any],
+    advisory_response: dict[str, Any],
+    advisory_response_raw: dict[str, Any],
+    f5_evidence: dict[str, Any],
+    k1s_import: dict[str, Any],
+    advisory_state: dict[str, Any],
+    phase_assurance: dict[str, Any],
+) -> dict[str, bool]:
+    trace_id = str(advisory_response.get("trace_id") or "")
+    f3 = _f3_phase_payload(phase_assurance)
+    latest_trace = (
+        advisory_state.get("advisory", {}).get("latest_trace")
+        if isinstance(advisory_state.get("advisory"), dict)
+        else {}
+    )
+    trace_seen = False
+    if isinstance(latest_trace, dict) and str(latest_trace.get("trace_id") or "") == trace_id:
+        trace_seen = True
+    traces = (
+        advisory_state.get("advisory", {}).get("traces")
+        if isinstance(advisory_state.get("advisory"), dict)
+        else []
+    )
+    if isinstance(traces, list):
+        trace_seen = trace_seen or any(
+            isinstance(item, dict) and str(item.get("trace_id") or "") == trace_id
+            for item in traces
+        )
+    gate = f3.get("gate") if isinstance(f3.get("gate"), dict) else {}
+    return {
+        "runtime_health_ok": bool(health.get("ok")),
+        "host_aliases_ok": bool(host_aliases.get("ok")),
+        "runtime_facts_imported": bool(runtime_facts.get("ok")),
+        "router_advisory_ok": bool(advisory_response_raw.get("ok"))
+        and bool(advisory_response.get("ok", True)),
+        "router_authoritative_false": advisory_response.get("authoritative") is False,
+        "trace_id_present": bool(trace_id),
+        "f5_evidence_recorded": bool(f5_evidence.get("ok")),
+        "k1s_import_ok": bool(k1s_import.get("ok")) and not bool(k1s_import.get("skipped")),
+        "k1s_advisory_state_ok": bool(advisory_state.get("ok")),
+        "k1s_advisory_authority": advisory_state.get("controller_authority") == "k1s"
+        and advisory_state.get("authoritative") is False,
+        "trace_visible_in_k1s": trace_seen,
+        "phase_assurance_ok": phase_assurance.get("api_version") == "k1s.fabric.phase-assurance/v1",
+        "phase_controller_authority": phase_assurance.get("controller_authority") == "k1s"
+        and phase_assurance.get("authoritative") is True
+        and phase_assurance.get("advisory_authoritative") is False,
+        "f3_evidence_present": f3.get("status") == "present",
+        "f3_gate_reported": isinstance(gate.get("ready"), bool)
+        and isinstance(gate.get("blocked_by"), list),
+    }
+
+
+def _findings_from_failed_checks(checks: dict[str, bool], *, code: str) -> list[dict[str, str]]:
+    return [
+        _finding("error", code, key)
+        for key, value in sorted(checks.items())
+        if value is not True
+    ]
+
+
+def _f3_phase_payload(phase_assurance: dict[str, Any]) -> dict[str, Any]:
+    phases = phase_assurance.get("phases") if isinstance(phase_assurance.get("phases"), dict) else {}
+    f3 = phases.get("F3") if isinstance(phases.get("F3"), dict) else {}
+    return f3
+
+
+def _k1s_advisory_state_summary(state: dict[str, Any]) -> dict[str, Any]:
+    advisory = state.get("advisory") if isinstance(state.get("advisory"), dict) else {}
+    latest_trace = advisory.get("latest_trace") if isinstance(advisory.get("latest_trace"), dict) else {}
+    return {
+        "ok": bool(state.get("ok")),
+        "mode": state.get("mode"),
+        "authoritative": state.get("authoritative"),
+        "controller_authority": state.get("controller_authority"),
+        "experimental_providers": state.get("experimental_providers")
+        if isinstance(state.get("experimental_providers"), list)
+        else [],
+        "latest_trace_id": latest_trace.get("trace_id"),
+        "pending_review_count": advisory.get("pending_review_count"),
+        "traces_count": advisory.get("traces_count"),
+    }
+
+
+def _f3_phase_assurance_summary(phase_assurance: dict[str, Any]) -> dict[str, Any]:
+    f3 = _f3_phase_payload(phase_assurance)
+    gate = f3.get("gate") if isinstance(f3.get("gate"), dict) else {}
+    return {
+        "ok": phase_assurance.get("api_version") == "k1s.fabric.phase-assurance/v1",
+        "api_version": phase_assurance.get("api_version"),
+        "controller_authority": phase_assurance.get("controller_authority"),
+        "authoritative": phase_assurance.get("authoritative"),
+        "advisory_authoritative": phase_assurance.get("advisory_authoritative"),
+        "f3_status": f3.get("status"),
+        "f3_gate_ready": gate.get("ready"),
+        "f3_blocked_by": gate.get("blocked_by") if isinstance(gate.get("blocked_by"), list) else [],
+        "f3_present": f3.get("present") if isinstance(f3.get("present"), list) else [],
+        "f3_missing": f3.get("missing") if isinstance(f3.get("missing"), list) else [],
+    }
 
 
 def _normalize_workerbee_status_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -2764,9 +3236,14 @@ def _post_json(
         return {"ok": False, "status": None, "json": {}, "error": str(exc)}
 
 
-def _get_json(url: str, *, timeout: int) -> dict[str, Any]:
+def _get_json(url: str, *, timeout: int, headers: dict[str, str] | None = None) -> dict[str, Any]:
+    request = Request(  # noqa: S310 - lab validation targets local user-provided URLs.
+        url,
+        headers=headers or {},
+        method="GET",
+    )
     try:
-        with urlopen(url, timeout=timeout) as response:  # noqa: S310
+        with urlopen(request, timeout=timeout) as response:  # noqa: S310
             raw = response.read().decode("utf-8")
             payload = json.loads(raw)
             return payload if isinstance(payload, dict) else {"ok": False, "error": "invalid_json"}

@@ -1749,6 +1749,230 @@ def test_ai_fabric_k1s_advisory_import_posts_traces_and_f5_evidence(
     assert calls[0]["payload"]["records"][0]["kind"] == "das_cell_bundle"
 
 
+def test_ai_fabric_f3_advisory_closeout_writes_phase_assurance_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_f3_closeout_test")
+    phase_report = tmp_path / "phase-report.json"
+    phase_report.write_text(
+        json.dumps(
+            {
+                "api_version": "k1s.fabric.phase-assurance/v1",
+                "kind": "FabricPhaseAssuranceReport",
+                "phase_order": ["F3"],
+                "ready_phases": [],
+                "phases": {
+                    "F3": {
+                        "phase": "F3",
+                        "status": "missing",
+                        "present": [],
+                        "missing": ["bounded_planning"],
+                        "evidence": {"bounded_planning": False},
+                        "gate": {"ready": False, "blocked_by": ["F1", "F2"]},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    post_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        lab,
+        "_resolve_runtime_endpoints",
+        lambda **kwargs: {
+            "router_url": kwargs["router_url"],
+            "das_url": kwargs["das_url"],
+            "retrieval_url": kwargs["retrieval_url"],
+        },
+    )
+    monkeypatch.setattr(
+        lab,
+        "_health_snapshot",
+        lambda **kwargs: {"ok": True, "checked_at": "2026-06-04T00:00:00+00:00"},
+    )
+    monkeypatch.setattr(
+        lab,
+        "_host_alias_snapshot",
+        lambda **kwargs: {"ok": True, "endpoints": {}, "checked_at": "2026-06-04T00:00:00+00:00"},
+    )
+    monkeypatch.setattr(
+        lab,
+        "import_runtime_facts",
+        lambda *args, **kwargs: {
+            "ok": True,
+            "das_url": kwargs["das_url"],
+            "track": kwargs["track"],
+            "facts": [],
+            "posted": {"ok": True},
+            "findings": [],
+        },
+    )
+
+    def fake_post_json(
+        url: str,
+        payload: dict[str, object],
+        *,
+        timeout: int,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        post_calls.append({"url": url, "payload": payload, "timeout": timeout, "headers": headers})
+        if url.endswith("/v1/advisory/query"):
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "lane": "expert",
+                    "authoritative": False,
+                    "trace_id": "trace-f3-closeout",
+                    "decision_trace": {
+                        "trace_id": "trace-f3-closeout",
+                        "request_id": "req-f3-closeout",
+                        "request_contract": {
+                            "subject_type": "k1s_fabric_phase",
+                            "subject_id": "k1s.fabric.phase.F3",
+                            "intent": "review_phase_gate",
+                            "facts_ref": "http://das.example",
+                            "locality_snapshot_ref": "http://retrieval.example",
+                            "max_candidates": 5,
+                            "time_budget_ms": 3000,
+                        },
+                        "response_contract": {
+                            "provider": "workerbee-ai-router",
+                            "status": "ok",
+                            "recommendation": "review F3 evidence",
+                            "authoritative": False,
+                        },
+                        "deterministic_baseline": {"selected_lane": "expert"},
+                        "accepted": None,
+                        "divergence_reason": "pending_operator_review",
+                        "replay_status": "recorded",
+                        "continuity_signals": {"request_id": "req-f3-closeout"},
+                        "coherence_signals": {"model_ok": True},
+                    },
+                },
+            }
+        assert url.endswith("/fabric/advisory/import")
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "ok": True,
+                "imported_count": 4,
+                "counts": {"decision_traces": 1, "das_cell_bundles": 1},
+                "findings": [],
+            },
+        }
+
+    def fake_f5_closeout(*, das_url: str, f5_evidence_path: Path) -> dict[str, object]:
+        del das_url
+        f5_evidence_path.write_text(
+            json.dumps(
+                {
+                    "ok": True,
+                    "records": [
+                        {
+                            "kind": "das_cell_bundle",
+                            "payload": {
+                                "bundle_id": "das-f3",
+                                "site_id": "site-a",
+                                "storage_ref": "/srv/das",
+                                "facts_ref": "das://facts",
+                                "status": "ready",
+                            },
+                        }
+                    ],
+                }
+            ),
+            encoding="utf-8",
+        )
+        return {"ok": True, "record_count": 1, "kinds": ["das_cell_bundle"], "findings": []}
+
+    def fake_get_json(
+        url: str,
+        *,
+        timeout: int,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        del timeout, headers
+        if url.endswith("/fabric/advisory/state"):
+            return {
+                "ok": True,
+                "mode": "advisory_only",
+                "authoritative": False,
+                "controller_authority": "k1s",
+                "experimental_providers": ["hyperon-das"],
+                "advisory": {
+                    "traces_count": 1,
+                    "pending_review_count": 1,
+                    "latest_trace": {"trace_id": "trace-f3-closeout"},
+                    "traces": [{"trace_id": "trace-f3-closeout"}],
+                },
+            }
+        assert url.endswith("/fabric/phase-assurance")
+        return {
+            "api_version": "k1s.fabric.phase-assurance/v1",
+            "kind": "FabricPhaseAssuranceReport",
+            "source": "k1s-controller-state",
+            "controller_authority": "k1s",
+            "authoritative": True,
+            "advisory_authoritative": False,
+            "phases": {
+                "F3": {
+                    "status": "present",
+                    "present": [
+                        "advisory_contract",
+                        "decision_traces",
+                        "divergence_logging",
+                        "replay_evaluation",
+                        "bounded_planning",
+                        "continuity_coherence_signals",
+                    ],
+                    "missing": [],
+                    "gate": {"ready": False, "blocked_by": ["F1", "F2"]},
+                }
+            },
+        }
+
+    monkeypatch.setattr(lab, "_post_json", fake_post_json)
+    monkeypatch.setattr(lab, "_run_evidence_closeout", fake_f5_closeout)
+    monkeypatch.setattr(lab, "_get_json", fake_get_json)
+
+    result = lab.closeout_f3_advisory(
+        EXAMPLE_ROOT,
+        stage=EXAMPLE_ROOT / "stage-quality",
+        storage_root=tmp_path / "storage",
+        run_id="f3-closeout-test",
+        track="quality",
+        router_url="http://router.example",
+        das_url="http://das.example",
+        retrieval_url="http://retrieval.example",
+        project="workerbee-project",
+        k1s_root=tmp_path,
+        phase_report=phase_report,
+        workerbee_status=None,
+        k1s_url="http://127.0.0.1:19108",
+        k1s_token="admin-token",  # noqa: S106 - dummy bearer token for request-header assertion.
+        request_timeout=3,
+    )
+
+    assert result["api_version"] == lab.F3_ADVISORY_CLOSEOUT_API_VERSION
+    assert result["ok"] is True
+    assert result["trace_id"] == "trace-f3-closeout"
+    assert result["checks"]["f3_evidence_present"] is True
+    assert result["checks"]["phase_controller_authority"] is True
+    assert result["k1s_phase_assurance"]["f3_status"] == "present"
+    assert result["k1s_phase_assurance"]["f3_gate_ready"] is False
+    assert result["k1s_phase_assurance"]["f3_blocked_by"] == ["F1", "F2"]
+    assert Path(result["artifacts"]["f3-advisory-closeout-summary.json"]).is_file()
+    assert Path(result["artifacts"]["k1s-phase-assurance.json"]).is_file()
+    assert post_calls[0]["url"] == "http://router.example/v1/advisory/query"
+    assert post_calls[0]["payload"]["subject_id"] == "k1s.fabric.phase.F3"
+    assert post_calls[1]["url"] == "http://127.0.0.1:19108/fabric/advisory/import"
+    assert post_calls[1]["headers"] == {"Authorization": "Bearer admin-token"}
+
+
 def test_ai_fabric_retrieval_indexer_serves_local_results(tmp_path: Path, monkeypatch) -> None:
     indexer = _load_module(
         EXAMPLE_ROOT / "images" / "retrieval-indexer" / "indexer.py",
