@@ -1597,6 +1597,158 @@ def test_ai_fabric_emit_f5_evidence_writes_k1s_compatible_records(tmp_path: Path
     } in result["facts"]
 
 
+def test_ai_fabric_advisory_prompt_record_carries_k1s_import_payload(monkeypatch) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_k1s_import_record_test")
+
+    def fake_post_json(
+        url: str,
+        payload: dict[str, object],
+        *,
+        timeout: int,
+    ) -> dict[str, object]:
+        del url, payload, timeout
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "ok": True,
+                "lane": "coordinator",
+                "authoritative": False,
+                "trace_id": "trace-import-0",
+                "trace_path": "/srv/storage/traces/trace-import-0.json",
+                "model": {"ok": True, "raw": {"model": "general-coordinator"}},
+                "evidence": {
+                    "retrieval": {"results": [{"path": "workerbee/notes.md"}]},
+                    "symbolic": {"results": [{"id": "das-fact://fact-1"}]},
+                },
+                "decision_trace": {
+                    "trace_id": "trace-import-0",
+                    "request_id": "req-import-0",
+                    "selected_lane": "coordinator",
+                    "request_contract": {
+                        "subject_type": "advisory_query",
+                        "subject_id": "test",
+                        "intent": "advise",
+                    },
+                    "response_contract": {
+                        "provider": "workerbee-ai-router",
+                        "status": "ok",
+                        "recommendation": "review",
+                        "authoritative": False,
+                    },
+                    "retrieval": {"results": [{"path": "workerbee/notes.md"}]},
+                    "symbolic": {"results": [{"id": "das-fact://fact-1"}]},
+                },
+            },
+        }
+
+    monkeypatch.setattr(lab, "_post_json", fake_post_json)
+
+    record = lab._advisory_prompt_record(
+        prompt={
+            "id": "prompt-0",
+            "prompt": "Explain k1s advisory routing",
+            "lane": "coordinator",
+        },
+        router_url="http://router.example",
+        run_id="run-0",
+        request_timeout=1,
+    )
+
+    payload = record["k1s_advisory_import"]
+    assert record["ok"] is True
+    assert payload["api_version"] == lab.K1S_ADVISORY_IMPORT_API_VERSION
+    assert payload["decision_traces"][0]["trace_id"] == "trace-import-0"
+
+
+def test_ai_fabric_k1s_advisory_import_posts_traces_and_f5_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_k1s_import_post_test")
+    f5_path = tmp_path / "f5-evidence.json"
+    f5_path.write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "records": [
+                    {
+                        "kind": "das_cell_bundle",
+                        "payload": {
+                            "bundle_id": "das-import-runtime",
+                            "site_id": "site-a",
+                            "cell_id": "runtime",
+                            "version": "2026-06-04",
+                            "storage_ref": "/srv/storage/k1s/ai-fabric-lab/das",
+                            "facts_ref": "das://site-a/runtime/facts.jsonl",
+                            "status": "ready",
+                        },
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_post_json(
+        url: str,
+        payload: dict[str, object],
+        *,
+        timeout: int,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        calls.append({"url": url, "payload": payload, "timeout": timeout, "headers": headers})
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "ok": True,
+                "imported_count": 2,
+                "counts": {"decision_traces": 1, "das_cell_bundles": 1},
+                "findings": [],
+            },
+        }
+
+    monkeypatch.setattr(lab, "_post_json", fake_post_json)
+    summary = {
+        "run_id": "run-0",
+        "suites": {
+            "quality-contract": {
+                "results": [
+                    {
+                        "k1s_advisory_import": {
+                            "decision_traces": [
+                                {
+                                    "trace_id": "trace-import-0",
+                                    "request_id": "req-import-0",
+                                    "response_contract": {"authoritative": False},
+                                }
+                            ]
+                        }
+                    }
+                ]
+            }
+        },
+    }
+
+    result = lab._import_k1s_advisory_state(
+        summary=summary,
+        f5_evidence_path=f5_path,
+        k1s_url="http://127.0.0.1:19108",
+        k1s_token="admin-token",  # noqa: S106 - dummy bearer token for request-header assertion.
+        workerbee_status={},
+        skip=False,
+        timeout_seconds=7,
+    )
+
+    assert result["ok"] is True
+    assert result["imported_count"] == 2
+    assert calls[0]["url"] == "http://127.0.0.1:19108/fabric/advisory/import"
+    assert calls[0]["headers"] == {"Authorization": "Bearer admin-token"}
+    assert calls[0]["payload"]["decision_traces"][0]["trace_id"] == "trace-import-0"
+    assert calls[0]["payload"]["records"][0]["kind"] == "das_cell_bundle"
+
+
 def test_ai_fabric_retrieval_indexer_serves_local_results(tmp_path: Path, monkeypatch) -> None:
     indexer = _load_module(
         EXAMPLE_ROOT / "images" / "retrieval-indexer" / "indexer.py",

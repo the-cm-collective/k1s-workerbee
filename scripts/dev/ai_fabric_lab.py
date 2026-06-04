@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -53,6 +54,8 @@ ACCEPTANCE_RUN_API_VERSION = "workerbee.ai-fabric.acceptance-run/v1"
 OPERATOR_REPORT_API_VERSION = "workerbee.ai-fabric.operator-report/v1"
 AI_RUNTIME_PROFILE_API_VERSION = "k1s.fabric.ai-runtime-profile/v1"
 AI_RUNTIME_PROFILE_KIND = "AIFabricRuntimeProfile"
+K1S_ADVISORY_IMPORT_API_VERSION = "workerbee.ai-fabric.k1s-advisory-import/v1"
+K1S_ADVISORY_IMPORT_KIND = "K1sFabricAdvisoryImport"
 SOAK_PROMOTION_DURATION_SECONDS = 1800
 ACCEPTANCE_CLOSEOUT_SUITES = (
     "adapter-preflight",
@@ -277,6 +280,13 @@ def main(argv: list[str] | None = None) -> int:
     runtime_validate.add_argument("--success-threshold", type=float, default=0.95)
     runtime_validate.add_argument("--vram-growth-mib-max", type=int, default=4096)
     runtime_validate.add_argument("--workerbee-status", type=Path, default=None)
+    runtime_validate.add_argument("--k1s-url", default=os.getenv("AI_FABRIC_K1S_URL", ""))
+    runtime_validate.add_argument("--k1s-token", default=os.getenv("AI_FABRIC_K1S_TOKEN", ""))
+    runtime_validate.add_argument(
+        "--skip-k1s-advisory-import",
+        action="store_true",
+        help="Skip posting advisory traces and DAS evidence into k1s fabric state",
+    )
     runtime_validate.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
 
     args = parser.parse_args(argv)
@@ -350,6 +360,9 @@ def main(argv: list[str] | None = None) -> int:
             success_threshold=args.success_threshold,
             vram_growth_mib_max=args.vram_growth_mib_max,
             workerbee_status=args.workerbee_status,
+            k1s_url=args.k1s_url,
+            k1s_token=args.k1s_token,
+            skip_k1s_advisory_import=args.skip_k1s_advisory_import,
         )
         return _emit(result, json_out=args.json)
     return 2
@@ -627,6 +640,9 @@ def validate_runtime(
     success_threshold: float,
     vram_growth_mib_max: int,
     workerbee_status: Path | None = None,
+    k1s_url: str | None = None,
+    k1s_token: str | None = None,
+    skip_k1s_advisory_import: bool = False,
 ) -> dict[str, Any]:
     storage_layout = _load_json(root / "storage-layout.json")
     target_root = storage_root or Path(str(storage_layout["root"]))
@@ -880,6 +896,24 @@ def validate_runtime(
         for finding in result.get("findings", []):
             if isinstance(finding, dict):
                 findings.append(finding)
+    k1s_advisory_import = _import_k1s_advisory_state(
+        summary=summary,
+        f5_evidence_path=paths["f5-evidence.json"],
+        k1s_url=k1s_url,
+        k1s_token=k1s_token,
+        workerbee_status=workerbee_status_payload,
+        skip=skip_k1s_advisory_import,
+        timeout_seconds=max(1, min(30, request_timeout)),
+    )
+    summary["k1s_advisory_import"] = k1s_advisory_import
+    if not k1s_advisory_import.get("ok") and not k1s_advisory_import.get("skipped"):
+        findings.append(
+            _finding(
+                "warning",
+                "K1S_ADVISORY_IMPORT",
+                str(k1s_advisory_import.get("error") or "k1s advisory import failed"),
+            )
+        )
     summary["completed_at"] = _utc_now()
     summary["ok"] = not [item for item in findings if item.get("level") == "error"] and all(
         bool(item.get("ok")) for item in summary["suites"].values() if isinstance(item, dict)
@@ -1199,6 +1233,161 @@ def _collect_advisory_trace_refs(value: Any) -> list[dict[str, str]]:
 
     visit(value)
     return refs
+
+
+def _k1s_advisory_import_payload_from_router_response(data: dict[str, Any]) -> dict[str, Any]:
+    trace = data.get("decision_trace") if isinstance(data.get("decision_trace"), dict) else None
+    if not trace:
+        return {}
+    return {
+        "api_version": K1S_ADVISORY_IMPORT_API_VERSION,
+        "kind": K1S_ADVISORY_IMPORT_KIND,
+        "source": "workerbee.ai-fabric.router",
+        "decision_traces": [trace],
+    }
+
+
+def _import_k1s_advisory_state(
+    *,
+    summary: dict[str, Any],
+    f5_evidence_path: Path,
+    k1s_url: str | None,
+    k1s_token: str | None,
+    workerbee_status: dict[str, Any],
+    skip: bool,
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    if skip:
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "k1s advisory import disabled by operator",
+        }
+    resolved_url = _resolve_k1s_advisory_import_url(k1s_url, workerbee_status)
+    if not resolved_url:
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "k1s controller URL not configured",
+        }
+    payload = _collect_k1s_advisory_import_payload(
+        summary=summary,
+        f5_evidence_path=f5_evidence_path,
+    )
+    if not _k1s_advisory_import_payload_has_data(payload):
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "no advisory traces or DAS evidence were produced",
+            "k1s_url": resolved_url,
+        }
+    headers: dict[str, str] = {}
+    token = str(k1s_token or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    url = f"{resolved_url.rstrip('/')}/fabric/advisory/import"
+    response = _post_json(url, payload, timeout=timeout_seconds, headers=headers)
+    result = response.get("json") if isinstance(response.get("json"), dict) else {}
+    ok = bool(response.get("ok")) and bool(result.get("ok", True))
+    return {
+        "ok": ok,
+        "skipped": False,
+        "k1s_url": resolved_url,
+        "status": response.get("status"),
+        "imported_count": result.get("imported_count"),
+        "counts": result.get("counts") if isinstance(result.get("counts"), dict) else {},
+        "findings": result.get("findings") if isinstance(result.get("findings"), list) else [],
+        "error": None if ok else response.get("error") or result.get("message") or result,
+    }
+
+
+def _resolve_k1s_advisory_import_url(
+    k1s_url: str | None,
+    workerbee_status: dict[str, Any],
+) -> str:
+    explicit = str(k1s_url or "").strip()
+    if explicit:
+        return explicit.rstrip("/")
+    data = workerbee_status.get("data") if isinstance(workerbee_status.get("data"), dict) else {}
+    stack = data.get("stack") if isinstance(data.get("stack"), dict) else {}
+    candidates = [
+        workerbee_status.get("controller_url"),
+        data.get("controller_url"),
+        stack.get("controller_url"),
+    ]
+    for candidate in candidates:
+        value = str(candidate or "").strip()
+        if value:
+            return value.rstrip("/")
+    return ""
+
+
+def _collect_k1s_advisory_import_payload(
+    *,
+    summary: dict[str, Any],
+    f5_evidence_path: Path,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "api_version": K1S_ADVISORY_IMPORT_API_VERSION,
+        "kind": K1S_ADVISORY_IMPORT_KIND,
+        "source": "workerbee.ai-fabric.runtime-validation",
+        "run_id": str(summary.get("run_id") or ""),
+        "decision_traces": [],
+    }
+    seen_trace_ids: set[str] = set()
+
+    def add_trace(trace: dict[str, Any]) -> None:
+        trace_id = str(trace.get("trace_id") or "")
+        if not trace_id or trace_id in seen_trace_ids:
+            return
+        seen_trace_ids.add(trace_id)
+        payload["decision_traces"].append(trace)
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            import_payload = value.get("k1s_advisory_import")
+            if isinstance(import_payload, dict):
+                traces = import_payload.get("decision_traces")
+                if isinstance(traces, list):
+                    for trace in traces:
+                        if isinstance(trace, dict):
+                            add_trace(trace)
+            for child in value.values():
+                visit(child)
+        elif isinstance(value, list):
+            for child in value:
+                visit(child)
+
+    visit(summary.get("suites"))
+    f5_payload = _load_optional_json(f5_evidence_path)
+    if isinstance(f5_payload, dict):
+        records = f5_payload.get("records")
+        if isinstance(records, (dict, list)):
+            payload["records"] = records
+            payload["f5_evidence_ref"] = str(f5_evidence_path)
+    return payload
+
+
+def _load_optional_json(path: Path) -> dict[str, Any]:
+    try:
+        if not path.is_file():
+            return {}
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _k1s_advisory_import_payload_has_data(payload: dict[str, Any]) -> bool:
+    traces = payload.get("decision_traces")
+    if isinstance(traces, list) and bool(traces):
+        return True
+    records = payload.get("records")
+    if isinstance(records, list):
+        return bool(records)
+    if isinstance(records, dict):
+        return any(bool(value) for value in records.values() if isinstance(value, list))
+    return False
 
 
 def _acceptance_run_summary(
@@ -1727,6 +1916,7 @@ def _advisory_prompt_record(
         if isinstance(trace_symbolic.get("results"), list)
         else []
     )
+    k1s_advisory_import = _k1s_advisory_import_payload_from_router_response(data)
     min_retrieval_hits = int(prompt.get("min_retrieval_hits") or 1)
     min_symbolic_facts = int(prompt.get("min_symbolic_facts") or 1)
     checks = {
@@ -1741,7 +1931,7 @@ def _advisory_prompt_record(
         "trace_retrieval_packet": len(trace_retrieval_results) >= min_retrieval_hits,
         "trace_symbolic_packet": len(trace_symbolic_results) >= min_symbolic_facts,
     }
-    return {
+    record = {
         "id": str(prompt["id"]),
         "suite": suite_label,
         "status": response.get("status"),
@@ -1763,6 +1953,9 @@ def _advisory_prompt_record(
         "error": response.get("error"),
         "recorded_at": _utc_now(),
     }
+    if k1s_advisory_import:
+        record["k1s_advisory_import"] = k1s_advisory_import
+    return record
 
 
 def _run_mixed_soak(
@@ -2539,12 +2732,21 @@ def _advisor_scenario_checks(
     }
 
 
-def _post_json(url: str, payload: dict[str, Any], *, timeout: int) -> dict[str, Any]:
+def _post_json(
+    url: str,
+    payload: dict[str, Any],
+    *,
+    timeout: int,
+    headers: dict[str, str] | None = None,
+) -> dict[str, Any]:
     body = json.dumps(payload).encode("utf-8")
+    request_headers = {"Content-Type": "application/json"}
+    if headers:
+        request_headers.update(headers)
     request = Request(  # noqa: S310 - lab validation targets local user-provided URLs.
         url,
         data=body,
-        headers={"Content-Type": "application/json"},
+        headers=request_headers,
         method="POST",
     )
     try:
