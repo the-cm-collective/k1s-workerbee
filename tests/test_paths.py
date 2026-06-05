@@ -164,6 +164,16 @@ def test_supervisor_stack_ingress_publishes_dashboard_and_apishim(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    k1s_root = tmp_path / "k1s"
+    docs_site = k1s_root / "docs" / "site"
+    docs_site.mkdir(parents=True)
+    (docs_site / "index.html").write_text(
+        "<!doctype html><title>k1s docs</title>",
+        encoding="utf-8",
+    )
+    ae_origin = k1s_root / "src" / "ae" / "__init__.py"
+    ae_origin.parent.mkdir(parents=True)
+    ae_origin.write_text("", encoding="utf-8")
     monkeypatch.setattr(
         "workerbee.supervisor.resolve_k1s_runtime",
         lambda **_: K1sRuntime(
@@ -171,7 +181,7 @@ def test_supervisor_stack_ingress_publishes_dashboard_and_apishim(
             python_executable="/usr/bin/python",
             k1s_root=None,
             pythonpath=None,
-            ae_origin="/site-packages/ae/__init__.py",
+            ae_origin=str(ae_origin),
         ),
     )
     state_dir = tmp_path / "projects" / "demo"
@@ -200,7 +210,7 @@ def test_supervisor_stack_ingress_publishes_dashboard_and_apishim(
         k1s_root=None,
         k1s_runtime_source="installed",
         python_executable="/usr/bin/python",
-        ae_origin="/site-packages/ae/__init__.py",
+        ae_origin=str(ae_origin),
         runtime="containerd",
         network=containerd_network_name(tmp_path, "demo"),
         controller_port=19108,
@@ -220,13 +230,20 @@ def test_supervisor_stack_ingress_publishes_dashboard_and_apishim(
     route = (state_dir / "caddy" / "k1s-stack.caddy").read_text(encoding="utf-8")
     assert "https://k1s.demo.workerbee.localhost" in route
     assert "https://k1s-api.demo.workerbee.localhost" in route
+    assert "https://k1s-docs.demo.workerbee.localhost" in route
     assert "handle /static/dash-assets/*" in route
     assert "handle /api/v1*" in route
     assert "reverse_proxy 127.0.0.1:18090" in route
     assert "reverse_proxy 127.0.0.1:19108" in route
     assert "reverse_proxy https://127.0.0.1:18445" in route
+    assert "root * /etc/caddy/projects/demo/docs-site" in route
+    assert "file_server" in route
     assert "tls_insecure_skip_verify" in route
+    assert (state_dir / "docs-site" / "index.html").is_file()
     assert refreshed.dashboard_url == "https://k1s.demo.workerbee.localhost:19443/dashboard"
+    assert refreshed.ingress_urls["docs_site"] == (
+        "https://k1s-docs.demo.workerbee.localhost:19443/"
+    )
     assert refreshed.ingress_urls["api_healthz"] == (
         "https://k1s-api.demo.workerbee.localhost:19443/healthz"
     )

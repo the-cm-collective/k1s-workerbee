@@ -3616,6 +3616,27 @@ def _caddy_exposed_routes(path: Path, *, https_port: int) -> list[dict[str, Any]
                     ),
                 }
             )
+        if hosts and line.startswith("file_server"):
+            route_path = path_stack[-1][1] if path_stack else None
+            path_matchers = [route_path] if route_path else []
+            routes.append(
+                {
+                    "type": _classify_caddy_route(
+                        source_file=path.name,
+                        hosts=hosts,
+                        path_matchers=path_matchers,
+                    ),
+                    "source_file": path.name,
+                    "hosts": list(hosts),
+                    "path_matchers": path_matchers,
+                    "upstreams": [],
+                    "public_urls": _caddy_public_urls(
+                        hosts=hosts,
+                        path_matchers=path_matchers,
+                        https_port=https_port,
+                    ),
+                }
+            )
         depth = max(0, depth + line.count("{") - line.count("}"))
         if depth == 0:
             hosts = []
@@ -3689,6 +3710,8 @@ def _classify_caddy_route(
     if any(path.startswith("/static/dash-assets") for path in path_matchers):
         return "static-assets"
     if source_file == "k1s-profile.caddy" or source_file == "k1s-stack.caddy":
+        if any(host.startswith("k1s-docs.") for host in hosts):
+            return "k1s-docs"
         if any(host.startswith("k1s-api.") for host in hosts):
             return "k1s-api"
         if any(host.startswith("k1s.") for host in hosts):

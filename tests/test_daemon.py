@@ -1348,6 +1348,13 @@ https://k1s-api.demo.workerbee.localhost {
     tls internal
     reverse_proxy 127.0.0.1:18445
 }
+
+https://k1s-docs.demo.workerbee.localhost {
+    header -Strict-Transport-Security
+    tls internal
+    root * /etc/caddy/projects/demo/docs-site
+    file_server
+}
 """,
         encoding="utf-8",
     )
@@ -1358,6 +1365,7 @@ https://k1s-api.demo.workerbee.localhost {
         "static-assets",
         "k1s-dashboard",
         "k1s-api",
+        "k1s-docs",
     ]
     assert routes[0]["path_matchers"] == ["/static/dash-assets/*"]
     assert routes[0]["public_urls"] == [
@@ -1366,6 +1374,11 @@ https://k1s-api.demo.workerbee.localhost {
     ]
     assert routes[1]["upstreams"] == ["127.0.0.1:19108"]
     assert routes[2]["hosts"] == ["k1s-api.demo.workerbee.localhost"]
+    assert routes[3]["hosts"] == ["k1s-docs.demo.workerbee.localhost"]
+    assert routes[3]["public_urls"] == [
+        "https://k1s-docs.demo.workerbee.localhost:19443/"
+    ]
+    assert routes[3]["upstreams"] == []
 
 
 def test_caddy_exposed_routes_parses_workload_handle_path(tmp_path: Path) -> None:
