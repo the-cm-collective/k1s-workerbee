@@ -38,3 +38,7 @@ or with a reachable DAS URL to seed track, model, project, and repo facts.
 Use `scripts/dev/ai_fabric_lab.py emit-f5-evidence` to generate the first
 k1s-compatible DAS-cell, query-warming, replication-intent, and cognitive-signal
 records under `/srv/storage/k1s/ai-fabric-lab/runs/f5-evidence.json`.
+Deploy `stage-hyperon-sidecar` and run
+`scripts/dev/ai_fabric_lab.py import-hyperon-advisory` to import a pinned
+trueagi Hyperon experimental advisory trace into the k1s Fabric Advisory store
+for dashboard review.

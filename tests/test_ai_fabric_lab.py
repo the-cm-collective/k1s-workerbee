@@ -262,6 +262,19 @@ def test_ai_fabric_lab_lora_adapter_smoke_stage_is_workerbee_valid() -> None:
     )
 
 
+def test_ai_fabric_lab_hyperon_sidecar_stage_is_workerbee_valid() -> None:
+    validation = validate_stage(EXAMPLE_ROOT / "stage-hyperon-sidecar")
+    manifest = EXAMPLE_ROOT / "stage-hyperon-sidecar" / "manifests" / "hyperon-advisor.yaml"
+
+    assert validation["ok"] is True
+    assert validation["input_kinds"] == ["native-k1s"]
+    assert "localhost/workerbee-ai-fabric-hyperon-advisor:dev" in validation["images"]
+    assert "ai-fabric-lab/hyperon-advisor" in validation["required_controller_scopes"]
+    assert _service_port(manifest) == 18183
+    assert _env_value(manifest, "HYPERON_PROVIDER") == "trueagi-hyperon-experimental"
+    assert _env_value(manifest, "HYPERON_SOURCE_REF") == "v0.2.10"
+
+
 def test_ai_fabric_lab_stages_use_dedicated_workerbee_service_ports() -> None:
     for stage in (
         "stage",
@@ -1749,6 +1762,108 @@ def test_ai_fabric_k1s_advisory_import_posts_traces_and_f5_evidence(
     assert calls[0]["payload"]["records"][0]["kind"] == "das_cell_bundle"
 
 
+def test_ai_fabric_import_hyperon_advisory_posts_sidecar_evidence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    lab = _load_module(SCRIPT, "ai_fabric_lab_hyperon_import_test")
+    calls: list[dict[str, object]] = []
+
+    def fake_post_json(
+        url: str,
+        payload: dict[str, object],
+        *,
+        timeout: int,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, object]:
+        calls.append({"url": url, "payload": payload, "timeout": timeout, "headers": headers})
+        if url.endswith("/v1/advisory/evaluate"):
+            trace = {
+                "trace_id": "trueagi-trace-0",
+                "request_id": "trueagi-req-0",
+                "request_contract": {
+                    "subject_type": "k1s_fabric_phase",
+                    "subject_id": "k1s.fabric.phase.F3",
+                    "intent": "review_phase_gate",
+                    "policy_mode": "advisory_only",
+                },
+                "response_contract": {
+                    "provider": "trueagi-hyperon-experimental",
+                    "status": "blocked",
+                    "recommendation": "diverge",
+                    "authoritative": False,
+                },
+            }
+            records = [
+                {
+                    "kind": "das_cell_bundle",
+                    "payload": {
+                        "bundle_id": "trueagi-bundle-0",
+                        "site_id": "site-a",
+                        "cell_id": "trueagi-runtime",
+                        "version": "v0.2.10",
+                        "storage_ref": "/srv/storage/k1s/ai-fabric-lab/hyperon-advisor",
+                        "facts_ref": "hyperon://site-a/runtime/facts",
+                        "status": "ready",
+                        "labels": {"provider": "trueagi-hyperon-experimental"},
+                    },
+                }
+            ]
+            return {
+                "ok": True,
+                "status": 200,
+                "json": {
+                    "ok": True,
+                    "provider": "trueagi-hyperon-experimental",
+                    "decision_trace": trace,
+                    "f5_evidence": {"ok": True, "records": records},
+                    "k1s_advisory_import": {
+                        "decision_traces": [trace],
+                        "records": records,
+                    },
+                },
+            }
+        return {
+            "ok": True,
+            "status": 200,
+            "json": {
+                "ok": True,
+                "imported_count": 2,
+                "counts": {"decision_traces": 1, "das_cell_bundles": 1},
+                "findings": [],
+            },
+        }
+
+    monkeypatch.setattr(lab, "_post_json", fake_post_json)
+
+    result = lab.import_hyperon_advisory(
+        EXAMPLE_ROOT,
+        storage_root=tmp_path / "lab",
+        run_id="run-trueagi-0",
+        project="k1s-workerbee-test",
+        hyperon_url="http://hyperon.local:8091",
+        k1s_url="http://127.0.0.1:19108",
+        k1s_token="admin-token",  # noqa: S106 - dummy bearer token for request assertion.
+        workerbee_status=None,
+        facts_path=None,
+        phase_report=None,
+        subject="k1s.fabric.phase.F3",
+        intent="review_phase_gate",
+        query="Can F3 proceed?",
+        request_timeout=9,
+    )
+
+    assert result["ok"] is True
+    assert result["provider"] == "trueagi-hyperon-experimental"
+    assert calls[0]["url"] == "http://hyperon.local:8091/v1/advisory/evaluate"
+    assert calls[0]["payload"]["use_stored_facts"] is False
+    assert calls[0]["payload"]["facts"]
+    assert calls[1]["url"] == "http://127.0.0.1:19108/fabric/advisory/import"
+    assert calls[1]["headers"] == {"Authorization": "Bearer admin-token"}
+    assert calls[1]["payload"]["decision_traces"][0]["trace_id"] == "trueagi-trace-0"
+    assert calls[1]["payload"]["records"][0]["kind"] == "das_cell_bundle"
+
+
 def test_ai_fabric_f1_f2_locality_closeout_seeds_controller_evidence(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -2595,6 +2710,59 @@ def test_ai_fabric_das_bridge_records_f5_query_evidence(tmp_path: Path, monkeypa
         "das_query_trace",
         "cognitive_signal",
     ]
+
+
+def test_ai_fabric_hyperon_advisor_generates_importable_evidence(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    advisor = _load_module(
+        EXAMPLE_ROOT / "images" / "hyperon-advisor" / "app.py",
+        "ai_fabric_hyperon_advisor_test",
+    )
+    monkeypatch.setattr(advisor, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(advisor, "F5_EVIDENCE_LOG", tmp_path / "f5-evidence.jsonl")
+    monkeypatch.setattr(
+        advisor,
+        "_run_metta_evaluation",
+        lambda _facts: {"ok": True, "program": ["!(+ 1 2)"], "probes": []},
+    )
+
+    result = advisor.evaluate_advisory(
+        {
+            "run_id": "run-trueagi-0",
+            "project": "k1s-workerbee-test",
+            "subject": "k1s.fabric.phase.F3",
+            "intent": "review_phase_gate",
+            "query": "Can F3 proceed?",
+            "facts": [
+                {
+                    "namespace": "runtime",
+                    "subject": "k1s.fabric.phase.F3",
+                    "predicate": "gate_ready",
+                    "object": False,
+                    "source": "test",
+                }
+            ],
+        }
+    )
+    records = result["f5_evidence"]["records"]
+
+    assert result["ok"] is True
+    assert result["provider"] == "trueagi-hyperon-experimental"
+    assert result["advisory_decision"]["authoritative"] is False
+    assert result["advisory_decision"]["controller_authority"] == "k1s"
+    assert result["advisory_decision"]["status"] == "blocked"
+    assert "fabric_phase_gate_blocked" in result["advisory_decision"]["risks"]
+    assert result["decision_trace"]["divergence_reason"] == "pending_operator_review"
+    assert result["k1s_advisory_import"]["decision_traces"][0]["trace_id"]
+    assert [record["kind"] for record in records] == [
+        "das_cell_bundle",
+        "das_query_trace",
+        "cognitive_signal",
+    ]
+    assert records[0]["payload"]["labels"]["provider"] == "trueagi-hyperon-experimental"
+    assert advisor._read_f5_records(limit=3) == records
 
 
 def test_ai_fabric_lora_readiness_artifacts_are_valid() -> None:

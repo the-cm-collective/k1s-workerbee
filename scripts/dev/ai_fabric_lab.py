@@ -109,6 +109,10 @@ ADAPTER_MAX_LORA_RANK = 16
 RUNTIME_FACT_SOURCE = "workerbee.ai-fabric.runtime-facts/v1"
 ADVISORY_DECISION_API_VERSION = "workerbee.ai-fabric.advisory-decision/v1"
 ADVISOR_SCENARIO_EVAL_API_VERSION = "workerbee.ai-fabric.advisor-scenario-eval/v1"
+TRUEAGI_HYPERON_ADVISOR_API_VERSION = (
+    "workerbee.ai-fabric.trueagi-hyperon-advisor/v1"
+)
+TRUEAGI_HYPERON_PROVIDER = "trueagi-hyperon-experimental"
 RUNTIME_RELATIONSHIP_PREDICATES = (
     "owns_service",
     "depends_on",
@@ -132,6 +136,7 @@ AI_FABRIC_SERVICE_ADVISORY_SUPPORT = {
     "ai-router": ("advisory_trace", "lane_routing"),
     "retrieval-indexer": ("retrieval_evidence", "corpus_search"),
     "das-bridge": ("symbolic_evidence", "f5_query_evidence"),
+    "hyperon-advisor": ("trueagi_hyperon_advisory", "metta_advisory_trace"),
     "ai-coordinator": ("coordinator_advisory_lane",),
     "ai-expert": ("expert_code_advisory_lane",),
 }
@@ -140,6 +145,7 @@ AI_FABRIC_SERVICE_STORAGE_RESOURCES = {
     "ai-expert": ("models/hf-cache", "adapters/expert", "runs"),
     "retrieval-indexer": ("corpus", "artifacts/indexes"),
     "das-bridge": ("das",),
+    "hyperon-advisor": ("hyperon-advisor",),
     "qdrant": ("qdrant",),
     "mongo": ("mongo",),
     "redis": ("redis",),
@@ -175,6 +181,10 @@ RUNTIME_URL_FALLBACKS = {
     "retrieval": {
         "service_name": "retrieval-indexer.ai-fabric-lab.svc.cluster.local",
         "container_port": 8082,
+    },
+    "hyperon": {
+        "service_name": "hyperon-advisor.ai-fabric-lab.svc.cluster.local",
+        "container_port": 8091,
     },
 }
 CORPUS_SOURCE_PATHS = {
@@ -293,6 +303,28 @@ def main(argv: list[str] | None = None) -> int:
     f5_evidence.add_argument("--query-id", default="ai-fabric-local-first-smoke")
     f5_evidence.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
 
+    hyperon_import = sub.add_parser(
+        "import-hyperon-advisory",
+        help="Run the opt-in trueagi Hyperon advisor sidecar and import k1s evidence",
+    )
+    hyperon_import.add_argument("--storage-root", type=Path, default=None)
+    hyperon_import.add_argument("--run-id", default="")
+    hyperon_import.add_argument("--project", default="")
+    hyperon_import.add_argument("--hyperon-url", default="http://127.0.0.1:18183")
+    hyperon_import.add_argument("--k1s-url", default=os.getenv("AI_FABRIC_K1S_URL", ""))
+    hyperon_import.add_argument("--k1s-token", default=os.getenv("AI_FABRIC_K1S_TOKEN", ""))
+    hyperon_import.add_argument("--workerbee-status", type=Path, default=None)
+    hyperon_import.add_argument("--facts", type=Path, default=None)
+    hyperon_import.add_argument("--phase-report", type=Path, default=None)
+    hyperon_import.add_argument("--subject", default="k1s.fabric.phase.F3")
+    hyperon_import.add_argument("--intent", default="review_phase_gate")
+    hyperon_import.add_argument(
+        "--query",
+        default="Can F3 Hyperon advisory work proceed while k1s remains authoritative?",
+    )
+    hyperon_import.add_argument("--request-timeout", type=int, default=30)
+    hyperon_import.add_argument("--json", action="store_true", default=argparse.SUPPRESS)
+
     runtime_validate = sub.add_parser(
         "validate-runtime",
         help="Run AI fabric runtime validation suites against a deployed WorkerBee lab",
@@ -407,6 +439,24 @@ def main(argv: list[str] | None = None) -> int:
             project=args.project,
             track=args.track or None,
             query_id=args.query_id,
+        )
+        return _emit(result, json_out=args.json)
+    if args.cmd == "import-hyperon-advisory":
+        result = import_hyperon_advisory(
+            root,
+            storage_root=args.storage_root,
+            run_id=args.run_id or None,
+            project=args.project,
+            hyperon_url=args.hyperon_url,
+            k1s_url=args.k1s_url,
+            k1s_token=args.k1s_token,
+            workerbee_status=args.workerbee_status,
+            facts_path=args.facts,
+            phase_report=args.phase_report,
+            subject=args.subject,
+            intent=args.intent,
+            query=args.query,
+            request_timeout=args.request_timeout,
         )
         return _emit(result, json_out=args.json)
     if args.cmd == "validate-runtime":
@@ -1078,6 +1128,150 @@ def emit_f5_evidence(
         "evidence": payload,
         "facts": _f5_evidence_facts(payload),
         "findings": [],
+    }
+
+
+def import_hyperon_advisory(
+    root: Path,
+    *,
+    storage_root: Path | None,
+    run_id: str | None,
+    project: str,
+    hyperon_url: str,
+    k1s_url: str | None,
+    k1s_token: str | None,
+    workerbee_status: Path | None,
+    facts_path: Path | None,
+    phase_report: Path | None,
+    subject: str,
+    intent: str,
+    query: str,
+    request_timeout: int,
+) -> dict[str, Any]:
+    init_result = init_storage_layout(root, storage_root=storage_root)
+    if not init_result.get("ok"):
+        return init_result
+    target_root = Path(str(init_result["root"]))
+    selected_run_id = run_id or f"trueagi-hyperon-advisory-{_runtime_timestamp()}"
+    run_dir = target_root / "runs" / selected_run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    paths = {
+        "request": run_dir / "trueagi-hyperon-advisory-request.json",
+        "response": run_dir / "trueagi-hyperon-advisory-response.json",
+        "f5_evidence": run_dir / "trueagi-hyperon-f5-evidence.json",
+        "k1s_import_payload": run_dir / "trueagi-hyperon-k1s-import-payload.json",
+        "k1s_import": run_dir / "trueagi-hyperon-k1s-import.json",
+    }
+    findings: list[dict[str, str]] = []
+    facts = _hyperon_advisory_facts(
+        facts_path=facts_path,
+        phase_report=phase_report,
+        findings=findings,
+    )
+    request_payload = {
+        "api_version": TRUEAGI_HYPERON_ADVISOR_API_VERSION,
+        "run_id": selected_run_id,
+        "project": project,
+        "provider": TRUEAGI_HYPERON_PROVIDER,
+        "subject": subject,
+        "subject_type": "k1s_fabric_phase" if subject.startswith("k1s.fabric.phase") else "fabric",
+        "intent": intent,
+        "query": query,
+        "query_id": _stable_id("trueagi-hyperon-query", [selected_run_id, subject, intent]),
+        "policy_mode": "advisory_only",
+        "facts": facts,
+        "use_stored_facts": False,
+    }
+    paths["request"].write_text(
+        json.dumps(request_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    if findings:
+        response_payload: dict[str, Any] = {}
+        sidecar_response = {"ok": False, "status": None, "error": findings}
+    else:
+        sidecar_response = _post_json(
+            f"{hyperon_url.rstrip('/')}/v1/advisory/evaluate",
+            request_payload,
+            timeout=request_timeout,
+        )
+        response_payload = (
+            sidecar_response.get("json")
+            if isinstance(sidecar_response.get("json"), dict)
+            else {}
+        )
+    paths["response"].write_text(
+        json.dumps(
+            {
+                "ok": bool(sidecar_response.get("ok")),
+                "status": sidecar_response.get("status"),
+                "response": response_payload,
+                "error": sidecar_response.get("error"),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    f5_evidence = (
+        response_payload.get("f5_evidence")
+        if isinstance(response_payload.get("f5_evidence"), dict)
+        else {}
+    )
+    paths["f5_evidence"].write_text(
+        json.dumps(f5_evidence, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    import_payload = _k1s_advisory_import_payload_from_hyperon_response(
+        response_payload,
+        run_id=selected_run_id,
+    )
+    paths["k1s_import_payload"].write_text(
+        json.dumps(import_payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    workerbee_status_payload = _workerbee_status_payload(workerbee_status)
+    k1s_import = _post_k1s_advisory_import_payload(
+        payload=import_payload,
+        k1s_url=k1s_url,
+        k1s_token=k1s_token,
+        workerbee_status=workerbee_status_payload,
+        timeout_seconds=request_timeout,
+    )
+    paths["k1s_import"].write_text(
+        json.dumps(k1s_import, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    ok = (
+        bool(sidecar_response.get("ok"))
+        and bool(response_payload.get("ok", True))
+        and bool(k1s_import.get("ok"))
+        and not [item for item in findings if item.get("level") == "error"]
+    )
+    return {
+        "ok": ok,
+        "api_version": TRUEAGI_HYPERON_ADVISOR_API_VERSION,
+        "kind": "TrueAGIHyperonAdvisoryImportRun",
+        "run_id": selected_run_id,
+        "run_dir": str(run_dir),
+        "provider": TRUEAGI_HYPERON_PROVIDER,
+        "hyperon_url": hyperon_url,
+        "k1s_url": k1s_import.get("k1s_url") or _resolve_k1s_advisory_import_url(
+            k1s_url,
+            workerbee_status_payload,
+        ),
+        "sidecar": {
+            "ok": bool(sidecar_response.get("ok")),
+            "status": sidecar_response.get("status"),
+            "trace_id": response_payload.get("decision_trace", {}).get("trace_id")
+            if isinstance(response_payload.get("decision_trace"), dict)
+            else None,
+            "provider": response_payload.get("provider"),
+        },
+        "k1s_advisory_import": k1s_import,
+        "artifacts": {name: str(path) for name, path in sorted(paths.items())},
+        "findings": findings,
     }
 
 
@@ -2274,6 +2468,85 @@ def _k1s_advisory_import_payload_from_router_response(data: dict[str, Any]) -> d
         "kind": K1S_ADVISORY_IMPORT_KIND,
         "source": "workerbee.ai-fabric.router",
         "decision_traces": [trace],
+    }
+
+
+def _k1s_advisory_import_payload_from_hyperon_response(
+    data: dict[str, Any],
+    *,
+    run_id: str,
+) -> dict[str, Any]:
+    import_payload = (
+        data.get("k1s_advisory_import")
+        if isinstance(data.get("k1s_advisory_import"), dict)
+        else {}
+    )
+    payload: dict[str, Any] = {
+        "api_version": K1S_ADVISORY_IMPORT_API_VERSION,
+        "kind": K1S_ADVISORY_IMPORT_KIND,
+        "source": TRUEAGI_HYPERON_ADVISOR_API_VERSION,
+        "run_id": run_id,
+        "decision_traces": [],
+    }
+    traces = import_payload.get("decision_traces")
+    if isinstance(traces, list):
+        payload["decision_traces"] = [trace for trace in traces if isinstance(trace, dict)]
+    else:
+        trace = data.get("decision_trace") if isinstance(data.get("decision_trace"), dict) else {}
+        if trace:
+            payload["decision_traces"] = [trace]
+    records = import_payload.get("records")
+    if not isinstance(records, (dict, list)):
+        f5_evidence = data.get("f5_evidence") if isinstance(data.get("f5_evidence"), dict) else {}
+        records = f5_evidence.get("records")
+    if isinstance(records, (dict, list)):
+        payload["records"] = records
+    return payload
+
+
+def _post_k1s_advisory_import_payload(
+    *,
+    payload: dict[str, Any],
+    k1s_url: str | None,
+    k1s_token: str | None,
+    workerbee_status: dict[str, Any],
+    timeout_seconds: int,
+) -> dict[str, Any]:
+    resolved_url = _resolve_k1s_advisory_import_url(k1s_url, workerbee_status)
+    if not resolved_url:
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "k1s controller URL not configured",
+        }
+    if not _k1s_advisory_import_payload_has_data(payload):
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "no advisory traces or DAS evidence were produced",
+            "k1s_url": resolved_url,
+        }
+    headers: dict[str, str] = {}
+    token = str(k1s_token or "").strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    response = _post_json(
+        f"{resolved_url.rstrip('/')}/fabric/advisory/import",
+        payload,
+        timeout=timeout_seconds,
+        headers=headers,
+    )
+    result = response.get("json") if isinstance(response.get("json"), dict) else {}
+    ok = bool(response.get("ok")) and bool(result.get("ok", True))
+    return {
+        "ok": ok,
+        "skipped": False,
+        "k1s_url": resolved_url,
+        "status": response.get("status"),
+        "imported_count": result.get("imported_count"),
+        "counts": result.get("counts") if isinstance(result.get("counts"), dict) else {},
+        "findings": result.get("findings") if isinstance(result.get("findings"), list) else [],
+        "error": None if ok else response.get("error") or result.get("message") or result,
     }
 
 
@@ -3628,6 +3901,62 @@ def _run_advisor_scenarios(
     )
     payload["path"] = str(output_path)
     return payload
+
+
+def _hyperon_advisory_facts(
+    *,
+    facts_path: Path | None,
+    phase_report: Path | None,
+    findings: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    if facts_path is not None:
+        try:
+            payload = _load_json(facts_path)
+        except ValueError as exc:
+            findings.append(_finding("error", "HYPERON_FACTS_INVALID", str(exc)))
+            return []
+        facts = payload.get("facts") if isinstance(payload.get("facts"), list) else payload
+        if isinstance(facts, list):
+            return [dict(item) for item in facts if isinstance(item, dict)]
+        findings.append(
+            _finding("error", "HYPERON_FACTS_INVALID", "facts file must contain a list")
+        )
+        return []
+    if phase_report is not None:
+        try:
+            return _phase_report_facts(_load_json(phase_report))
+        except ValueError as exc:
+            findings.append(_finding("error", "PHASE_REPORT_INVALID", str(exc)))
+            return []
+    return _default_hyperon_advisory_facts()
+
+
+def _default_hyperon_advisory_facts() -> list[dict[str, Any]]:
+    source = TRUEAGI_HYPERON_ADVISOR_API_VERSION
+    return [
+        _runtime_fact(
+            "k1s.fabric.phase_report",
+            "api_version",
+            "k1s.fabric.phase-assurance/v1",
+            source=source,
+        ),
+        _runtime_fact("k1s.fabric.phase.F3", "status", "present", source=source),
+        _runtime_fact("k1s.fabric.phase.F3", "gate_ready", False, source=source),
+        _runtime_fact("k1s.fabric.phase.F3", "blocked_by", "F1", source=source),
+        _runtime_fact("k1s.fabric.phase.F3", "blocked_by", "F2", source=source),
+        _runtime_fact(
+            "k1s.fabric.phase.F3.evidence.advisory_contract",
+            "present",
+            False,
+            source=source,
+        ),
+        _runtime_fact(
+            "k1s.fabric.phase.F3.evidence.decision_traces",
+            "present",
+            False,
+            source=source,
+        ),
+    ]
 
 
 def _live_advisor_scenario(

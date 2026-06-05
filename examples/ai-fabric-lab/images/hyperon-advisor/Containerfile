@@ -1,0 +1,27 @@
+FROM python:3.10-slim
+
+ARG HYPERON_VERSION=0.2.10
+ARG HYPERON_SOURCE_REPO=https://github.com/trueagi-io/hyperon-experimental
+ARG HYPERON_SOURCE_REF=v0.2.10
+ARG HYPERON_SOURCE_COMMIT=3f76dc460da6961f57f69f6c3e550c59c74ada83
+
+LABEL org.opencontainers.image.source="${HYPERON_SOURCE_REPO}"
+LABEL workerbee.ai-fabric.provider="trueagi-hyperon-experimental"
+LABEL workerbee.ai-fabric.hyperon.ref="${HYPERON_SOURCE_REF}"
+LABEL workerbee.ai-fabric.hyperon.commit="${HYPERON_SOURCE_COMMIT}"
+
+RUN python -m pip install --no-cache-dir "hyperon==${HYPERON_VERSION}"
+
+WORKDIR /app
+COPY app.py /app/app.py
+
+ENV HYPERON_PROVIDER=trueagi-hyperon-experimental
+ENV HYPERON_VERSION=${HYPERON_VERSION}
+ENV HYPERON_SOURCE_REPO=${HYPERON_SOURCE_REPO}
+ENV HYPERON_SOURCE_REF=${HYPERON_SOURCE_REF}
+ENV HYPERON_SOURCE_COMMIT=${HYPERON_SOURCE_COMMIT}
+ENV HYPERON_ADVISOR_DATA_DIR=/data/hyperon-advisor
+ENV HYPERON_ADVISOR_PORT=8091
+
+EXPOSE 8091
+CMD ["python", "/app/app.py"]

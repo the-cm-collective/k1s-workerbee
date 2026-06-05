@@ -173,6 +173,14 @@ The DAS bridge runs with `AI_DAS_BACKEND=hyperon-das` and imports facts into a
 local Hyperon `DistributedAtomSpace` while also appending the durable JSONL
 audit log under `/srv/storage/k1s/ai-fabric-lab/das/facts.jsonl`.
 
+The optional `stage-hyperon-sidecar` overlay deploys `hyperon-advisor`, a
+trueagi Hyperon experimental evidence lane pinned to
+`trueagi-io/hyperon-experimental` `v0.2.10`
+(`3f76dc460da6961f57f69f6c3e550c59c74ada83`). It runs a small MeTTa-backed
+advisory evaluation and emits the same k1s-compatible advisory trace,
+DAS-query, and cognitive-signal records as non-authoritative evidence. It does
+not replace the default DAS bridge or make Hyperon authoritative.
+
 Seed the initial runtime facts after deployment:
 
 ```bash

@@ -15,6 +15,7 @@
     "mongo",
     "redis",
     "das",
+    "hyperon-advisor",
     "runs",
     "artifacts/indexes",
     "artifacts/prompts"

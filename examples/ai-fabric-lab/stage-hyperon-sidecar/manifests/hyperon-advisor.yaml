@@ -1,0 +1,46 @@
+apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: hyperon-advisor
+  namespace: ai-fabric-lab
+  labels:
+    app: hyperon-advisor
+    workerbee.k1s.dev/project: ai-fabric-lab
+spec:
+  image: localhost/workerbee-ai-fabric-hyperon-advisor:dev
+  imagePullPolicy: Never
+  replicas: 1
+  env:
+    - name: HYPERON_PROVIDER
+      value: trueagi-hyperon-experimental
+    - name: HYPERON_SOURCE_REPO
+      value: https://github.com/trueagi-io/hyperon-experimental
+    - name: HYPERON_SOURCE_REF
+      value: v0.2.10
+    - name: HYPERON_SOURCE_COMMIT
+      value: 3f76dc460da6961f57f69f6c3e550c59c74ada83
+    - name: HYPERON_VERSION
+      value: "0.2.10"
+    - name: HYPERON_ADVISOR_DATA_DIR
+      value: /data/hyperon-advisor
+  ports:
+    - name: http
+      containerPort: 8091
+  service:
+    port: 18183
+    targetPort: 8091
+  health:
+    readiness:
+      httpGet: { path: /healthz, port: 8091 }
+      initialDelaySeconds: 2
+      periodSeconds: 10
+  resources:
+    requests:
+      cpu: 0.1
+      memory: 256Mi
+    limits:
+      cpu: 1
+      memory: 2Gi
+  volumes:
+    - hostPath: /srv/storage/k1s/ai-fabric-lab/hyperon-advisor
+      mountPath: /data/hyperon-advisor
