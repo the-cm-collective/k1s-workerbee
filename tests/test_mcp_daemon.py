@@ -2,14 +2,18 @@ from __future__ import annotations
 
 import json
 import socket
+from errno import EPERM
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from workerbee.contract import WorkerBeeError
 from workerbee.mcp_daemon import (
     MCPDaemonConfig,
     _dashboard_health_url,
+    _fallback_orphan_mcp_pids,
     _mcp_port_available,
+    _pid_alive,
     _wait_for_port_release,
     _wait_ready,
     mcp_daemon_status,
@@ -382,6 +386,59 @@ def test_status_and_stop_are_not_blocked_by_remote_bind_guard(
     assert status["host"] == REMOTE_BIND_HOST
     assert status["running"] is False
     assert stopped["running"] is False
+
+
+def test_mcp_daemon_status_reports_missing_metadata_orphan(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, runtime="podman", port=9876)
+    monkeypatch.setattr("workerbee.mcp_daemon._orphan_mcp_pids", lambda _config: [4321])
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.global_ingress_status",
+        lambda *_args, **_kwargs: {
+            "dashboard_url": "https://dashboard.workerbee.localhost:19443/",
+            "ca_download_url": "http://ca.workerbee.localhost:19080/workerbee-ca.crt",
+            "dns": {"enabled": True},
+        },
+    )
+
+    status = mcp_daemon_status(config)
+
+    assert status["running"] is True
+    assert status["metadata_missing"] is True
+    assert status["pid"] == 4321
+    assert status["orphan_pids"] == [4321]
+    assert status["dashboard_url"] == "https://dashboard.workerbee.localhost:19443/"
+    assert status["dns"] == {"enabled": True}
+
+
+def test_fallback_orphan_mcp_pids_matches_ps_command(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(state_root=tmp_path, runtime="podman", port=9876)
+    stdout = (
+        f"4321 /usr/bin/python -m workerbee --state-root {tmp_path} "
+        "mcp serve --host 127.0.0.1 --port 9876\n"
+        "9999 /usr/bin/python -m workerbee mcp serve --port 1234\n"
+    )
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.subprocess.run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=stdout),
+    )
+    monkeypatch.setattr("workerbee.mcp_daemon.os.getpid", lambda: 100)
+
+    assert _fallback_orphan_mcp_pids(config) == [4321]
+
+
+def test_pid_alive_treats_eperm_as_existing(monkeypatch) -> None:
+    def fake_kill(_pid: int, _signal: int) -> None:
+        raise PermissionError(EPERM, "operation not permitted")
+
+    monkeypatch.setattr("workerbee.mcp_daemon.os.kill", fake_kill)
+
+    assert _pid_alive(4321) is True
 
 
 def test_wait_for_port_release_stops_matching_orphan(
