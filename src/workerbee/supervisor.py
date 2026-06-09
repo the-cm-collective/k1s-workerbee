@@ -130,11 +130,12 @@ class WorkerBeeSupervisor:
         )
         self._ensure_network(runtime, network)
 
+        recorded_ports = _recorded_stack_host_ports(state_root, exclude_project=self.project)
         controller_port = _env_int("WORKERBEE_API_PORT") or choose_port(
-            19108, start=19108, end=19208
+            19108, start=19108, end=19208, blocked=recorded_ports
         )
         apishim_port = _env_int("WORKERBEE_APISHIM_PORT") or choose_port(
-            18445, start=18445, end=18545
+            18445, start=18445, end=18545, blocked=recorded_ports
         )
         service_ports = self._allocate_poc_service_ports(runtime)
 
@@ -1919,6 +1920,28 @@ def _parse_published_host_ports(text: str) -> set[int]:
     for match in re.finditer(r"(?:^|[\s,])(?:[^,\s]*:)?(\d+)->\d+/(?:tcp|udp)", text):
         with suppress(ValueError):
             ports.add(int(match.group(1)))
+    return ports
+
+
+def _recorded_stack_host_ports(state_root: Path, *, exclude_project: str) -> set[int]:
+    root = state_root.expanduser().resolve()
+    excluded = project_slug(exclude_project)
+    ports: set[int] = set()
+    for stack_file in root.glob("projects/*/stack.json"):
+        project = stack_file.parent.name
+        if project_slug(project) == excluded:
+            continue
+        try:
+            data = json.loads(stack_file.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        for key in ("controller_port", "apishim_port"):
+            try:
+                port = int(data.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+            if port > 0:
+                ports.add(port)
     return ports
 
 
