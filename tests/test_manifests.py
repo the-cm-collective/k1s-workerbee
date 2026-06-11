@@ -3,6 +3,7 @@ from types import MethodType, SimpleNamespace
 from typing import Any
 
 from workerbee.contract import WorkerBeeError
+from workerbee.ingress import ProjectIngressConfig
 from workerbee.k1s_runtime import K1sRuntime
 from workerbee.manifests import (
     deploy_local_stage,
@@ -29,6 +30,21 @@ def _runtime() -> K1sRuntime:
 def _supervisor(tmp_path: Path, monkeypatch) -> WorkerBeeSupervisor:
     monkeypatch.setattr("workerbee.supervisor.resolve_k1s_runtime", lambda **_: _runtime())
     return WorkerBeeSupervisor(project="Demo App", state_dir=tmp_path / "state", runtime="docker")
+
+
+def _ingress(tmp_path: Path) -> ProjectIngressConfig:
+    return ProjectIngressConfig(
+        project="demo-app",
+        domain="demo-app.workerbee.localhost",
+        https_port=19443,
+        sites_dir=tmp_path / "state" / "caddy",
+        caddy_container="workerbee-caddy-test",
+        caddy_file="/etc/caddy/Caddyfile",
+        host_alias="127.0.0.1",
+        ca_bundle=tmp_path / "state" / "ca.pem",
+        global_dashboard_url="https://dashboard.workerbee.localhost:19443/",
+        dashboard_port=18090,
+    )
 
 
 def _ready_wait(**kwargs: Any) -> dict[str, Any]:
@@ -1041,6 +1057,83 @@ def test_profile_deploy_can_reset_existing_profile_apps(
     assert all(call[-3:] == ["--purge", "-n", "demo"] for call in calls[:3])
     assert [call[4] for call in calls[3:]] == ["apply", "apply", "apply"]
     assert [item["name"] for item in result["reset"]] == ["backend", "db", "frontend"]
+
+
+def test_profile_deploy_writes_workload_ingress_before_sync(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("workerbee.supervisor.resolve_k1s_runtime", lambda **_: _runtime())
+    sup = WorkerBeeSupervisor(
+        project="Demo App",
+        state_dir=tmp_path / "state",
+        runtime="containerd",
+        ingress=_ingress(tmp_path),
+    )
+    prepared = prepare_stage(supervisor=sup, name="Realtime", template="realtime-web-db")
+    calls: list[list[str]] = []
+
+    def fake_run(
+        _self,
+        args: list[str],
+        *,
+        timeout: int = 60,
+        env_overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        assert timeout == 77
+        assert env_overrides is not None
+        calls.append(args)
+        return {"cmd": ["python", "-m", "ae.cli", "--token=***"], "returncode": 0}
+
+    class FakeProfileRunner:
+        def connection(
+            self,
+            *,
+            profile: str | None = None,
+            timeout: float = 180.0,
+        ) -> dict[str, Any]:
+            assert profile == "k1s-dev-min-sqlite"
+            assert timeout == 77.0
+            ca_bundle = str(tmp_path / "workerbee-ca.pem")
+            return {
+                "profile": profile,
+                "server": "http://127.0.0.1:19608",
+                "api_server": "http://127.0.0.1:18645",
+                "ca_bundle": ca_bundle,
+                "admin_token": "-".join(["admin", "token"]),
+                "urls": {"dashboard": "https://k1s.demo-app.workerbee.localhost:19443/dashboard"},
+            }
+
+    def fake_sync() -> dict[str, Any]:
+        assert (sup.ingress.sites_dir / "profile-workload.caddy").is_file()
+        return {"synced": True}
+
+    sup.run_ae_cli = MethodType(fake_run, sup)  # type: ignore[method-assign]
+
+    result = deploy_profile_stage(
+        supervisor=sup,
+        profile_runner=FakeProfileRunner(),
+        stage_dir=Path(prepared["stage_dir"]),
+        profile="k1s-dev-min-sqlite",
+        namespace="demo",
+        timeout=77,
+        sync_ingress=fake_sync,
+    )
+
+    site = sup.ingress.sites_dir / "profile-workload.caddy"
+    text = site.read_text(encoding="utf-8")
+    routes = result["profile_workload_ingress"]["routes"]
+
+    assert result["ingress_sync"] == {"synced": True}
+    assert len(calls) == 3
+    assert len(routes) == 2
+    assert "https://api.demo-app.workerbee.localhost" in text
+    assert "https://app.demo-app.workerbee.localhost" in text
+    assert all(f"reverse_proxy 127.0.0.1:{route['port']}" in text for route in routes)
+    assert result["profile_workload_ingress"]["urls"] == [
+        "https://api.demo-app.workerbee.localhost:19443/",
+        "https://app.demo-app.workerbee.localhost:19443/",
+    ]
 
 
 def test_realtime_template_contains_websocket_ingress(tmp_path: Path, monkeypatch) -> None:

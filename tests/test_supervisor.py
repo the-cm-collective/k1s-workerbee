@@ -6,7 +6,7 @@ from types import MethodType, SimpleNamespace
 from typing import Any
 
 from workerbee.k1s_runtime import K1sRuntime
-from workerbee.supervisor import StackInfo, WorkerBeeSupervisor
+from workerbee.supervisor import StackInfo, WorkerBeeSupervisor, _recorded_stack_host_ports
 
 
 def test_run_ae_retries_remote_apply_read_timeout(
@@ -402,6 +402,33 @@ def test_logs_falls_back_to_runtime_when_apishim_has_no_pod(
     assert result["k1s_error"] == "controller logs unavailable"
     assert result["apishim_error"] == "no API shim pod found for app demo/api"
     assert any(cmd[:3] == ["docker", "ps", "-q"] for cmd in calls)
+
+
+def test_recorded_stack_host_ports_blocks_sibling_stack_ports(tmp_path: Path) -> None:
+    projects = tmp_path / "projects"
+    sibling = projects / "sibling-stack"
+    other = projects / "other-stack"
+    current = projects / "current-stack"
+    broken = projects / "broken-stack"
+    for project_dir in (sibling, other, current, broken):
+        project_dir.mkdir(parents=True)
+    sibling.joinpath("stack.json").write_text(
+        '{"controller_port": 19108, "apishim_port": 18445}',
+        encoding="utf-8",
+    )
+    other.joinpath("stack.json").write_text(
+        '{"controller_port": "19109", "apishim_port": 18446}',
+        encoding="utf-8",
+    )
+    current.joinpath("stack.json").write_text(
+        '{"controller_port": 19110, "apishim_port": 18447}',
+        encoding="utf-8",
+    )
+    broken.joinpath("stack.json").write_text("{not json", encoding="utf-8")
+
+    ports = _recorded_stack_host_ports(tmp_path, exclude_project="current-stack")
+
+    assert ports == {19108, 18445, 19109, 18446}
 
 
 def _patch_runtime(monkeypatch) -> None:

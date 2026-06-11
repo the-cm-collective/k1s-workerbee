@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import signal
 import sys
-from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -1109,8 +1108,7 @@ def _serve_exec_argv(
 
 
 def _request_mcp_shutdown(metadata_file: Path) -> None:
-    with suppress(OSError):
-        metadata_file.unlink()
+    _ = metadata_file
     os.kill(os.getpid(), signal.SIGINT)
 
 

@@ -25,6 +25,26 @@ def test_serve_mcp_refuses_remote_bind_without_opt_in(tmp_path) -> None:
     assert exc.value.code == "MCP_REMOTE_BIND_REQUIRES_AUTH"
 
 
+def test_request_mcp_shutdown_preserves_metadata_for_stop_cleanup(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    metadata = tmp_path / "mcp-daemon.json"
+    metadata.write_text("{}", encoding="utf-8")
+    signals: list[tuple[int, int]] = []
+    monkeypatch.setattr(mcp_server.os, "getpid", lambda: 4321)
+    monkeypatch.setattr(
+        mcp_server.os,
+        "kill",
+        lambda pid, sig: signals.append((pid, sig)),
+    )
+
+    mcp_server._request_mcp_shutdown(metadata)
+
+    assert metadata.exists()
+    assert signals == [(4321, mcp_server.signal.SIGINT)]
+
+
 def test_secret_policy_status_mcp_tool_uses_daemon_status(
     tmp_path,
     monkeypatch,
