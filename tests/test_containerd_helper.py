@@ -14,6 +14,7 @@ import pytest
 from workerbee import containerd_helper
 from workerbee.containerd_helper import (
     _handle_remove_tree,
+    containerd_available_for_auto,
     containerd_privilege_env,
     containerd_privilege_summary,
     effective_containerd_privilege_mode,
@@ -81,6 +82,76 @@ def test_ensure_containerd_privilege_starts_helper_when_probe_fails(
     assert result["effective_mode"] == "sudo-helper"
     assert result["helper"]["started"] is True
     assert result["env"]["WORKERBEE_NERDCTL_BIN"].endswith("workerbee-nerdctl")
+
+
+def test_containerd_available_for_auto_accepts_unprivileged_probe(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "workerbee.containerd_helper.containerd_nerdctl_probe",
+        lambda _address=None: {"ok": True, "namespaces": ["default"]},
+    )
+
+    result = containerd_available_for_auto(state_root=tmp_path)
+
+    assert result["ok"] is True
+    assert result["selected"] == "containerd"
+    assert result["source"] == "unprivileged"
+
+
+def test_containerd_available_for_auto_accepts_responsive_helper(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "workerbee.containerd_helper.containerd_privilege_status",
+        lambda **_kwargs: {
+            "runtime": "containerd",
+            "effective_mode": "auto",
+            "helper": {
+                "responsive": True,
+                "socket": str(tmp_path / "global" / "containerd-helper.sock"),
+                "wrapper": str(tmp_path / "global" / "bin" / "workerbee-nerdctl"),
+            },
+            "unprivileged_probe": {"ok": False, "code": "CONTAINERD_SOCKET_PERMISSION_DENIED"},
+        },
+    )
+    monkeypatch.setattr(
+        "workerbee.containerd_helper.containerd_helper_nerdctl_probe",
+        lambda _root: {"ok": True, "namespaces": ["workerbee-demo"]},
+    )
+
+    result = containerd_available_for_auto(state_root=tmp_path)
+
+    assert result["ok"] is True
+    assert result["selected"] == "containerd"
+    assert result["source"] == "sudo-helper"
+
+
+def test_containerd_available_for_auto_does_not_start_helper(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        "workerbee.containerd_helper.containerd_nerdctl_probe",
+        lambda _address=None: {
+            "ok": False,
+            "code": "CONTAINERD_SOCKET_PERMISSION_DENIED",
+            "message": "permission denied",
+        },
+    )
+
+    def fail_start(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise AssertionError("auto availability check must not start sudo-helper")
+
+    monkeypatch.setattr("workerbee.containerd_helper.ensure_containerd_helper", fail_start)
+
+    result = containerd_available_for_auto(state_root=tmp_path)
+
+    assert result["ok"] is False
+    assert result["selected"] is None
+    assert result["error"]["code"] == "CONTAINERD_AUTO_UNAVAILABLE"
 
 
 def test_containerd_privilege_env_synthesizes_from_helper_status(tmp_path: Path) -> None:

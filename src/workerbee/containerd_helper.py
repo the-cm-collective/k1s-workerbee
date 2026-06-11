@@ -96,6 +96,96 @@ def containerd_privilege_status(
     return status
 
 
+def containerd_available_for_auto(
+    *,
+    state_root: Path,
+    mode: str = "auto",
+) -> dict[str, Any]:
+    """Report whether auto runtime selection can safely prefer direct containerd.
+
+    This is intentionally non-invasive: it accepts unprivileged containerd access
+    or an already responsive WorkerBee helper, but it does not start sudo-helper.
+    Explicit ``--runtime containerd`` remains the path that may start helper mode.
+    """
+
+    root = state_root.expanduser().resolve()
+    try:
+        raise_if_containerd_microk8s_conflict(address=containerd_address())
+    except WorkerBeeError as exc:
+        return {
+            "ok": False,
+            "selected": None,
+            "runtime": CONTAINERD_RUNTIME,
+            "state_root": str(root),
+            "source": "safety",
+            "error": exc.public_dict(),
+        }
+
+    status = containerd_privilege_status(
+        state_root=root,
+        runtime=CONTAINERD_RUNTIME,
+        mode=mode,
+    )
+    probe = status.get("unprivileged_probe")
+    if isinstance(probe, dict) and bool(probe.get("ok")):
+        return {
+            "ok": True,
+            "selected": CONTAINERD_RUNTIME,
+            "runtime": CONTAINERD_RUNTIME,
+            "state_root": str(root),
+            "source": "unprivileged",
+            "containerd_privilege": containerd_privilege_summary(status),
+        }
+
+    helper = status.get("helper")
+    if mode != "unprivileged" and isinstance(helper, dict) and bool(helper.get("responsive")):
+        helper_probe = containerd_helper_nerdctl_probe(root)
+        if helper_probe.get("ok"):
+            return {
+                "ok": True,
+                "selected": CONTAINERD_RUNTIME,
+                "runtime": CONTAINERD_RUNTIME,
+                "state_root": str(root),
+                "source": "sudo-helper",
+                "containerd_privilege": containerd_privilege_summary(status),
+            }
+        return {
+            "ok": False,
+            "selected": None,
+            "runtime": CONTAINERD_RUNTIME,
+            "state_root": str(root),
+            "source": "sudo-helper",
+            "error": {
+                "code": helper_probe.get("code") or "CONTAINERD_HELPER_PROBE_FAILED",
+                "message": helper_probe.get("message")
+                or helper_probe.get("error")
+                or "WorkerBee containerd helper could not access containerd",
+                "details": {"probe": helper_probe},
+                "retryable": True,
+            },
+        }
+
+    reason = "containerd is not available without starting helper"
+    if isinstance(probe, dict):
+        reason = str(probe.get("message") or probe.get("code") or reason)
+    return {
+        "ok": False,
+        "selected": None,
+        "runtime": CONTAINERD_RUNTIME,
+        "state_root": str(root),
+        "source": "unavailable",
+        "error": {
+            "code": "CONTAINERD_AUTO_UNAVAILABLE",
+            "message": reason,
+            "details": {
+                "unprivileged_probe": probe,
+                "helper": _helper_summary(helper) if isinstance(helper, dict) else None,
+            },
+            "retryable": True,
+        },
+    }
+
+
 def containerd_privilege_summary(privilege: dict[str, Any] | None) -> dict[str, Any] | None:
     """Return a normal-output summary without raw expected socket-denied probes."""
 

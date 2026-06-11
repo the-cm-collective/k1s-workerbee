@@ -22,7 +22,10 @@ try:
 except Exception:  # pragma: no cover - PyYAML is provided by the k1s runtime package
     yaml = None  # type: ignore[assignment]
 
-from workerbee.containerd_helper import remove_containerd_helper_tree
+from workerbee.containerd_helper import (
+    containerd_available_for_auto,
+    remove_containerd_helper_tree,
+)
 from workerbee.contract import WorkerBeeError
 from workerbee.http import request, wait_for_http
 from workerbee.ingress import ProjectIngressConfig
@@ -1236,6 +1239,11 @@ https://{api_host} {{
             existing = self.load_stack()
             if existing is not None:
                 return resolve_runtime(existing.runtime)
+            preferred = containerd_available_for_auto(
+                state_root=self.state_dir.parent.parent,
+            )
+            if preferred.get("ok"):
+                return CONTAINERD_RUNTIME
         return resolve_runtime(self.runtime_requested)
 
     def _ensure_network(self, runtime: str, network: str) -> None:

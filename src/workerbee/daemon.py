@@ -31,6 +31,7 @@ from workerbee.agent import (
     user_message_for_session,
 )
 from workerbee.containerd_helper import (
+    containerd_available_for_auto,
     containerd_privilege_env,
     containerd_privilege_status,
     containerd_privilege_summary,
@@ -2597,6 +2598,13 @@ class WorkerBeeDaemon:
         tmp.replace(self.registry_file)
 
     def _resolve_runtime(self) -> str:
+        if str(self.runtime_requested).lower() == "auto":
+            preferred = containerd_available_for_auto(
+                state_root=self.state_root,
+                mode=self.containerd_privilege,
+            )
+            if preferred.get("ok"):
+                return CONTAINERD_RUNTIME
         return resolve_runtime(self.runtime_requested)
 
     def _start_dns_server(self) -> dict[str, Any]:

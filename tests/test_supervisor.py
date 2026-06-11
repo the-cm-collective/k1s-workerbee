@@ -159,6 +159,19 @@ def test_resolve_runtime_prefers_existing_stack_runtime_when_auto(
     assert captured["requested"] == "containerd"
 
 
+def test_resolve_runtime_prefers_available_containerd_when_auto(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="auto")
+    monkeypatch.setattr(
+        "workerbee.supervisor.containerd_available_for_auto",
+        lambda **_kwargs: {"ok": True, "selected": "containerd"},
+    )
+
+    assert sup._resolve_runtime() == "containerd"  # noqa: SLF001
+
+
 def test_start_restarts_healthy_stack_when_requested_runtime_changes(
     tmp_path: Path,
     monkeypatch,

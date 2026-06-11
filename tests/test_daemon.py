@@ -173,6 +173,30 @@ def test_start_supervisor_prepares_containerd_privilege(
     }
 
 
+def test_daemon_auto_runtime_prefers_available_containerd(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(
+        state_root=tmp_path,
+        runtime="auto",
+        containerd_privilege="sudo-helper",
+    )
+    captured: dict[str, object] = {}
+
+    def fake_containerd_available_for_auto(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"ok": True, "selected": "containerd"}
+
+    monkeypatch.setattr(
+        "workerbee.daemon.containerd_available_for_auto",
+        fake_containerd_available_for_auto,
+    )
+
+    assert daemon._resolve_runtime() == "containerd"  # noqa: SLF001
+    assert captured == {"state_root": tmp_path, "mode": "sudo-helper"}
+
+
 def test_with_project_prepares_containerd_privilege_for_actions(
     tmp_path: Path,
     monkeypatch,

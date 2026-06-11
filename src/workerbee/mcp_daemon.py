@@ -10,13 +10,14 @@ import subprocess
 import sys
 import time
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from ipaddress import ip_address
 from pathlib import Path
 from typing import Any
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from workerbee.containerd_helper import (
+    containerd_available_for_auto,
     containerd_privilege_env,
     containerd_privilege_status,
     containerd_privilege_summary,
@@ -150,6 +151,20 @@ def _normalize_dns_upstreams(
     return tuple(value.strip() for value in values if value.strip())
 
 
+def _preferred_start_config(
+    config: MCPDaemonConfig,
+) -> tuple[MCPDaemonConfig, dict[str, Any] | None]:
+    if config.runtime.lower() != "auto":
+        return config, None
+    preference = containerd_available_for_auto(
+        state_root=config.state_root,
+        mode=config.containerd_privilege,
+    )
+    if preference.get("ok"):
+        return replace(config, runtime=CONTAINERD_RUNTIME), preference
+    return config, preference
+
+
 def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[str, Any]:
     try:
         require_mcp_loopback_or_opt_in(
@@ -164,12 +179,16 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
         return _start_error(config, exc, code="INGRESS_CONFIG_INVALID")
     status = mcp_daemon_status(config)
     if status["running"]:
-        if config.runtime == CONTAINERD_RUNTIME:
+        runtime = str(status.get("runtime") or config.runtime)
+        privilege_mode = str(
+            status.get("containerd_privilege_mode") or config.containerd_privilege
+        )
+        if runtime == CONTAINERD_RUNTIME:
             try:
                 privilege = ensure_containerd_privilege(
                     state_root=config.state_root,
-                    runtime=config.runtime,
-                    mode=config.containerd_privilege,
+                    runtime=runtime,
+                    mode=privilege_mode,
                 )
             except Exception as exc:  # noqa: BLE001
                 return _start_error(config, exc, code="CONTAINERD_PRIVILEGE_FAILED")
@@ -209,18 +228,19 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
             "error": dns_port_check["error"],
             "orphan_cleanup": orphan_cleanup,
         }
+    start_config, auto_runtime_preference = _preferred_start_config(config)
     config.global_dir.mkdir(parents=True, exist_ok=True)
     try:
         privilege = ensure_containerd_privilege(
-            state_root=config.state_root,
-            runtime=config.runtime,
-            mode=config.containerd_privilege,
+            state_root=start_config.state_root,
+            runtime=start_config.runtime,
+            mode=start_config.containerd_privilege,
         )
     except Exception as exc:  # noqa: BLE001
-        return _start_error(config, exc, code="CONTAINERD_PRIVILEGE_FAILED")
+        return _start_error(start_config, exc, code="CONTAINERD_PRIVILEGE_FAILED")
     if privilege.get("ok") is False:
         return _start_error(
-            config,
+            start_config,
             WorkerBeeError(
                 code="CONTAINERD_PRIVILEGE_FAILED",
                 message="WorkerBee containerd privilege setup did not complete",
@@ -235,30 +255,30 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
     child_privilege_mode = (
         "unprivileged"
         if privilege.get("effective_mode") == "sudo-helper"
-        else config.containerd_privilege
+        else start_config.containerd_privilege
     )
     allow_remote_mcp = remote_mcp_allowed(config.allow_remote_mcp)
     child_env = os.environ.copy()
     child_env.update(containerd_privilege_env(privilege))
-    log = open(config.log_file, "ab")  # noqa: SIM115 - passed to daemon child
+    log = open(start_config.log_file, "ab")  # noqa: SIM115 - passed to daemon child
     argv = [
         sys.executable,
         "-m",
         "workerbee",
         "--state-root",
-        str(config.state_root),
+        str(start_config.state_root),
         "--runtime",
-        config.runtime,
+        start_config.runtime,
         "--containerd-privilege",
         child_privilege_mode,
         "--project",
-        config.project,
+        start_config.project,
         "mcp",
         "serve",
         "--host",
-        config.host,
+        start_config.host,
         "--port",
-        str(config.port),
+        str(start_config.port),
         "--ingress-exposure",
         ingress_settings.exposure,
         "--ingress-domain",
@@ -298,19 +318,20 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
     except Exception as exc:  # noqa: BLE001
         if _helper_started(privilege):
             with suppress(Exception):
-                stop_containerd_helper(config.state_root)
-        return _start_error(config, exc, code="MCP_SPAWN_FAILED")
+                stop_containerd_helper(start_config.state_root)
+        return _start_error(start_config, exc, code="MCP_SPAWN_FAILED")
     finally:
         log.close()
     metadata = {
         "pid": int(proc.pid),
         "argv": argv,
-        "state_root": str(config.state_root),
-        "runtime": config.runtime,
-        "project": config.project,
-        "host": config.host,
-        "port": config.port,
-        "containerd_privilege_mode": config.containerd_privilege,
+        "state_root": str(start_config.state_root),
+        "runtime": start_config.runtime,
+        "requested_runtime": config.runtime,
+        "project": start_config.project,
+        "host": start_config.host,
+        "port": start_config.port,
+        "containerd_privilege_mode": start_config.containerd_privilege,
         "allow_remote_mcp": allow_remote_mcp,
         "ingress_exposure": ingress_settings.exposure,
         "ingress_domain": ingress_settings.base_domain,
@@ -318,19 +339,20 @@ def start_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 45.0) -> dict[
         "ingress_ca_port": ingress_settings.ca_http_port,
         "ingress_dns": ingress_settings.dns.public_dict(),
         "containerd_privilege": privilege,
-        "mcp_url": config.mcp_url,
-        "log_file": str(config.log_file),
+        "auto_runtime_preference": auto_runtime_preference,
+        "mcp_url": start_config.mcp_url,
+        "log_file": str(start_config.log_file),
         "started_at": time.time(),
     }
-    _write_metadata(config.metadata_file, metadata)
+    _write_metadata(start_config.metadata_file, metadata)
     try:
-        ready = _wait_ready(config, timeout=timeout)
+        ready = _wait_ready(start_config, timeout=timeout)
     except Exception as exc:  # noqa: BLE001
-        _cleanup_failed_start(config, privilege)
-        return _start_error(config, exc, code="MCP_NOT_READY")
+        _cleanup_failed_start(start_config, privilege)
+        return _start_error(start_config, exc, code="MCP_NOT_READY")
     metadata.update(ready)
-    _write_metadata(config.metadata_file, metadata)
-    return {**mcp_daemon_status(config), "ok": True, "started": True}
+    _write_metadata(start_config.metadata_file, metadata)
+    return {**mcp_daemon_status(start_config), "ok": True, "started": True}
 
 
 def stop_mcp_daemon(config: MCPDaemonConfig, *, timeout: float = 10.0) -> dict[str, Any]:

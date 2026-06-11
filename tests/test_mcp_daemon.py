@@ -107,6 +107,65 @@ def test_start_mcp_daemon_writes_detached_workerbee_argv(
     assert metadata["ingress_exposure"] == "loopback"
 
 
+def test_start_mcp_daemon_prefers_available_containerd_for_auto(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: dict[str, Any] = {}
+
+    class FakePopen:
+        pid = 4321
+
+        def __init__(self, argv: list[str], **kwargs: Any) -> None:
+            calls["argv"] = argv
+            calls["kwargs"] = kwargs
+
+    config = MCPDaemonConfig(
+        state_root=tmp_path,
+        runtime="auto",
+        project="demo",
+        port=9876,
+        containerd_privilege="sudo-helper",
+    )
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.containerd_available_for_auto",
+        lambda **_kwargs: {"ok": True, "selected": "containerd", "source": "sudo-helper"},
+    )
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.ensure_containerd_privilege",
+        lambda **_kwargs: {
+            "ok": True,
+            "effective_mode": "sudo-helper",
+            "helper": {"started": False},
+            "env": {"WORKERBEE_NERDCTL_BIN": str(tmp_path / "workerbee-nerdctl")},
+        },
+    )
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.containerd_privilege_status",
+        lambda **_kwargs: {"enabled": True, "helper": {"responsive": True}},
+    )
+    monkeypatch.setattr("workerbee.mcp_daemon.subprocess.Popen", FakePopen)
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon._wait_ready",
+        lambda _config, **_kwargs: _ready_payload(),
+    )
+    monkeypatch.setattr("workerbee.mcp_daemon._pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr("workerbee.mcp_daemon._pid_matches_metadata", lambda *_args: True)
+
+    result = start_mcp_daemon(config, timeout=1)
+
+    assert result["ok"] is True
+    assert calls["argv"][calls["argv"].index("--runtime") + 1] == "containerd"
+    assert calls["argv"][calls["argv"].index("--containerd-privilege") + 1] == (
+        "unprivileged"
+    )
+    assert calls["kwargs"]["env"]["WORKERBEE_NERDCTL_BIN"].endswith("workerbee-nerdctl")
+    metadata = json.loads(config.metadata_file.read_text(encoding="utf-8"))
+    assert metadata["runtime"] == "containerd"
+    assert metadata["requested_runtime"] == "auto"
+    assert metadata["auto_runtime_preference"]["source"] == "sudo-helper"
+
+
 def test_start_mcp_daemon_writes_dns_argv_and_metadata(
     tmp_path: Path,
     monkeypatch,
@@ -662,6 +721,56 @@ def test_start_mcp_daemon_refreshes_helper_when_containerd_daemon_is_running(
     assert result["started"] is False
     assert result["containerd_privilege_mode"] == "sudo-helper"
     assert privilege_calls == [tmp_path]
+
+
+def test_start_mcp_daemon_refreshes_helper_for_auto_containerd_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = MCPDaemonConfig(
+        state_root=tmp_path,
+        runtime="auto",
+        project="demo",
+        port=9876,
+        containerd_privilege="sudo-helper",
+    )
+    config.global_dir.mkdir(parents=True)
+    config.metadata_file.write_text(
+        json.dumps(
+            {
+                "pid": 4321,
+                "state_root": str(tmp_path),
+                "runtime": "containerd",
+                "requested_runtime": "auto",
+                "containerd_privilege_mode": "sudo-helper",
+            }
+        ),
+        encoding="utf-8",
+    )
+    privilege_calls: list[tuple[str, str]] = []
+    monkeypatch.setattr("workerbee.mcp_daemon._pid_alive", lambda pid: pid == 4321)
+    monkeypatch.setattr("workerbee.mcp_daemon._pid_matches_metadata", lambda *_args: True)
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.ensure_containerd_privilege",
+        lambda *, runtime, mode, **_kwargs: privilege_calls.append((runtime, mode))
+        or {"effective_mode": "sudo-helper", "helper": {"responsive": True}},
+    )
+    monkeypatch.setattr(
+        "workerbee.mcp_daemon.containerd_privilege_status",
+        lambda **_kwargs: {"enabled": True, "helper": {"responsive": True}},
+    )
+
+    def fail_popen(*_args, **_kwargs):
+        raise AssertionError("running daemon must not spawn a second daemon")
+
+    monkeypatch.setattr("workerbee.mcp_daemon.subprocess.Popen", fail_popen)
+
+    result = start_mcp_daemon(config, timeout=1)
+
+    assert result["ok"] is True
+    assert result["started"] is False
+    assert result["runtime"] == "containerd"
+    assert privilege_calls == [("containerd", "sudo-helper")]
 
 
 def test_stop_mcp_daemon_removes_metadata_after_process_stop(
