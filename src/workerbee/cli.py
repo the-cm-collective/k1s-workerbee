@@ -284,8 +284,22 @@ def build_parser() -> argparse.ArgumentParser:
     ingress = sub.add_parser("ingress", help="Inspect WorkerBee global ingress")
     ingress_sub = ingress.add_subparsers(dest="ingress_cmd", required=True)
     ingress_sub.add_parser("status", help="Show global ingress status")
-    ingress_ca = ingress_sub.add_parser("ca", help="Export the WorkerBee Caddy CA")
+    ingress_ca = ingress_sub.add_parser(
+        "ca",
+        help="Export or explicitly regenerate the WorkerBee Caddy CA",
+    )
+    ingress_ca.add_argument(
+        "ca_action",
+        nargs="?",
+        choices=["export", "regenerate"],
+        default="export",
+    )
     ingress_ca.add_argument("--output", "-o", type=Path, default=Path("workerbee-ca.crt"))
+    ingress_ca.add_argument(
+        "--confirm-regenerate",
+        action="store_true",
+        help="Confirm intentional WorkerBee ingress CA rotation and trust update.",
+    )
     trust = sub.add_parser("trust", help="Manage explicit local CA trust")
     trust_sub = trust.add_subparsers(dest="trust_cmd", required=True)
     trust_sub.add_parser("status", help="Show local CA trust status")
@@ -835,6 +849,17 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 return _print(daemon.global_dashboard(), json_out=args.json)
             if args.ingress_cmd == "ca":
+                if args.ca_action == "regenerate":
+                    daemon = WorkerBeeDaemon(
+                        state_root=root,
+                        runtime=args.runtime,
+                        containerd_privilege=containerd_privilege,
+                        cwd=args.cwd,
+                    )
+                    return _print(
+                        daemon.ingress_ca_regenerate(confirm=bool(args.confirm_regenerate)),
+                        json_out=args.json,
+                    )
                 return _print(
                     export_global_ingress_ca(root, output=args.output, runtime=args.runtime),
                     json_out=args.json,
@@ -1294,11 +1319,14 @@ def _print_ca_guidance(payload: dict[str, Any]) -> None:
     if not commands:
         return
     export = commands.get("export")
+    regenerate = commands.get("regenerate")
     trust_system = commands.get("trust_system") or commands.get("install_system")
     trust_nss = commands.get("trust_nss") or commands.get("install_nss")
     download_curl = commands.get("download_curl")
     if export:
         print(f"ca export: {export}")
+    if regenerate:
+        print(f"ca regenerate: {regenerate}")
     if trust_system:
         print(f"local trust: {trust_system}")
     if trust_nss:

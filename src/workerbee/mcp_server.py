@@ -240,6 +240,15 @@ def serve_mcp(
         return protect("IngressStatus", None, daemon.global_dashboard)
 
     @mcp.tool()
+    def workerbee_v1_ingress_ca_regenerate(confirm: bool = False) -> dict[str, Any]:
+        """Explicitly regenerate WorkerBee global ingress CA after confirmation."""
+        return protect(
+            "IngressCARegenerate",
+            None,
+            lambda: daemon.ingress_ca_regenerate(confirm=confirm),
+        )
+
+    @mcp.tool()
     def workerbee_v1_secret_policy_status(project: str = "default") -> dict[str, Any]:
         """Return secure-by-default secret policy status for a WorkerBee project."""
         return protect(

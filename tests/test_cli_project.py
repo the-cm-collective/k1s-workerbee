@@ -207,7 +207,24 @@ def test_ingress_ca_parser_accepts_output(tmp_path: Path) -> None:
 
     assert args.cmd == "ingress"
     assert args.ingress_cmd == "ca"
+    assert args.ca_action == "export"
     assert args.output == tmp_path / "workerbee-ca.crt"
+
+
+def test_ingress_ca_parser_accepts_regenerate() -> None:
+    args = build_parser().parse_args(
+        [
+            "ingress",
+            "ca",
+            "regenerate",
+            "--confirm-regenerate",
+        ]
+    )
+
+    assert args.cmd == "ingress"
+    assert args.ingress_cmd == "ca"
+    assert args.ca_action == "regenerate"
+    assert args.confirm_regenerate is True
 
 
 def test_config_set_parses_user_level_defaults(tmp_path: Path) -> None:
@@ -385,6 +402,49 @@ def test_ingress_ca_exports_ready_ca(tmp_path: Path, capsys) -> None:
     assert f"ca exported: {output}" in text
     assert f"ca source: {ca}" in text
     assert "ca url: http://ca.workerbee.home.arpa:19080/workerbee-ca.crt" in text
+
+
+def test_ingress_ca_regenerate_dispatches_to_daemon(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeDaemon:
+        def __init__(self, **kwargs: object) -> None:
+            captured["state_root"] = kwargs["state_root"]
+            captured["runtime"] = kwargs["runtime"]
+
+        def ingress_ca_regenerate(self, *, confirm: bool = False) -> dict[str, object]:
+            captured["confirm"] = confirm
+            return {
+                "ok": True,
+                "regenerated": True,
+                "old_ca_sha256": "old",
+                "new_ca_sha256": "new",
+            }
+
+    monkeypatch.setattr(cli, "WorkerBeeDaemon", FakeDaemon)
+
+    rc = cli.main(
+        [
+            "--json",
+            "--state-root",
+            str(tmp_path),
+            "ingress",
+            "ca",
+            "regenerate",
+            "--confirm-regenerate",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert rc == 0
+    assert payload["regenerated"] is True
+    assert captured["state_root"] == tmp_path
+    assert captured["runtime"] == "docker"
+    assert captured["confirm"] is True
 
 
 def test_mcp_status_prints_ca_guidance_for_lan_mode(

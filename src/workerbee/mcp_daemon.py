@@ -977,6 +977,12 @@ def _metadata_runtime(config: MCPDaemonConfig, metadata: dict[str, Any]) -> str:
     return str(metadata.get("runtime") or config.runtime)
 
 
+def _existing_ingress_runtime(config: MCPDaemonConfig, fallback: str) -> str:
+    ingress = load_global_ingress_info(config.state_root) or {}
+    runtime = str(ingress.get("runtime") or "").strip()
+    return runtime or fallback
+
+
 def _metadata_privilege_mode(config: MCPDaemonConfig, metadata: dict[str, Any]) -> str:
     return str(metadata.get("containerd_privilege_mode") or config.containerd_privilege)
 
@@ -989,10 +995,7 @@ def _metadata_privilege_env(metadata: dict[str, Any]) -> dict[str, str]:
 
 
 def _ensure_stop_privilege(config: MCPDaemonConfig) -> dict[str, Any] | None:
-    runtime = config.runtime
-    if runtime != CONTAINERD_RUNTIME:
-        ingress = load_global_ingress_info(config.state_root) or {}
-        runtime = str(ingress.get("runtime") or runtime)
+    runtime = _existing_ingress_runtime(config, config.runtime)
     if runtime != CONTAINERD_RUNTIME:
         return None
     return ensure_containerd_privilege(
@@ -1050,10 +1053,12 @@ def _global_ingress_stop_result(
     metadata: dict[str, Any],
     cleanup_result: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
-    runtime = _metadata_runtime(config, metadata)
+    runtime = _existing_ingress_runtime(config, _metadata_runtime(config, metadata))
+    ingress = cleanup_result.get("ingress") if isinstance(cleanup_result, dict) else None
+    if isinstance(ingress, dict):
+        return ingress
     if runtime == CONTAINERD_RUNTIME:
-        ingress = cleanup_result.get("ingress") if isinstance(cleanup_result, dict) else None
-        return ingress if isinstance(ingress, dict) else None
+        return None
     return _stop_global_ingress(config, metadata)
 
 
@@ -1063,10 +1068,7 @@ def _stop_global_ingress(
 ) -> dict[str, Any]:
     from workerbee.daemon import WorkerBeeDaemon
 
-    runtime = _metadata_runtime(config, metadata)
-    if not metadata:
-        ingress = load_global_ingress_info(config.state_root) or {}
-        runtime = str(ingress.get("runtime") or runtime)
+    runtime = _existing_ingress_runtime(config, _metadata_runtime(config, metadata))
     with temporary_containerd_privilege_env(_metadata_privilege_env(metadata)):
         try:
             daemon = WorkerBeeDaemon(

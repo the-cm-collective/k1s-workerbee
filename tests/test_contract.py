@@ -20,6 +20,7 @@ def test_contract_tool_names_are_v1_only() -> None:
     assert "workerbee_start" not in MCP_TOOL_NAMES
     assert "workerbee_v1_session_start" in MCP_TOOL_NAMES
     assert "workerbee_v1_ingress_status" in MCP_TOOL_NAMES
+    assert "workerbee_v1_ingress_ca_regenerate" in MCP_TOOL_NAMES
     assert "workerbee_v1_ingress_probe" in MCP_TOOL_NAMES
     assert "workerbee_v1_security_assess" in MCP_TOOL_NAMES
     assert "workerbee_v1_security_review_project" in MCP_TOOL_NAMES

@@ -2484,11 +2484,16 @@ def test_global_ingress_public_dict_treats_unreadable_ca_as_not_ready(
 
 
 def test_global_ingress_status_reports_missing_metadata(tmp_path: Path) -> None:
-    assert global_ingress_status(tmp_path) == {
+    status = global_ingress_status(tmp_path)
+
+    assert status == {
         "enabled": False,
         "running": False,
         "stale": False,
         "state_root": str(tmp_path.resolve()),
+        "ca_persistent": True,
+        "ca_rotation_required": False,
+        "ca_regenerate_command": "workerbee ingress ca regenerate --confirm-regenerate",
     }
 
 
@@ -2909,6 +2914,11 @@ def test_global_ingress_start_recovers_caddy_ca_mismatch_once(
     monkeypatch.setattr(ingress, "_export_ca_bundle", fake_export)
     monkeypatch.setattr(ingress, "stop", lambda: calls.append("stop") or {"ok": True})
     monkeypatch.setattr(
+        ingress,
+        "_purge_caddy_state",
+        lambda: (_ for _ in ()).throw(AssertionError("CA recovery must not purge state")),
+    )
+    monkeypatch.setattr(
         "workerbee.ingress._global_dashboard_health_probe",
         lambda _info: next(probes),
     )
@@ -2916,7 +2926,7 @@ def test_global_ingress_start_recovers_caddy_ca_mismatch_once(
     ingress.start()
 
     assert calls == ["ensure", "wait", "export", "stop", "ensure", "wait", "export"]
-    assert not stale.exists()
+    assert stale.exists()
     assert ingress.caddy_data.is_dir()
     assert ingress.ca_bundle.is_file()
 
@@ -2975,10 +2985,103 @@ def test_global_ingress_start_reports_ca_recovery_failure(
 
     message = str(exc_info.value)
     assert "certificate trusted by its exported CA" in message
+    assert "non-destructive recovery attempt" in message
+    assert "workerbee ingress ca regenerate --confirm-regenerate" in message
+    assert '"ca_rotation_required": true' in message
     assert "certificate verify failed" in message
     assert str(ingress.ca_bundle) in message
     assert ingress.container in message
     assert "19443" in message
+
+
+def test_global_ingress_ca_regenerate_purges_explicitly(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    stale = ingress.caddy_data / "old-root"
+    stale.parent.mkdir(parents=True)
+    stale.write_text("old", encoding="utf-8")
+    ingress.ca_bundle.write_text("old-ca", encoding="utf-8")
+    calls: list[str] = []
+
+    def fake_export() -> None:
+        calls.append("export")
+        ingress.ca_bundle.write_text("new-ca", encoding="utf-8")
+
+    monkeypatch.setattr(ingress, "stop", lambda: calls.append("stop") or {"ok": True})
+    monkeypatch.setattr(ingress, "_ensure_caddy_container", lambda: calls.append("ensure"))
+    monkeypatch.setattr(ingress, "_wait_ready", lambda: calls.append("wait"))
+    monkeypatch.setattr(ingress, "_export_ca_bundle", fake_export)
+    monkeypatch.setattr(
+        "workerbee.ingress._global_dashboard_health_probe",
+        lambda _info: {"ok": True, "tls_verified": True},
+    )
+
+    result = ingress.regenerate_ca(projects=["alpha"])
+
+    assert result["ok"] is True
+    assert result["regenerated"] is True
+    assert result["old_ca_sha256"] != result["new_ca_sha256"]
+    assert result["trust_update_required"] is True
+    assert result["ca_persistent"] is True
+    assert result["ca_rotation_required"] is False
+    assert not stale.exists()
+    assert ingress.ca_bundle.read_text(encoding="utf-8") == "new-ca"
+    assert ingress.info_file.is_file()
+    assert calls == ["stop", "ensure", "wait", "export"]
+
+
+def test_daemon_ingress_ca_regenerate_requires_confirmation(tmp_path: Path) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="podman")
+
+    with pytest.raises(WorkerBeeError) as exc_info:
+        daemon.ingress_ca_regenerate()
+
+    assert exc_info.value.code == "INGRESS_CA_REGEN_CONFIRM_REQUIRED"
+    assert "--confirm-regenerate" in str(exc_info.value.remediation)
+
+
+def test_stop_global_ingress_uses_recorded_runtime(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    global_dir = tmp_path / "global"
+    global_dir.mkdir()
+    (global_dir / "ingress.json").write_text(
+        json.dumps(
+            {
+                "runtime": "podman",
+                "caddy_container": "workerbee-caddy-test",
+                "https_port": 19443,
+                "dashboard_port": 18090,
+            }
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    class FakeIngress:
+        def __init__(self, **kwargs: object) -> None:
+            captured["runtime"] = kwargs["runtime"]
+
+        def stop(self) -> dict[str, object]:
+            return {"ok": True, "container": "workerbee-caddy-test"}
+
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="auto")
+    monkeypatch.setattr(daemon, "_resolve_runtime", lambda: "containerd")
+    monkeypatch.setattr("workerbee.daemon.GlobalIngress", FakeIngress)
+
+    result = daemon.stop_global_ingress()
+
+    assert result["stopped"] is True
+    assert result["runtime"] == "podman"
+    assert captured["runtime"] == "podman"
 
 
 class _FakeDashboardHandler:

@@ -34,6 +34,7 @@ DEFAULT_INGRESS_DOMAIN = "workerbee.localhost"
 DEFAULT_INGRESS_CA_HTTP_PORT = 19080
 INGRESS_BIND_LOOPBACK = "127.0.0.1"
 INGRESS_BIND_LAN = "0.0.0.0"  # noqa: S104 - explicit LAN ingress bind address
+INGRESS_CA_REGENERATE_COMMAND = "workerbee ingress ca regenerate --confirm-regenerate"
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +121,9 @@ class GlobalIngressInfo:
         data["ca_ready"] = ca_ready
         data["ca_sha256"] = _safe_sha256(ca) if ca_ready else None
         data["ca_commands"] = ca_command_guidance(data) if ca_ready else {}
+        data["ca_persistent"] = True
+        data.setdefault("ca_rotation_required", False)
+        data["ca_regenerate_command"] = INGRESS_CA_REGENERATE_COMMAND
         return data
 
 
@@ -297,6 +301,64 @@ class GlobalIngress:
             "container": self.container,
             "returncode": proc.returncode,
             "stdout": proc.stdout.strip(),
+        }
+
+    def regenerate_ca(self, *, projects: list[str] | None = None) -> dict[str, Any]:
+        old_sha = _safe_sha256(self.ca_bundle) if _safe_is_file(self.ca_bundle) else None
+        stop_result = self.stop()
+        if not stop_result.get("ok"):
+            raise RuntimeError(
+                "failed to stop WorkerBee Caddy before CA regeneration: "
+                f"{stop_result}"
+            )
+        purge_result = self._purge_caddy_state()
+        self.global_dir.mkdir(parents=True, exist_ok=True)
+        self.projects_dir.mkdir(parents=True, exist_ok=True)
+        self.caddy_data.mkdir(parents=True, exist_ok=True)
+        self._write_caddyfile(projects or [])
+        self._ensure_caddy_container()
+        self._wait_ready()
+        self._export_ca_bundle()
+        verification = self._verified_dashboard_health_probe()
+        if not verification.get("ok"):
+            recovery = {
+                "ok": False,
+                "reason": "caddy CA verification failed after explicit regeneration",
+                "container": self.container,
+                "https_port": self.https_port,
+                "ca_bundle": str(self.ca_bundle),
+                "stop": stop_result,
+                "purge": purge_result,
+                "verification": verification,
+                "ca_rotation_required": True,
+                "regenerate_command": INGRESS_CA_REGENERATE_COMMAND,
+            }
+            raise RuntimeError(_caddy_ca_verification_error(recovery))
+        info = self.info()
+        self.info_file.write_text(json.dumps(info.public_dict(), indent=2), encoding="utf-8")
+        new_sha = _safe_sha256(self.ca_bundle) if _safe_is_file(self.ca_bundle) else None
+        public = info.public_dict()
+        return {
+            "ok": True,
+            "regenerated": True,
+            "state_root": str(self.state_root),
+            "runtime": self.runtime,
+            "container": self.container,
+            "ca_bundle": str(self.ca_bundle),
+            "old_ca_sha256": old_sha,
+            "new_ca_sha256": new_sha,
+            "trust_update_required": bool(new_sha and old_sha != new_sha),
+            "ca_persistent": True,
+            "ca_rotation_required": False,
+            "ca_regenerate_command": INGRESS_CA_REGENERATE_COMMAND,
+            "stop": stop_result,
+            "purge": purge_result,
+            "verification": verification,
+            "dashboard_url": public.get("dashboard_url"),
+            "ca_download_url": public.get("ca_download_url"),
+            "dashboard_ca_download_url": public.get("dashboard_ca_download_url"),
+            "dashboard_ca_sha256_url": public.get("dashboard_ca_sha256_url"),
+            "ca_commands": ca_command_guidance(public),
         }
 
     def stop(self) -> dict[str, Any]:
@@ -576,6 +638,9 @@ https://{self.dashboard_host} {{
             "https_port": self.https_port,
             "ca_bundle": str(self.ca_bundle),
             "initial_probe": initial_probe,
+            "ca_persistent": True,
+            "ca_rotation_required": False,
+            "regenerate_command": INGRESS_CA_REGENERATE_COMMAND,
         }
         try:
             stop_result = self.stop()
@@ -585,7 +650,11 @@ https://{self.dashboard_host} {{
                     "failed to stop WorkerBee Caddy before CA recovery: "
                     f"{stop_result}"
                 )
-            recovery["purge"] = self._purge_caddy_state()
+            recovery["purge"] = {
+                "skipped": True,
+                "reason": "WorkerBee preserves Caddy CA state by default",
+            }
+            recovery["preserved_caddy_data"] = True
             self.caddy_data.mkdir(parents=True, exist_ok=True)
             self._ensure_caddy_container()
             self._wait_ready()
@@ -593,9 +662,12 @@ https://{self.dashboard_host} {{
             verification = self._verified_dashboard_health_probe()
             recovery["verification"] = verification
             recovery["ok"] = bool(verification.get("ok"))
+            if not recovery["ok"]:
+                recovery["ca_rotation_required"] = True
             return recovery
         except Exception as exc:  # noqa: BLE001 - include recovery details in startup error
             recovery["error"] = str(exc)
+            recovery["ca_rotation_required"] = True
             return recovery
 
     def _purge_caddy_state(self) -> dict[str, Any]:
@@ -664,6 +736,7 @@ def load_global_ingress_info(state_root: Path) -> dict[str, Any] | None:
 def ca_command_guidance(info: dict[str, Any]) -> dict[str, str]:
     commands = {
         "export": "workerbee ingress ca --output workerbee-ca.crt",
+        "regenerate": INGRESS_CA_REGENERATE_COMMAND,
         "trust_system": "workerbee trust install --target system",
         "trust_nss": "workerbee trust install --target nss",
     }
@@ -735,6 +808,9 @@ def global_ingress_status(state_root: Path, *, runtime: str = "auto") -> dict[st
             "running": False,
             "stale": False,
             "state_root": str(root),
+            "ca_persistent": True,
+            "ca_rotation_required": False,
+            "ca_regenerate_command": INGRESS_CA_REGENERATE_COMMAND,
         }
     selected = str(info.get("runtime") or "")
     if not selected:
@@ -768,6 +844,9 @@ def global_ingress_status(state_root: Path, *, runtime: str = "auto") -> dict[st
         "stale": not bool(running),
         "ca_ready": ca_ready,
         "ca_sha256": _safe_sha256(ca) if ca_ready else None,
+        "ca_persistent": True,
+        "ca_rotation_required": False,
+        "ca_regenerate_command": INGRESS_CA_REGENERATE_COMMAND,
         "dashboard_ca_download_url": info.get("dashboard_ca_download_url")
         or _dashboard_ca_download_url(str(info.get("dashboard_url") or "")),
         "dashboard_ca_sha256_url": info.get("dashboard_ca_sha256_url")
@@ -963,7 +1042,10 @@ def _caddy_ca_verification_error(recovery: dict[str, Any]) -> str:
     details = json.dumps(recovery, indent=2, sort_keys=True, default=str)
     return (
         "WorkerBee Caddy did not serve a certificate trusted by its exported CA "
-        "after one recovery attempt.\n"
+        "after one non-destructive recovery attempt. WorkerBee preserves the "
+        "Caddy CA across restarts by default. To intentionally rotate the local "
+        f"WorkerBee CA, run `{INGRESS_CA_REGENERATE_COMMAND}` and reinstall trust "
+        "where needed.\n"
         f"{details}"
     )
 

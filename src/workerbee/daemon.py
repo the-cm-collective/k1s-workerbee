@@ -48,6 +48,7 @@ from workerbee.ingress import (
     IngressSettings,
     ProjectIngressConfig,
     global_ingress_status,
+    load_global_ingress_info,
     resolve_ingress_settings,
 )
 from workerbee.locks import FileLock, project_lock_path, state_root_lock_path
@@ -2136,7 +2137,7 @@ class WorkerBeeDaemon:
 
     def stop_global_ingress(self) -> dict[str, Any]:
         self._stop_dns_server()
-        runtime = self._resolve_runtime()
+        runtime = self._global_ingress_runtime()
         ingress = GlobalIngress(
             state_root=self.state_root,
             runtime=runtime,
@@ -2148,6 +2149,24 @@ class WorkerBeeDaemon:
         if self.ingress is not None:
             return global_ingress_status(self.state_root, runtime=self.ingress.runtime)
         return global_ingress_status(self.state_root, runtime=self.runtime_requested)
+
+    def ingress_ca_regenerate(self, *, confirm: bool = False) -> dict[str, Any]:
+        if not confirm:
+            raise WorkerBeeError(
+                code="INGRESS_CA_REGEN_CONFIRM_REQUIRED",
+                message="WorkerBee ingress CA regeneration requires explicit confirmation.",
+                remediation=(
+                    "Run `workerbee ingress ca regenerate --confirm-regenerate` or "
+                    "call workerbee_v1_ingress_ca_regenerate(confirm=true)."
+                ),
+            )
+        runtime = self._global_ingress_runtime()
+        ingress = GlobalIngress(
+            state_root=self.state_root,
+            runtime=runtime,
+            ingress_settings=self.ingress_settings,
+        )
+        return ingress.regenerate_ca(projects=self._known_projects())
 
     def ingress_probe(
         self,
@@ -2564,6 +2583,13 @@ class WorkerBeeDaemon:
         if self.projects_dir.is_dir():
             project_names.update(path.name for path in self.projects_dir.iterdir() if path.is_dir())
         return sorted(project_names)
+
+    def _global_ingress_runtime(self) -> str:
+        info = load_global_ingress_info(self.state_root) or {}
+        runtime = str(info.get("runtime") or "").strip()
+        if runtime:
+            return runtime
+        return self._resolve_runtime()
 
     def _sync_ingress_projects(self) -> dict[str, Any]:
         ingress = self._active_ingress()
