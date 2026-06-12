@@ -83,10 +83,70 @@ def test_session_start_persists_cwd_and_lazy_mode(
     assert result["project_identity"]["explicit_project"] is False
     assert result["project_status"]["running"] is False
     assert result["runbook"]["title"] == "WorkerBee Cloud-Native Loop"
+    assert result["project_runbook"]["exists"] is True
+    assert result["project_runbook"]["markdown_path"].endswith(
+        "/artifacts/runbooks/project-runbook.md"
+    )
+    assert Path(result["project_runbook"]["markdown_path"]).is_file()
+    assert result["project_status"]["project_runbook"]["exists"] is True
     records = daemon._read_registry()  # noqa: SLF001 - verifies persisted session metadata
     assert records[result["project"]]["cwd_hint"] == str(cwd.resolve())
     assert result["runbook"]["first_run"]
     assert result["runbook"]["security_review"]
+
+
+def test_session_start_preserves_existing_project_runbook(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    cwd = tmp_path / "checkout"
+    cwd.mkdir()
+    daemon = WorkerBeeDaemon(state_root=tmp_path / "state", cwd=tmp_path)
+
+    first = daemon.session_start(cwd=cwd, project="demo")
+    runbook_path = Path(first["project_runbook"]["markdown_path"])
+    runbook_path.write_text("# Custom project runbook\n\nKeep this path.\n", encoding="utf-8")
+
+    second = daemon.session_start(cwd=cwd, project="demo")
+
+    assert second["project_runbook"]["markdown_path"] == str(runbook_path)
+    assert runbook_path.read_text(encoding="utf-8") == "# Custom project runbook\n\nKeep this path.\n"
+
+
+def test_project_status_backfills_missing_runbook_for_existing_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    cwd = tmp_path / "checkout"
+    cwd.mkdir()
+    daemon = WorkerBeeDaemon(state_root=tmp_path / "state", cwd=tmp_path)
+    daemon._register_project(  # noqa: SLF001 - simulates a project registered before runbooks
+        "legacy",
+        cwd_hint=str(cwd),
+        git_root=str(cwd),
+        git_branch="dev",
+        explicit_project=True,
+    )
+
+    runbook_path = (
+        tmp_path
+        / "state"
+        / "projects"
+        / "legacy"
+        / "artifacts"
+        / "runbooks"
+        / "project-runbook.md"
+    )
+    assert not runbook_path.exists()
+
+    status = daemon.project_status("legacy")
+
+    assert status["project_runbook"]["exists"] is True
+    assert Path(status["project_runbook"]["markdown_path"]) == runbook_path
+    assert runbook_path.is_file()
+    assert "WorkerBee Project Runbook - legacy" in runbook_path.read_text(encoding="utf-8")
 
 
 def test_agent_instructions_include_first_run_security_review_guidance() -> None:
@@ -98,6 +158,9 @@ def test_agent_instructions_include_first_run_security_review_guidance() -> None
     assert "workerbee_v1_project_status" in instructions
     assert "security review" in instructions
     assert "secret policy checks" in instructions
+    assert "project_runbook" in instructions
+    assert "workerbee_v1_project_runbook_update" in instructions
+    assert "Keep secrets out of runbooks" in instructions
     assert "first time WorkerBee is coming up" in instructions
     assert "temporary native k1s" in instructions
     assert "bring, run, or start the project up in WorkerBee" in instructions
@@ -130,7 +193,11 @@ def test_runbook_treats_bring_project_up_as_app_deploy() -> None:
     assert "workerbee_v1_manifest_deploy_local" in markdown
     assert "Do not stop" in markdown
     assert "workerbee_v1_project_start" in markdown
+    assert "project_runbook" in markdown
+    assert "workerbee_v1_project_runbook_update" in markdown
     assert "Compose-shaped repos" in markdown
+    assert "Review returned project_runbook" in loop
+    assert "workerbee_v1_project_runbook_update" in loop
     assert "Treat bring/run/start the project up in WorkerBee" in loop
     assert "workerbee_v1_project_start" in loop
     assert "map services to separate one-container workloads" in first_run

@@ -27,6 +27,7 @@ from workerbee.manifests import (
 )
 from workerbee.mcp_daemon import require_mcp_loopback_or_opt_in
 from workerbee.paths import default_state_root
+from workerbee.runbooks import DEFAULT_REPO_RUNBOOK_PATH
 from workerbee.trust import trust_install, trust_status, trust_uninstall
 
 INGRESS_PROBE_INPUT_SCHEMA: dict[str, Any] = {
@@ -285,6 +286,70 @@ def serve_mcp(
     def workerbee_v1_project_status(project: str = "default") -> dict[str, Any]:
         """Return project stack status."""
         return protect("ProjectStatus", project, lambda: daemon.project_status(project))
+
+    @mcp.tool()
+    def workerbee_v1_project_runbook_status(project: str = "default") -> dict[str, Any]:
+        """Return per-project WorkerBee runbook status."""
+        return protect(
+            "ProjectRunbookStatus",
+            project,
+            lambda: daemon.project_runbook_status(project),
+        )
+
+    @mcp.tool()
+    def workerbee_v1_project_runbook_update(
+        content: str,
+        project: str = "default",
+        mode: str = "append",
+        source: str = "agent",
+        summary: str | None = None,
+    ) -> dict[str, Any]:
+        """Append or replace a per-project WorkerBee runbook."""
+        return protect(
+            "ProjectRunbookUpdate",
+            project,
+            lambda: daemon.project_runbook_update(
+                project=project,
+                content=content,
+                mode=mode,
+                source=source,
+                summary=summary,
+            ),
+        )
+
+    @mcp.tool()
+    def workerbee_v1_project_runbook_export(
+        project: str = "default",
+        path: str = DEFAULT_REPO_RUNBOOK_PATH,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        """Export the per-project WorkerBee runbook to a repo-relative path."""
+        return protect(
+            "ProjectRunbookExport",
+            project,
+            lambda: daemon.project_runbook_export(
+                project=project,
+                path=path,
+                overwrite=overwrite,
+            ),
+        )
+
+    @mcp.tool()
+    def workerbee_v1_project_runbook_import(
+        project: str = "default",
+        path: str = DEFAULT_REPO_RUNBOOK_PATH,
+        mode: str = "replace",
+    ) -> dict[str, Any]:
+        """Import a repo-relative WorkerBee runbook into project state."""
+        return protect(
+            "ProjectRunbookImport",
+            project,
+            lambda: daemon.project_runbook_import(
+                project=project,
+                path=path,
+                mode=mode,
+            ),
+        )
 
     @mcp.tool()
     def workerbee_v1_project_stop(

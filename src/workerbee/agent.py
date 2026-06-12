@@ -119,39 +119,44 @@ queues, or integration behavior that benefits from a running local stack.
 
 1. Call `workerbee_v1_session_start` with the absolute repo cwd and task goal.
 2. Use the returned `project` value on every WorkerBee MCP tool call.
-3. Use the local shell for repo edits, ordinary build scripts, unit tests, and temporary helper
+3. Check the returned `project_runbook` when present. Follow the documented project-specific
+   bring-up, deploy, validation, and repair path before choosing a different path.
+4. Use the local shell for repo edits, ordinary build scripts, unit tests, and temporary helper
    scripts. Put one-off helper scripts in `/tmp` or WorkerBee state unless the task requires a
    committed repo script.
-4. Use WorkerBee MCP to build local images, prepare or stage manifests, validate manifests, deploy
+5. Use WorkerBee MCP to build local images, prepare or stage manifests, validate manifests, deploy
    locally, inspect status/logs, probe HTTPS ingress, and export k1s/Kubernetes/Helm artifacts.
    For repo-root image builds with nested Dockerfiles, pass `dockerfile="path/to/Dockerfile"`.
-5. When the user asks to bring, run, or start the project up in WorkerBee, treat that as a request
+6. When the user asks to bring, run, or start the project up in WorkerBee, treat that as a request
    for a running app workload: build needed images, stage and validate manifests, deploy with
    `workerbee_v1_manifest_deploy_local`, then inspect status/logs and probe ingress. Do not stop
    after `workerbee_v1_project_start` if deployable manifests or Containerfiles/Dockerfiles exist.
-6. If this is the first WorkerBee run for a repo, there may be no deployed workload to inspect yet.
+7. If this is the first WorkerBee run for a repo, there may be no deployed workload to inspect yet.
    Prefer existing repo manifests and Containerfiles/Dockerfiles. When they are absent, create a
    temporary native k1s staged deployment in WorkerBee state, then build, validate, and deploy it
    before runtime validation or security review.
-7. For Compose-shaped repos, translate the topology to WorkerBee's supported shape instead of
+8. For Compose-shaped repos, translate the topology to WorkerBee's supported shape instead of
    trying to run Compose directly: one container per workload, API/worker/store as separate
    workloads, and one-shot initialization as an explicit Job or temporary setup workload.
-8. When the user asks for a security review, call `workerbee_v1_security_review_project` after
+9. When the user asks for a security review, call `workerbee_v1_security_review_project` after
    session bootstrap and project status. If it reports no deployment, stage and deploy the app
    first, then rerun the review.
-9. In lazy mode, do not start the stack until deployment or an explicit project start is needed.
-10. If WorkerBee reports `PROJECT_STOPPED`, tell the user WorkerBee is disabled for this project
+10. In lazy mode, do not start the stack until deployment or an explicit project start is needed.
+11. If WorkerBee reports `PROJECT_STOPPED`, tell the user WorkerBee is disabled for this project
    and show `workerbee project mode start --project <project>`.
-11. Iterate against the live app through status, logs, exec, and `workerbee_v1_ingress_probe` until
+12. Iterate against the live app through status, logs, exec, and `workerbee_v1_ingress_probe` until
    the requested behavior is verified. Use probe `headers` for signed requests such as S3 PUTs.
-12. For larger multi-feature requests, when prior WorkerBee stages are performing well, plan a
+13. After a successful bring-up, deployment, repair, or security review, update the project runbook
+   with `workerbee_v1_project_runbook_update`. Keep secrets out; record commands, routes, caveats,
+   validation results, and follow-up steps that a future agent or operator can repeat.
+14. For larger multi-feature requests, when prior WorkerBee stages are performing well, plan a
    coherent feature batch and work one feature checkpoint at a time. After each checkpoint, run
    repo tests plus relevant WorkerBee deploy/status/log/probe validation. If validation fails,
    inspect logs/status/probes, fix, redeploy, and revalidate without stopping; escalate only for
    unresolvable blockers, destructive choices, missing credentials, or decisions that cannot be
    inferred. When commit authority is present, commit each green checkpoint before moving to the
    next feature.
-13. Export artifacts with `workerbee_v1_bundle_export` when the implementation is ready to hand off.
+15. Export artifacts with `workerbee_v1_bundle_export` when the implementation is ready to hand off.
 
 For staged WorkerBee manifests, app logs and exec default to the WorkerBee project namespace.
 Use `app="namespace/name"` or pass `namespace` only when inspecting a non-default namespace;
@@ -191,6 +196,12 @@ probes, security assessment/review, secret policy checks, dashboard URLs, trust
 guidance, cleanup, and artifact export. Use named stages or returned `stage_dir`
 values for manifest operations. Use app names plus the optional `namespace` for
 logs/exec; do not guess generated runtime container names.
+
+When `workerbee_v1_session_start` returns `project_runbook`, review it before
+choosing a bring-up, deploy, validation, or repair path. After a successful
+bring-up, deployment, repair, or security review, update it with
+`workerbee_v1_project_runbook_update` so later agents and human operators can
+repeat the proven project-specific process. Keep secrets out of runbooks.
 
 If the user asks to bring, run, or start the project up in WorkerBee, treat that
 as a request for a running app workload. Build needed local images, stage and
@@ -323,6 +334,10 @@ def runbook_payload() -> dict[str, Any]:
         },
         "loop": [
             "Call workerbee_v1_session_start(cwd, goal) and keep the returned project.",
+            (
+                "Review returned project_runbook details before choosing a project-specific "
+                "bring-up, deploy, validation, or repair path."
+            ),
             "Build images with local shell scripts or workerbee_v1_image_build.",
             "Use image_build dockerfile=... for repo-root builds with nested Dockerfiles.",
             "Prepare/stage manifests, validate them, deploy locally, then inspect status/logs.",
@@ -353,6 +368,10 @@ def runbook_payload() -> dict[str, Any]:
                 "If validation fails, inspect logs/status/probes, fix, redeploy, and revalidate; "
                 "escalate only for unresolvable blockers, destructive choices, missing "
                 "credentials, or decisions that cannot be inferred."
+            ),
+            (
+                "After successful bring-up, deployment, repair, or security review, update the "
+                "project runbook with workerbee_v1_project_runbook_update and keep secrets out."
             ),
             (
                 "When commit authority is present, commit each green checkpoint before moving "

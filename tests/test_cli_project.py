@@ -30,6 +30,110 @@ def test_project_mode_accepts_cwd_project_and_open(tmp_path: Path) -> None:
     assert args.open is True
 
 
+def test_runbook_parser_accepts_project_scoped_commands(tmp_path: Path) -> None:
+    update = build_parser().parse_args(
+        [
+            "runbook",
+            "update",
+            "--cwd",
+            str(tmp_path),
+            "--project",
+            "Demo App",
+            "--file",
+            str(tmp_path / "runbook.md"),
+            "--mode",
+            "replace",
+            "--source",
+            "agent",
+            "--summary",
+            "first deploy",
+        ]
+    )
+
+    assert update.cmd == "runbook"
+    assert update.runbook_cmd == "update"
+    assert update.runbook_cwd == tmp_path
+    assert update.runbook_project == "Demo App"
+    assert update.runbook_file == tmp_path / "runbook.md"
+    assert update.mode == "replace"
+    assert update.source == "agent"
+    assert update.summary == "first deploy"
+
+    export = build_parser().parse_args(
+        [
+            "runbook",
+            "export",
+            "--path",
+            "docs/workerbee-runbook.md",
+            "--overwrite",
+        ]
+    )
+
+    assert export.runbook_cmd == "export"
+    assert export.path == "docs/workerbee-runbook.md"
+    assert export.overwrite is True
+
+    imported = build_parser().parse_args(
+        [
+            "runbook",
+            "import",
+            "--path",
+            "docs/workerbee-runbook.md",
+            "--mode",
+            "append",
+        ]
+    )
+
+    assert imported.runbook_cmd == "import"
+    assert imported.path == "docs/workerbee-runbook.md"
+    assert imported.mode == "append"
+
+
+def test_runbook_update_cli_reads_file_content(tmp_path: Path, monkeypatch) -> None:
+    runbook_file = tmp_path / "runbook.md"
+    runbook_file.write_text("# Runbook\n\nUse validated path.\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    class FakeDaemon:
+        def __init__(self, **kwargs: object) -> None:
+            captured["init"] = kwargs
+
+        def project_runbook_update(self, **kwargs: object) -> dict[str, object]:
+            captured["update"] = kwargs
+            return {"ok": True, "project": kwargs["project"], "changed": True}
+
+    monkeypatch.setattr(cli, "WorkerBeeDaemon", FakeDaemon)
+
+    assert (
+        cli.main(
+            [
+                "--json",
+                "--state-root",
+                str(tmp_path / "state"),
+                "runbook",
+                "update",
+                "--cwd",
+                str(tmp_path),
+                "--project",
+                "Demo App",
+                "--file",
+                str(runbook_file),
+                "--mode",
+                "replace",
+                "--source",
+                "test",
+            ]
+        )
+        == 0
+    )
+
+    assert captured["init"]["default_project"] == "Demo App"
+    assert captured["update"]["project"] == "Demo App"
+    assert captured["update"]["content"] == "# Runbook\n\nUse validated path.\n"
+    assert captured["update"]["mode"] == "replace"
+    assert captured["update"]["source"] == "test"
+
+
 def test_mcp_start_accepts_background_bind_flags(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [

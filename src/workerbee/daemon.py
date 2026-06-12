@@ -62,6 +62,13 @@ from workerbee.paths import daemon_project_state_dir, default_state_root
 from workerbee.ports import choose_port
 from workerbee.probe import build_probe_url, probe_workerbee_url
 from workerbee.profiles import K1sProfileRunner, builtin_profiles, is_edge_link_profile
+from workerbee.runbooks import (
+    DEFAULT_REPO_RUNBOOK_PATH,
+    ensure_project_runbook,
+    export_project_runbook,
+    import_project_runbook,
+    update_project_runbook,
+)
 from workerbee.runtime_support import (
     CONTAINERD_RUNTIME,
     cleanup_runtime,
@@ -346,6 +353,16 @@ class WorkerBeeDaemon:
                     git_branch=project_info.git_branch,
                     explicit_project=project_info.explicit_project,
                 )
+                project_runbook = ensure_project_runbook(
+                    state_dir=sup.state_dir,
+                    project=name,
+                    cwd=sup.cwd,
+                    git_root=project_info.git_root,
+                    git_branch=project_info.git_branch,
+                    mode=mode,
+                    dashboard_url=dashboard_url,
+                )
+                status["project_runbook"] = project_runbook
         running = bool(status.get("running"))
         return {
             "project": name,
@@ -363,6 +380,7 @@ class WorkerBeeDaemon:
             "dashboard_url": dashboard_url,
             "browser_opened": opened,
             "runbook": runbook_payload(),
+            "project_runbook": project_runbook,
             "next_actions": next_actions_for_mode(mode, running=running),
             "events": events,
             "user_message": user_message_for_session(
@@ -388,8 +406,101 @@ class WorkerBeeDaemon:
             "state_root": str(self.state_root),
             "state_dir": str(daemon_project_state_dir(name, state_root=self.state_root)),
             "project_status": status,
+            "project_runbook": self.project_runbook_status(name),
             "dashboard_url": _dashboard_url(status),
         }
+
+    def project_runbook_status(self, project: str | None = None) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+        cwd = self._project_cwd(name)
+        self._register_project(name, cwd_hint=str(cwd))
+        git_root, git_branch = self._project_git_metadata(name)
+        status = self._status_without_registration(name)
+        return ensure_project_runbook(
+            state_dir=daemon_project_state_dir(name, state_root=self.state_root),
+            project=name,
+            cwd=cwd,
+            git_root=git_root,
+            git_branch=git_branch,
+            mode=self.project_mode(name),
+            dashboard_url=_dashboard_url(status),
+        )
+
+    def project_runbook_update(
+        self,
+        *,
+        project: str | None = None,
+        content: str,
+        mode: str = "append",
+        source: str = "agent",
+        summary: str | None = None,
+    ) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+        with self._project_lock(name):
+            file_lock = FileLock(project_lock_path(self.state_root, name), label=f"project {name}")
+            with file_lock:
+                cwd = self._project_cwd(name)
+                self._register_project(name, cwd_hint=str(cwd))
+                git_root, git_branch = self._project_git_metadata(name)
+                return update_project_runbook(
+                    state_dir=daemon_project_state_dir(name, state_root=self.state_root),
+                    project=name,
+                    cwd=cwd,
+                    content=content,
+                    mode=mode,
+                    source=source,
+                    summary=summary,
+                    git_root=git_root,
+                    git_branch=git_branch,
+                )
+
+    def project_runbook_export(
+        self,
+        *,
+        project: str | None = None,
+        path: str | Path = DEFAULT_REPO_RUNBOOK_PATH,
+        overwrite: bool = False,
+    ) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+        with self._project_lock(name):
+            file_lock = FileLock(project_lock_path(self.state_root, name), label=f"project {name}")
+            with file_lock:
+                cwd = self._project_cwd(name)
+                self._register_project(name, cwd_hint=str(cwd))
+                git_root, git_branch = self._project_git_metadata(name)
+                return export_project_runbook(
+                    state_dir=daemon_project_state_dir(name, state_root=self.state_root),
+                    project=name,
+                    cwd=cwd,
+                    path=path,
+                    overwrite=overwrite,
+                    git_root=git_root,
+                    git_branch=git_branch,
+                )
+
+    def project_runbook_import(
+        self,
+        *,
+        project: str | None = None,
+        path: str | Path = DEFAULT_REPO_RUNBOOK_PATH,
+        mode: str = "replace",
+    ) -> dict[str, Any]:
+        name = project_slug(project or self.default_project)
+        with self._project_lock(name):
+            file_lock = FileLock(project_lock_path(self.state_root, name), label=f"project {name}")
+            with file_lock:
+                cwd = self._project_cwd(name)
+                self._register_project(name, cwd_hint=str(cwd))
+                git_root, git_branch = self._project_git_metadata(name)
+                return import_project_runbook(
+                    state_dir=daemon_project_state_dir(name, state_root=self.state_root),
+                    project=name,
+                    cwd=cwd,
+                    path=path,
+                    mode=mode,
+                    git_root=git_root,
+                    git_branch=git_branch,
+                )
 
     def project_start(
         self,
@@ -721,6 +832,7 @@ class WorkerBeeDaemon:
         if status.get("stack_ingress_refresh", {}).get("sync_needed"):
             status["ingress_sync"] = self._sync_ingress_projects_result()
         status["mode"] = self.project_mode(name)
+        status["project_runbook"] = self.project_runbook_status(name)
         return status
 
     def profile_list(self) -> dict[str, Any]:
@@ -2513,6 +2625,29 @@ class WorkerBeeDaemon:
             except OSError:
                 return Path(str(raw)).expanduser()
         return self.cwd
+
+    def _project_git_metadata(self, project: str) -> tuple[Path | None, str | None]:
+        record = self._read_registry().get(project_slug(project)) or {}
+        git_root = None
+        raw_root = record.get("git_root")
+        if raw_root:
+            try:
+                git_root = Path(str(raw_root)).expanduser().resolve()
+            except OSError:
+                git_root = Path(str(raw_root)).expanduser()
+        git_branch = record.get("git_branch")
+        return git_root, str(git_branch) if git_branch else None
+
+    def _status_without_registration(self, project: str) -> dict[str, Any]:
+        try:
+            supervisor = self._build_supervisor(
+                project_slug(project),
+                ingress=self._project_ingress(project),
+            )
+            status = supervisor.status()
+        except Exception:
+            return {}
+        return status if isinstance(status, dict) else {}
 
     def _project_lock(self, project: str) -> threading.RLock:
         with self._locks_guard:

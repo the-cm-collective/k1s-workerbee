@@ -197,6 +197,67 @@ def test_daemon_auto_runtime_prefers_available_containerd(
     assert captured == {"state_root": tmp_path, "mode": "sudo-helper"}
 
 
+def test_project_runbook_update_export_import_and_path_guard(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    daemon = WorkerBeeDaemon(state_root=tmp_path / "state", cwd=checkout)
+
+    replaced = daemon.project_runbook_update(
+        project="Demo App",
+        content="# Demo Runbook\n\nUse the known deployment path.",
+        mode="replace",
+        source="test",
+        summary="initial",
+    )
+    runbook_path = Path(replaced["markdown_path"])
+
+    assert replaced["project"] == "demo-app"
+    assert runbook_path.read_text(encoding="utf-8").startswith("# Demo Runbook")
+    assert replaced["source"] == "test"
+
+    appended = daemon.project_runbook_update(
+        project="demo-app",
+        content="- Validate with workerbee_v1_project_status.",
+        mode="append",
+        source="test",
+        summary="validated path",
+    )
+
+    text = runbook_path.read_text(encoding="utf-8")
+    assert "## Update -" in text
+    assert "Summary: validated path" in text
+    assert "workerbee_v1_project_status" in text
+    assert appended["history_count"] == 1
+
+    exported = daemon.project_runbook_export(
+        project="demo-app",
+        path="docs/workerbee-runbook.md",
+    )
+    repo_runbook = checkout / "docs" / "workerbee-runbook.md"
+
+    assert exported["repo_path"] == "docs/workerbee-runbook.md"
+    assert exported["export_path"] == str(repo_runbook)
+    assert repo_runbook.read_text(encoding="utf-8") == runbook_path.read_text(encoding="utf-8")
+
+    with pytest.raises(WorkerBeeError) as exists_exc:
+        daemon.project_runbook_export(project="demo-app", path="docs/workerbee-runbook.md")
+    assert exists_exc.value.code == "RUNBOOK_EXPORT_EXISTS"
+
+    repo_runbook.write_text("# Repo Edited Runbook\n\nPersisted path.\n", encoding="utf-8")
+    imported = daemon.project_runbook_import(
+        project="demo-app",
+        path="docs/workerbee-runbook.md",
+        mode="replace",
+    )
+
+    assert imported["import_path"] == str(repo_runbook)
+    assert runbook_path.read_text(encoding="utf-8").startswith("# Repo Edited Runbook")
+
+    with pytest.raises(WorkerBeeError) as escape_exc:
+        daemon.project_runbook_export(project="demo-app", path="../escape.md")
+    assert escape_exc.value.code == "RUNBOOK_PATH_OUTSIDE_REPO"
+
+
 def test_with_project_prepares_containerd_privilege_for_actions(
     tmp_path: Path,
     monkeypatch,

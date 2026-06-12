@@ -25,6 +25,10 @@ def test_contract_tool_names_are_v1_only() -> None:
     assert "workerbee_v1_security_review_project" in MCP_TOOL_NAMES
     assert "workerbee_v1_secret_policy_status" in MCP_TOOL_NAMES
     assert "workerbee_v1_project_mode_set" in MCP_TOOL_NAMES
+    assert "workerbee_v1_project_runbook_status" in MCP_TOOL_NAMES
+    assert "workerbee_v1_project_runbook_update" in MCP_TOOL_NAMES
+    assert "workerbee_v1_project_runbook_export" in MCP_TOOL_NAMES
+    assert "workerbee_v1_project_runbook_import" in MCP_TOOL_NAMES
     assert "workerbee_v1_workload_restart" in MCP_TOOL_NAMES
 
 
@@ -61,6 +65,9 @@ def test_agent_feedback_summarizes_status_with_safe_links_and_artifacts() -> Non
                 "stage_dir": "/var/lib/workerbee/stage",
                 "secret_path": "/var/lib/workerbee/secret",
             },
+            "project_runbook": {
+                "path": "/var/lib/workerbee/projects/alpha/artifacts/runbooks/project-runbook.md"
+            },
         },
     )
 
@@ -70,6 +77,10 @@ def test_agent_feedback_summarizes_status_with_safe_links_and_artifacts() -> Non
     assert "https://app.alpha.workerbee.localhost:19443/dashboard" in feedback["links"]
     assert all("hidden" not in item for item in feedback["links"])
     assert "/var/lib/workerbee/stage" in feedback["artifacts"]
+    assert (
+        "/var/lib/workerbee/projects/alpha/artifacts/runbooks/project-runbook.md"
+        in feedback["artifacts"]
+    )
     assert "/var/lib/workerbee/secret" not in feedback["artifacts"]
     assert len(feedback["observations"]) <= 6
     assert len(feedback["next_actions"]) <= 6

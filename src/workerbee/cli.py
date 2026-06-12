@@ -53,6 +53,7 @@ from workerbee.mcp_daemon import (
 )
 from workerbee.mcp_server import serve_mcp
 from workerbee.paths import daemon_project_state_dir, default_state_root
+from workerbee.runbooks import DEFAULT_REPO_RUNBOOK_PATH
 from workerbee.runtime_support import CONTAINERD_RUNTIME, runtime_diagnostics
 from workerbee.security import DEFAULT_SECURITY_CHECKS, assess_stage_security
 from workerbee.supervisor import WorkerBeeSupervisor
@@ -255,6 +256,30 @@ def build_parser() -> argparse.ArgumentParser:
     project_status = project_sub.add_parser("status", help="Show project mode and status")
     project_status.add_argument("--cwd", dest="project_cwd", type=Path, default=None)
     project_status.add_argument("--project", dest="project_name", default=None)
+    runbook = sub.add_parser("runbook", help="Manage a project WorkerBee runbook")
+    runbook_sub = runbook.add_subparsers(dest="runbook_cmd", required=True)
+
+    def add_runbook_scope(command: argparse.ArgumentParser) -> None:
+        command.add_argument("--cwd", dest="runbook_cwd", type=Path, default=None)
+        command.add_argument("--project", dest="runbook_project", default=None)
+
+    runbook_status = runbook_sub.add_parser("status", help="Show project runbook status")
+    add_runbook_scope(runbook_status)
+    runbook_update = runbook_sub.add_parser("update", help="Append or replace runbook content")
+    add_runbook_scope(runbook_update)
+    runbook_update.add_argument("--file", dest="runbook_file", type=Path, default=None)
+    runbook_update.add_argument("--content", dest="runbook_content", default=None)
+    runbook_update.add_argument("--mode", choices=["append", "replace"], default="append")
+    runbook_update.add_argument("--source", default="agent")
+    runbook_update.add_argument("--summary", default=None)
+    runbook_export = runbook_sub.add_parser("export", help="Export the runbook into the repo")
+    add_runbook_scope(runbook_export)
+    runbook_export.add_argument("--path", default=DEFAULT_REPO_RUNBOOK_PATH)
+    runbook_export.add_argument("--overwrite", action="store_true")
+    runbook_import = runbook_sub.add_parser("import", help="Import a repo runbook into state")
+    add_runbook_scope(runbook_import)
+    runbook_import.add_argument("--path", default=DEFAULT_REPO_RUNBOOK_PATH)
+    runbook_import.add_argument("--mode", choices=["append", "replace"], default="replace")
     sub.add_parser("global-dashboard", help="Show WorkerBee global dashboard status")
     ingress = sub.add_parser("ingress", help="Inspect WorkerBee global ingress")
     ingress_sub = ingress.add_subparsers(dest="ingress_cmd", required=True)
@@ -745,6 +770,52 @@ def main(argv: list[str] | None = None) -> int:
                 )
             if args.project_cmd == "status":
                 return _print(daemon.project_mode_get(project), json_out=args.json)
+        if args.cmd == "runbook":
+            cwd = args.runbook_cwd or args.cwd or Path.cwd()
+            project = args.runbook_project or args.project or derive_session_project(cwd)
+            daemon = WorkerBeeDaemon(
+                state_root=args.state_root,
+                runtime=args.runtime,
+                containerd_privilege=containerd_privilege,
+                default_project=project,
+                cwd=cwd,
+            )
+            if args.runbook_cmd == "status":
+                return _print(daemon.project_runbook_status(project), json_out=args.json)
+            if args.runbook_cmd == "update":
+                content = args.runbook_content
+                if content is None and args.runbook_file is not None:
+                    content = args.runbook_file.read_text(encoding="utf-8")
+                if content is None:
+                    raise RuntimeError("runbook update requires --file or --content")
+                return _print(
+                    daemon.project_runbook_update(
+                        project=project,
+                        content=content,
+                        mode=args.mode,
+                        source=args.source,
+                        summary=args.summary,
+                    ),
+                    json_out=args.json,
+                )
+            if args.runbook_cmd == "export":
+                return _print(
+                    daemon.project_runbook_export(
+                        project=project,
+                        path=args.path,
+                        overwrite=args.overwrite,
+                    ),
+                    json_out=args.json,
+                )
+            if args.runbook_cmd == "import":
+                return _print(
+                    daemon.project_runbook_import(
+                        project=project,
+                        path=args.path,
+                        mode=args.mode,
+                    ),
+                    json_out=args.json,
+                )
         if args.cmd == "global-dashboard":
             daemon = WorkerBeeDaemon(
                 state_root=args.state_root,
