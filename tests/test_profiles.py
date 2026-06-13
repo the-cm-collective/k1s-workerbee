@@ -502,6 +502,7 @@ def test_profile_stop_purge_uses_containerd_helper_for_profile_state(
         k1s_root=tmp_path / "k1s",
     )
     monkeypatch.setattr("workerbee.profiles.remove_containerd_helper_tree", fake_remove_tree)
+    monkeypatch.setattr(runner, "_rm_project_containers", lambda: {"ok": True, "removed": False})
     monkeypatch.setattr(runner, "_rm_network", lambda: {"ok": True})
 
     result = runner.stop(purge=True)
@@ -514,3 +515,37 @@ def test_profile_stop_purge_uses_containerd_helper_for_profile_state(
         "path": str(profile_root),
     }
     assert calls == [(tmp_path.resolve(), profile_root)]
+
+
+def test_profile_stop_purge_removes_untracked_profile_workload_containers(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("workerbee.profiles.resolve_runtime", lambda _runtime: "containerd")
+    monkeypatch.setattr(
+        "workerbee.profiles.remove_containerd_helper_tree",
+        lambda _state_root, target: {"ok": True, "removed": True, "path": str(target)},
+    )
+    runner = K1sProfileRunner(
+        project="demo",
+        state_root=tmp_path,
+        runtime="containerd",
+        k1s_root=tmp_path / "k1s",
+    )
+    monkeypatch.setattr(runner, "_rm_network", lambda: {"ok": True})
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):  # noqa: ANN001
+        command = [str(part) for part in cmd]
+        commands.append(command)
+        if command[-3:] == ["ps", "-a", "-q"]:
+            return subprocess.CompletedProcess(cmd, 0, "workload-a\nworkload-b\n", "")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("workerbee.profiles.subprocess.run", fake_run)
+
+    result = runner.stop(purge=True)
+
+    assert result["ok"] is True
+    assert result["namespace_cleanup"]["containers"] == ["workload-a", "workload-b"]
+    assert any(command[-4:] == ["rm", "-f", "workload-a", "workload-b"] for command in commands)

@@ -1,4 +1,5 @@
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -132,6 +133,67 @@ def test_runbook_update_cli_reads_file_content(tmp_path: Path, monkeypatch) -> N
     assert captured["update"]["content"] == "# Runbook\n\nUse validated path.\n"
     assert captured["update"]["mode"] == "replace"
     assert captured["update"]["source"] == "test"
+
+
+def test_logs_cli_accepts_mcp_style_profile_target(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeDaemon:
+        def __init__(self, **kwargs: object) -> None:
+            captured["init"] = kwargs
+
+        def profile_logs(self, **kwargs: object) -> dict[str, object]:
+            captured["profile_logs"] = kwargs
+            return {"ok": True, "stdout": "padawan logs\n"}
+
+    monkeypatch.setattr(cli, "WorkerBeeDaemon", FakeDaemon)
+    monkeypatch.setattr(cli, "ensure_containerd_privilege", lambda **_kwargs: {"ok": True})
+    monkeypatch.setattr(cli, "containerd_privilege_env", lambda _privilege: {})
+    monkeypatch.setattr(cli, "temporary_containerd_privilege_env", lambda _env: nullcontext())
+    monkeypatch.setattr(
+        cli,
+        "containerd_privilege_summary",
+        lambda _privilege: {"runtime": "containerd"},
+    )
+
+    rc = cli.main(
+        [
+            "--json",
+            "--state-root",
+            str(tmp_path),
+            "--project",
+            "Demo App",
+            "--runtime",
+            "containerd",
+            "logs",
+            "--target",
+            "profile",
+            "--app",
+            "padawan",
+            "--profile",
+            "k1s-dev-min-sqlite",
+            "--tail",
+            "120",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+
+    assert rc == 0
+    assert payload["stdout"] == "padawan logs\n"
+    assert payload["containerd_privilege"] == {"runtime": "containerd"}
+    assert captured["init"]["default_project"] == "Demo App"
+    assert captured["profile_logs"] == {
+        "app": "padawan",
+        "project": "Demo App",
+        "profile": "k1s-dev-min-sqlite",
+        "namespace": None,
+        "tail": 120,
+    }
 
 
 def test_mcp_start_accepts_background_bind_flags(tmp_path: Path) -> None:

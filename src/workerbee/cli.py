@@ -428,6 +428,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("apishim-smoke", help="Inspect POC objects through the k1s API shim")
     logs = sub.add_parser("logs", help="Show recent app logs")
     logs.add_argument("app", nargs="?", default="api")
+    logs.add_argument("--app", dest="app_override", default=None)
+    logs.add_argument("--target", choices=["workerbee", "profile"], default="workerbee")
+    logs.add_argument("--profile", default=None)
     logs.add_argument("-n", "--namespace", default=None)
     logs.add_argument("--tail", type=int, default=80)
     logs.add_argument(
@@ -444,6 +447,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     mcp = sub.add_parser("mcp", help="Run the MCP server")
     mcp_sub = mcp.add_subparsers(dest="mcp_cmd", required=True)
+
     def add_mcp_bind_flags(
         command: argparse.ArgumentParser,
         *,
@@ -1145,13 +1149,37 @@ def main(argv: list[str] | None = None) -> int:
                 json_out=args.json,
             )
         if args.cmd == "logs":
+            app = args.app_override or args.app
+            if args.target == "profile":
+                daemon = WorkerBeeDaemon(
+                    state_root=args.state_root,
+                    runtime=args.runtime,
+                    containerd_privilege=containerd_privilege,
+                    default_project=args.project or "default",
+                    cwd=args.cwd,
+                )
+                privilege = ensure_containerd_privilege(
+                    state_root=args.state_root or default_state_root(),
+                    runtime=args.runtime,
+                    mode=containerd_privilege,
+                )
+                with temporary_containerd_privilege_env(containerd_privilege_env(privilege)):
+                    result = daemon.profile_logs(
+                        app=app,
+                        project=args.project,
+                        profile=args.profile,
+                        namespace=args.namespace,
+                        tail=args.tail,
+                    )
+                result["containerd_privilege"] = containerd_privilege_summary(privilege)
+                return _print(result, json_out=args.json)
             return _print(
                 _run_supervisor_action(
                     args=args,
                     supervisor=sup,
                     containerd_privilege=containerd_privilege,
                     action=lambda: sup.logs(
-                        app=args.app,
+                        app=app,
                         namespace=args.namespace,
                         tail=args.tail,
                         include_exited=args.include_exited,
@@ -1404,10 +1432,7 @@ def _apply_cli_defaults(args: argparse.Namespace, argv: list[str]) -> None:
     defaults = cli_defaults()
     if not _arg_present(argv, "--runtime") and defaults.get("runtime"):
         args.runtime = str(defaults["runtime"])
-    if (
-        not _arg_present(argv, "--containerd-privilege")
-        and defaults.get("containerd_privilege")
-    ):
+    if not _arg_present(argv, "--containerd-privilege") and defaults.get("containerd_privilege"):
         args.containerd_privilege = str(defaults["containerd_privilege"])
     if not _arg_present(argv, "--state-root") and defaults.get("state_root"):
         args.state_root = Path(str(defaults["state_root"])).expanduser()
@@ -1435,13 +1460,9 @@ def _apply_cli_defaults(args: argparse.Namespace, argv: list[str]) -> None:
                 args.ingress_ca_port = int(defaults["ingress_ca_port"])
             if not _arg_present(argv, "--ingress-dns") and defaults.get("ingress_dns"):
                 args.ingress_dns = str(defaults["ingress_dns"])
-            if not _arg_present(argv, "--ingress-dns-port") and defaults.get(
-                "ingress_dns_port"
-            ):
+            if not _arg_present(argv, "--ingress-dns-port") and defaults.get("ingress_dns_port"):
                 args.ingress_dns_port = int(defaults["ingress_dns_port"])
-            if not _arg_present(argv, "--ingress-dns-bind") and defaults.get(
-                "ingress_dns_bind"
-            ):
+            if not _arg_present(argv, "--ingress-dns-bind") and defaults.get("ingress_dns_bind"):
                 args.ingress_dns_bind = str(defaults["ingress_dns_bind"])
             if not _arg_present(argv, "--ingress-dns-answer") and defaults.get(
                 "ingress_dns_answer"

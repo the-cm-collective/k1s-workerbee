@@ -36,6 +36,7 @@ KUBERNETES = "kubernetes"
 K8S_WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "Job"}
 K8S_NETWORK_KINDS = {"Service", "Ingress"}
 K8S_SUPPORTED_KINDS = K8S_WORKLOAD_KINDS | K8S_NETWORK_KINDS
+CADDY_SITE_LABEL_RE = re.compile(r"^\s*([^#\s{][^{]*)\{")
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,11 +357,7 @@ def collect_app_status(
         else []
     )
     if deleted_orphans:
-        deleted_keys = {
-            _workload_key(item)
-            for item in deleted_orphans
-            if item.get("ok")
-        }
+        deleted_keys = {_workload_key(item) for item in deleted_orphans if item.get("ok")}
         orphaned = [item for item in orphaned if _workload_key(item) not in deleted_keys]
     statuses: list[dict[str, Any]] = []
     wait_result: dict[str, Any] | None = None
@@ -987,12 +984,27 @@ def _write_profile_workload_ingress_sites(
 
     site = ingress.sites_dir / "profile-workload.caddy"
     routes = _profile_workload_ingress_routes(validation)
+    skipped_existing = _routes_with_existing_caddy_sites(
+        routes,
+        sites_dir=ingress.sites_dir,
+        exclude=site,
+    )
+    if skipped_existing:
+        skipped = {route["host"] for route in skipped_existing}
+        routes = [route for route in routes if route["host"] not in skipped]
     if not routes:
         removed = False
         if site.exists():
             site.unlink()
             removed = True
-        return {"enabled": True, "routes": [], "urls": [], "site": str(site), "removed": removed}
+        return {
+            "enabled": True,
+            "routes": [],
+            "urls": [],
+            "site": str(site),
+            "removed": removed,
+            "skipped_existing": skipped_existing,
+        }
 
     site.parent.mkdir(parents=True, exist_ok=True)
     content = _render_profile_workload_caddy(routes, host_alias=ingress.host_alias)
@@ -1006,6 +1018,7 @@ def _write_profile_workload_ingress_sites(
         "site": str(site),
         "written": written,
         "removed": False,
+        "skipped_existing": skipped_existing,
     }
 
 
@@ -1051,6 +1064,55 @@ def _profile_workload_service_port(spec: dict[str, Any]) -> int | None:
         if port:
             return port
     return None
+
+
+def _routes_with_existing_caddy_sites(
+    routes: list[dict[str, Any]],
+    *,
+    sites_dir: Path,
+    exclude: Path,
+) -> list[dict[str, Any]]:
+    if not routes:
+        return []
+    existing_hosts = _existing_caddy_site_hosts(sites_dir, exclude=exclude)
+    return [route for route in routes if route["host"] in existing_hosts]
+
+
+def _existing_caddy_site_hosts(sites_dir: Path, *, exclude: Path) -> set[str]:
+    hosts: set[str] = set()
+    if not sites_dir.exists():
+        return hosts
+    for path in sorted(sites_dir.glob("*.caddy")):
+        if path.resolve() == exclude.resolve():
+            continue
+        hosts.update(_caddy_site_hosts(path))
+    return hosts
+
+
+def _caddy_site_hosts(path: Path) -> set[str]:
+    hosts: set[str] = set()
+    brace_depth = 0
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and brace_depth == 0:
+            match = CADDY_SITE_LABEL_RE.match(line)
+            if match:
+                hosts.update(
+                    _normalize_caddy_site_label(part) for part in match.group(1).split(",")
+                )
+        brace_depth += line.count("{") - line.count("}")
+        brace_depth = max(brace_depth, 0)
+    hosts.discard("")
+    return hosts
+
+
+def _normalize_caddy_site_label(label: str) -> str:
+    normalized = label.strip()
+    if "://" in normalized:
+        normalized = normalized.split("://", 1)[1]
+    if ":" in normalized and normalized.count(":") == 1:
+        normalized = normalized.rsplit(":", 1)[0]
+    return normalized.strip()
 
 
 def _render_profile_workload_caddy(
@@ -1903,8 +1965,7 @@ def _validate_native_secret_refs(
                     "secret_ref": name,
                     "secret_path": str(secret_path),
                     "message": (
-                        "secretRef points to a plaintext file while secure defaults "
-                        "are enabled."
+                        "secretRef points to a plaintext file while secure defaults are enabled."
                     ),
                 }
             )
@@ -2183,7 +2244,7 @@ environment-specific Secret objects before applying those exports.
 Suggested command:
 
 ```bash
-{commands.get(fmt, '')}
+{commands.get(fmt, "")}
 ```
 """,
         encoding="utf-8",

@@ -481,6 +481,7 @@ class K1sProfileRunner:
         if info:
             for component in reversed(info.components):
                 removed.append(self._rm_container(component.name))
+        namespace_cleanup = self._rm_project_containers() if info or purge else {"removed": False}
         ingress_route = self._remove_ingress_site()
         purge_result = None
         if purge:
@@ -491,9 +492,11 @@ class K1sProfileRunner:
             self.info_file.unlink()
         return {
             "ok": all(item.get("ok") is not False for item in removed)
+            and namespace_cleanup.get("ok") is not False
             and not (isinstance(purge_result, dict) and purge_result.get("ok") is False),
             "project": self.project,
             "removed": removed,
+            "namespace_cleanup": namespace_cleanup,
             "purged": purge,
             "purge_result": purge_result,
             "ingress_route": ingress_route,
@@ -1214,6 +1217,49 @@ class K1sProfileRunner:
         )
         ok = proc.returncode == 0 or _missing_container(proc.stdout)
         return {"ok": ok, "container": name, "stdout": proc.stdout, "returncode": proc.returncode}
+
+    def _rm_project_containers(self) -> dict[str, Any]:
+        list_proc = subprocess.run(
+            runtime_command_args(
+                CONTAINERD_RUNTIME,
+                state_root=self.state_root,
+                project=self.project,
+                args=["ps", "-a", "-q"],
+            ),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=30,
+        )
+        ids = [line.strip() for line in list_proc.stdout.splitlines() if line.strip()]
+        if list_proc.returncode != 0:
+            return {
+                "ok": False,
+                "listed": False,
+                "returncode": list_proc.returncode,
+                "stdout": list_proc.stdout,
+            }
+        if not ids:
+            return {"ok": True, "removed": False, "containers": []}
+        rm_proc = subprocess.run(
+            runtime_command_args(
+                CONTAINERD_RUNTIME,
+                state_root=self.state_root,
+                project=self.project,
+                args=["rm", "-f", *ids],
+            ),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=60,
+        )
+        return {
+            "ok": rm_proc.returncode == 0,
+            "removed": rm_proc.returncode == 0,
+            "containers": ids,
+            "returncode": rm_proc.returncode,
+            "stdout": rm_proc.stdout,
+        }
 
     def _rm_network(self) -> dict[str, Any]:
         proc = subprocess.run(

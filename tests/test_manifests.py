@@ -426,8 +426,7 @@ spec:
     ]
     assert result["ok"] is True
     assert any(
-        finding["code"] == "K8S_COMMAND_ENTRYPOINT_SEMANTICS"
-        for finding in result["findings"]
+        finding["code"] == "K8S_COMMAND_ENTRYPOINT_SEMANTICS" for finding in result["findings"]
     )
     assert command_findings[0]["risk"] == "known_entrypoint_image"
     assert "known to use an entrypoint" in command_findings[0]["message"]
@@ -459,8 +458,7 @@ spec:
 
     assert result["ok"] is True
     assert not any(
-        finding["code"] == "K8S_COMMAND_ENTRYPOINT_SEMANTICS"
-        for finding in result["findings"]
+        finding["code"] == "K8S_COMMAND_ENTRYPOINT_SEMANTICS" for finding in result["findings"]
     )
 
 
@@ -650,9 +648,10 @@ spec:
     assert report["ok"] is True
     assert report["app_status"]["state"] == "orphaned"
     assert report["app_status"]["orphaned_workload_count"] == 1
-    assert "ae delete old-worker -n demo --purge" in report["app_status"]["orphaned_workloads"][0][
-        "cleanup_command"
-    ]
+    assert (
+        "ae delete old-worker -n demo --purge"
+        in report["app_status"]["orphaned_workloads"][0]["cleanup_command"]
+    )
     assert pruned["ok"] is True
     assert pruned["app_status"]["state"] == "ready"
     assert pruned["app_status"]["deleted_orphans"][0]["name"] == "old-worker"
@@ -1134,6 +1133,80 @@ def test_profile_deploy_writes_workload_ingress_before_sync(
         "https://api.demo-app.workerbee.localhost:19443/",
         "https://app.demo-app.workerbee.localhost:19443/",
     ]
+
+
+def test_profile_deploy_skips_workload_ingress_when_caddy_site_exists(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("workerbee.supervisor.resolve_k1s_runtime", lambda **_: _runtime())
+    sup = WorkerBeeSupervisor(
+        project="Demo App",
+        state_dir=tmp_path / "state",
+        runtime="containerd",
+        ingress=_ingress(tmp_path),
+    )
+    sup.ingress.sites_dir.mkdir(parents=True)
+    (sup.ingress.sites_dir / "api.caddy").write_text(
+        "https://api.demo-app.workerbee.localhost {\n    reverse_proxy 127.0.0.1:8080\n}\n",
+        encoding="utf-8",
+    )
+    prepared = prepare_stage(supervisor=sup, name="Realtime", template="realtime-web-db")
+    calls: list[list[str]] = []
+
+    def fake_run(
+        _self,
+        args: list[str],
+        *,
+        timeout: int = 60,
+        env_overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        assert timeout == 77
+        assert env_overrides is not None
+        calls.append(args)
+        return {"cmd": ["python", "-m", "ae.cli", "--token=***"], "returncode": 0}
+
+    class FakeProfileRunner:
+        def connection(
+            self,
+            *,
+            profile: str | None = None,
+            timeout: float = 180.0,
+        ) -> dict[str, Any]:
+            assert timeout == 77.0
+            return {
+                "profile": profile,
+                "server": "http://127.0.0.1:19608",
+                "api_server": "http://127.0.0.1:18645",
+                "ca_bundle": str(tmp_path / "workerbee-ca.pem"),
+                "admin_token": "-".join(["admin", "token"]),
+                "urls": {"dashboard": "https://k1s.demo-app.workerbee.localhost:19443/dashboard"},
+            }
+
+    sup.run_ae_cli = MethodType(fake_run, sup)  # type: ignore[method-assign]
+
+    result = deploy_profile_stage(
+        supervisor=sup,
+        profile_runner=FakeProfileRunner(),
+        stage_dir=Path(prepared["stage_dir"]),
+        profile="k1s-dev-min-sqlite",
+        namespace="demo",
+        timeout=77,
+        sync_ingress=lambda: {"synced": True},
+    )
+
+    site = sup.ingress.sites_dir / "profile-workload.caddy"
+    text = site.read_text(encoding="utf-8")
+    skipped = result["profile_workload_ingress"]["skipped_existing"]
+
+    assert len(calls) == 3
+    assert [route["host"] for route in result["profile_workload_ingress"]["routes"]] == [
+        "app.demo-app.workerbee.localhost"
+    ]
+    assert [route["host"] for route in skipped] == ["api.demo-app.workerbee.localhost"]
+    assert all(route["path"] == "/" and route["port"] > 0 for route in skipped)
+    assert "https://api.demo-app.workerbee.localhost" not in text
+    assert "https://app.demo-app.workerbee.localhost" in text
 
 
 def test_realtime_template_contains_websocket_ingress(tmp_path: Path, monkeypatch) -> None:
