@@ -13,6 +13,7 @@ state/
 .local/
 .codex/
 tmp/
+/package.json
 # Benchmark/test artifacts
 snapshots/
 combined/
