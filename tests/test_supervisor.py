@@ -1,12 +1,23 @@
 from __future__ import annotations
 
+import signal
 import subprocess
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from typing import Any
 
+import pytest
+
+from workerbee.contract import WorkerBeeError
 from workerbee.k1s_runtime import K1sRuntime
-from workerbee.supervisor import StackInfo, WorkerBeeSupervisor, _recorded_stack_host_ports
+from workerbee.supervisor import (
+    StackInfo,
+    WorkerBeeSupervisor,
+    _is_controller_for_specs,
+    _recorded_stack_host_ports,
+    _sudo_kill,
+    _terminate_pid,
+)
 
 
 def test_run_ae_retries_remote_apply_read_timeout(
@@ -197,6 +208,8 @@ def test_start_restarts_healthy_stack_when_requested_runtime_changes(
     monkeypatch.setattr(sup, "_write_stack_ingress_sites", lambda **_kwargs: {})
     monkeypatch.setattr(sup, "_start_apishim", lambda _info: 111)
     monkeypatch.setattr(sup, "_start_controller", lambda _info: 222)
+    monkeypatch.setattr(sup, "_verify_controller_ownership", lambda _info: None)
+    monkeypatch.setattr(sup, "_reap_orphan_controllers", lambda **_kwargs: [])
     monkeypatch.setattr("workerbee.supervisor.wait_for_http", lambda *_args, **_kwargs: None)
 
     info = sup.start()
@@ -450,3 +463,170 @@ def _stack(tmp_path: Path, *, runtime: str = "docker") -> StackInfo:
         read_token="-".join(["read", "token"]),
         apishim_token="-".join(["apishim", "token"]),
     )
+
+
+def test_verify_controller_ownership_returns_when_healthy(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="docker")
+    info = _stack(tmp_path)
+    info.controller_pid = 4321
+    monkeypatch.setattr("workerbee.supervisor._pid_alive", lambda _pid: True)
+    monkeypatch.setattr(
+        "workerbee.supervisor.request",
+        lambda *_args, **_kwargs: SimpleNamespace(status=200),
+    )
+
+    # Should not raise.
+    sup._verify_controller_ownership(info, timeout_seconds=1)  # noqa: SLF001
+
+
+def test_verify_controller_ownership_fails_fast_when_port_held(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="docker")
+    info = _stack(tmp_path)
+    info.controller_pid = 4321
+    # Our controller process is gone but a foreign listener still answers /health.
+    monkeypatch.setattr("workerbee.supervisor._pid_alive", lambda _pid: False)
+    monkeypatch.setattr(
+        "workerbee.supervisor.request",
+        lambda *_args, **_kwargs: SimpleNamespace(status=200),
+    )
+
+    with pytest.raises(WorkerBeeError) as excinfo:
+        sup._verify_controller_ownership(info, timeout_seconds=1)  # noqa: SLF001
+    assert excinfo.value.code == "CONTROLLER_PORT_HELD"
+    assert "port held by another process" in excinfo.value.message
+
+
+def test_verify_controller_ownership_fails_when_controller_exits(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="docker")
+    info = _stack(tmp_path)
+    info.controller_pid = 4321
+    monkeypatch.setattr("workerbee.supervisor._pid_alive", lambda _pid: False)
+
+    def _refused(*_args: Any, **_kwargs: Any):
+        raise OSError("connection refused")
+
+    monkeypatch.setattr("workerbee.supervisor.request", _refused)
+
+    with pytest.raises(WorkerBeeError) as excinfo:
+        sup._verify_controller_ownership(info, timeout_seconds=1)  # noqa: SLF001
+    assert excinfo.value.code == "CONTROLLER_START_FAILED"
+
+
+def test_is_controller_for_specs_matches_only_this_project(tmp_path: Path) -> None:
+    specs = (tmp_path / "state" / "specs").resolve()
+    controller = [
+        "/usr/bin/python",
+        "-m",
+        "ae.controller",
+        "--loop",
+        "--specs",
+        str(specs),
+        "--metrics-port",
+        "19108",
+        "--watch",
+    ]
+    assert _is_controller_for_specs(controller, specs) is True
+    # Different project's specs directory must not match.
+    assert _is_controller_for_specs(controller, (tmp_path / "other" / "specs").resolve()) is False
+    # An apishim (no --specs) must not match.
+    assert _is_controller_for_specs(["python", "-m", "ae.apishim", "serve"], specs) is False
+
+
+def test_reap_orphan_controllers_terminates_matching_pids(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="docker")
+    specs = (sup.state_dir / "specs").resolve()
+    orphan = [
+        "/usr/bin/python",
+        "-m",
+        "ae.controller",
+        "--loop",
+        "--specs",
+        str(specs),
+        "--metrics-port",
+        "19108",
+    ]
+    foreign = ["/usr/bin/python", "-m", "ae.controller", "--specs", "/somewhere/else/specs"]
+    monkeypatch.setattr(
+        "workerbee.supervisor._iter_process_cmdlines",
+        lambda: [(901, orphan), (902, foreign), (903, ["python", "-m", "ae.apishim", "serve"])],
+    )
+    terminated: list[int] = []
+    monkeypatch.setattr("workerbee.supervisor._terminate_pid", lambda pid: terminated.append(pid))
+
+    reaped = sup._reap_orphan_controllers()  # noqa: SLF001
+    assert reaped == [901]
+    assert terminated == [901]
+
+
+def test_reap_orphan_controllers_skips_tracked_pid(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="docker")
+    specs = (sup.state_dir / "specs").resolve()
+    tracked = ["python", "-m", "ae.controller", "--specs", str(specs)]
+    monkeypatch.setattr(
+        "workerbee.supervisor._iter_process_cmdlines",
+        lambda: [(555, tracked)],
+    )
+    terminated: list[int] = []
+    monkeypatch.setattr("workerbee.supervisor._terminate_pid", lambda pid: terminated.append(pid))
+
+    reaped = sup._reap_orphan_controllers(exclude_pids={555})  # noqa: SLF001
+    assert reaped == []
+    assert terminated == []
+
+
+def test_terminate_pid_escalates_to_sudo_on_eperm(monkeypatch) -> None:
+    monkeypatch.setattr("workerbee.supervisor._signal_pid", lambda _pid, _sig: "eperm")
+    monkeypatch.setattr("workerbee.supervisor._pid_alive", lambda _pid: False)
+    escalated: list[tuple[int, int]] = []
+    monkeypatch.setattr(
+        "workerbee.supervisor._sudo_kill",
+        lambda pid, sig: escalated.append((pid, sig)),
+    )
+
+    _terminate_pid(7777)
+    assert (7777, signal.SIGTERM) in escalated
+
+
+def test_sudo_kill_targets_group_and_pid(monkeypatch) -> None:
+    monkeypatch.setattr("workerbee.supervisor.shutil.which", lambda _name: "/usr/bin/sudo")
+    commands: list[list[str]] = []
+    monkeypatch.setattr(
+        "workerbee.supervisor.subprocess.run",
+        lambda cmd, **_kwargs: commands.append(cmd),
+    )
+
+    _sudo_kill(1234, signal.SIGTERM)
+    assert ["/usr/bin/sudo", "-n", "kill", "-15", "-1234"] in commands
+    assert ["/usr/bin/sudo", "-n", "kill", "-15", "1234"] in commands
+
+
+def test_sudo_kill_noop_without_sudo(monkeypatch) -> None:
+    monkeypatch.setattr("workerbee.supervisor.shutil.which", lambda _name: None)
+    called: list[Any] = []
+    monkeypatch.setattr(
+        "workerbee.supervisor.subprocess.run",
+        lambda *_args, **_kwargs: called.append(True),
+    )
+
+    _sudo_kill(1234, signal.SIGTERM)
+    assert called == []

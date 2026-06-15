@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import subprocess
@@ -137,6 +138,12 @@ class WorkerBeeSupervisor:
         elif existing:
             self.stop(purge=False)
 
+        # An ae.controller from a prior run (possibly root-owned and orphaned by an
+        # interrupted stop) can still be bound to this project's spec directory and
+        # squat the controller port. Reap it before allocating ports so we do not hand
+        # ae.cli apply a foreign listener that rejects our token with HTTP 403.
+        self._reap_orphan_controllers()
+
         self._ensure_dirs()
         self._cleanup_project_runtime_containers(runtime, include_namespaces=False)
         state_root = self.state_dir.parent.parent
@@ -202,12 +209,7 @@ class WorkerBeeSupervisor:
         info.controller_pid = controller_pid
         self._write_stack(info)
 
-        wait_for_http(
-            f"{info.controller_url}/health",
-            token=info.read_token,
-            timeout_seconds=45,
-            ok_statuses={200},
-        )
+        self._verify_controller_ownership(info)
         wait_for_http(
             f"{info.apishim_url}/healthz",
             token=info.apishim_token,
@@ -222,6 +224,7 @@ class WorkerBeeSupervisor:
     def stop(self, *, purge: bool = False) -> dict[str, Any]:
         info = self.load_stack()
         stopped: list[int] = []
+        tracked_pids = {info.controller_pid, info.apishim_pid} if info else set()
         if info:
             for pid in (info.controller_pid, info.apishim_pid):
                 if pid and _pid_alive(pid):
@@ -229,7 +232,14 @@ class WorkerBeeSupervisor:
                     stopped.append(pid)
             self._cleanup_runtime(info, purge=purge)
             self._remove_stack_ingress_site()
-        elif purge and self._resolve_runtime() == CONTAINERD_RUNTIME:
+        # Reap any orphaned controller still bound to this project's spec directory
+        # (e.g. a root-owned process that survived an interrupted stop) so it cannot
+        # squat the controller port on the next start.
+        stopped.extend(
+            pid for pid in self._reap_orphan_controllers(exclude_pids=tracked_pids)
+            if pid not in stopped
+        )
+        if not info and purge and self._resolve_runtime() == CONTAINERD_RUNTIME:
             self._cleanup_containerd_runtime(
                 network=containerd_network_name(self.state_dir.parent.parent, self.project),
                 purge=True,
@@ -1584,6 +1594,78 @@ https://{api_host} {{
         self._cleanup_runtime(info, purge=False)
         time.sleep(0.5)
 
+    def _verify_controller_ownership(
+        self, info: StackInfo, *, timeout_seconds: float = 45.0
+    ) -> None:
+        """Confirm the controller answering on ``controller_url`` is the one we started.
+
+        If a foreign/orphan process is squatting the controller port, our own
+        ``ae.controller`` cannot bind the metrics port and exits almost immediately,
+        yet the foreign listener keeps answering ``/health`` (and rejects our token).
+        Detect that and fail fast with a clear message instead of letting ``ae.cli
+        apply`` surface a confusing HTTP 403 from the foreign controller.
+        """
+        port = info.controller_port
+        log_path = self.state_dir / "logs" / "controller.log"
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            pid_alive = info.controller_pid is not None and _pid_alive(info.controller_pid)
+            try:
+                resp = request(
+                    f"{info.controller_url}/health",
+                    token=info.admin_token,
+                    timeout=1.5,
+                )
+            except OSError:
+                resp = None
+            if pid_alive and resp is not None and resp.status == 200:
+                return
+            if not pid_alive:
+                if resp is not None:
+                    raise WorkerBeeError(
+                        code="CONTROLLER_PORT_HELD",
+                        message=(
+                            f"controller failed to start on :{port} "
+                            "(port held by another process)"
+                        ),
+                        remediation=(
+                            "Stop the process listening on the controller port "
+                            f"(see `lsof -i :{port}`) or run `workerbee project stop` "
+                            "to reap an orphaned controller, then retry."
+                        ),
+                    )
+                raise WorkerBeeError(
+                    code="CONTROLLER_START_FAILED",
+                    message=f"controller failed to start on :{port} (process exited)",
+                    remediation=f"Inspect controller logs at {log_path}.",
+                )
+            time.sleep(0.5)
+        raise WorkerBeeError(
+            code="CONTROLLER_NOT_READY",
+            message=f"controller did not become ready on :{port} within {int(timeout_seconds)}s",
+            remediation=f"Inspect controller logs at {log_path}.",
+        )
+
+    def _reap_orphan_controllers(self, *, exclude_pids: set[int | None] | None = None) -> list[int]:
+        """Terminate stray ``ae.controller`` processes bound to this project's specs.
+
+        Controllers started under elevation can orphan themselves and survive
+        ``project stop`` / ``project reset`` while remaining untracked by WorkerBee,
+        squatting the auto-allocated controller port. Root-owned strays are escalated
+        through ``sudo`` rather than failing with EPERM on a plain SIGTERM.
+        """
+        specs_dir = (self.state_dir / "specs").resolve()
+        exclude = {pid for pid in (exclude_pids or set()) if pid}
+        reaped: list[int] = []
+        for pid, parts in _iter_process_cmdlines():
+            if pid == os.getpid() or pid in exclude:
+                continue
+            if not _is_controller_for_specs(parts, specs_dir):
+                continue
+            _terminate_pid(pid)
+            reaped.append(pid)
+        return reaped
+
     def _controller_healthy(self, info: StackInfo) -> bool:
         try:
             resp = request(f"{info.controller_url}/health", token=info.read_token, timeout=1.5)
@@ -2411,30 +2493,135 @@ def _pid_alive(pid: int) -> bool:
     try:
         os.kill(pid, 0)
         return True
+    except PermissionError:
+        # The process exists but is owned by another user (e.g. a root-owned
+        # controller started under elevation) -- still alive from our perspective.
+        return True
     except OSError:
         return False
 
 
-def _terminate_pid(pid: int) -> None:
+def _signal_pid(pid: int, sig: int) -> str:
+    """Send ``sig`` to the process group then the bare pid.
+
+    Returns ``"ok"`` if a signal was delivered, ``"gone"`` if the process no longer
+    exists, or ``"eperm"`` if signalling is denied (a root-owned process).
+    """
     try:
-        os.killpg(pid, signal.SIGTERM)
+        os.killpg(pid, sig)
+        return "ok"
     except ProcessLookupError:
-        return
+        pass  # no such process group; the leader may still exist as a bare pid
+    except PermissionError:
+        return "eperm"
     except OSError:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            return
+        pass
+    try:
+        os.kill(pid, sig)
+        return "ok"
+    except ProcessLookupError:
+        return "gone"
+    except PermissionError:
+        return "eperm"
+    except OSError:
+        return "gone"
+
+
+def _sudo_kill(pid: int, sig: int) -> None:
+    """Best-effort escalation for root-owned controllers via passwordless sudo.
+
+    Uses ``sudo -n`` so lifecycle cleanup never blocks on a password prompt; if sudo
+    is unavailable or not configured for the user this is a no-op and the orphan is
+    surfaced elsewhere rather than silently swallowing an EPERM.
+    """
+    sudo = shutil.which("sudo")
+    if sudo is None:
+        return
+    # Negative target signals the whole process group; the bare pid covers the case
+    # where the orphan is not its own group leader.
+    for target in (f"-{pid}", str(pid)):
+        with suppress(Exception):
+            subprocess.run(
+                [sudo, "-n", "kill", f"-{int(sig)}", target],
+                check=False,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+
+
+def _terminate_pid(pid: int) -> None:
+    if _signal_pid(pid, signal.SIGTERM) == "eperm":
+        _sudo_kill(pid, signal.SIGTERM)
     deadline = time.monotonic() + 8
     while time.monotonic() < deadline:
         if not _pid_alive(pid):
             return
         time.sleep(0.2)
+    if _signal_pid(pid, signal.SIGKILL) == "eperm":
+        _sudo_kill(pid, signal.SIGKILL)
+
+
+def _iter_process_cmdlines() -> list[tuple[int, list[str]]]:
+    """Yield ``(pid, argv)`` for running processes, cross-platform.
+
+    Prefers ``/proc`` on Linux and falls back to ``ps`` elsewhere (e.g. macOS).
+    """
+    proc_root = Path("/proc")
+    results: list[tuple[int, list[str]]] = []
+    if proc_root.is_dir():
+        for entry in proc_root.iterdir():
+            if not entry.name.isdigit():
+                continue
+            cmdline = entry / "cmdline"
+            try:
+                raw = cmdline.read_bytes().decode("utf-8", errors="replace")
+            except OSError:
+                continue
+            parts = [part for part in raw.split("\0") if part]
+            if parts:
+                results.append((int(entry.name), parts))
+        return results
     try:
-        os.killpg(pid, signal.SIGKILL)
+        proc = subprocess.run(
+            ["ps", "-axo", "pid=,command="],
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=3,
+            check=False,
+        )
+    except Exception:
+        return results
+    for line in proc.stdout.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        pid_text, _, command = line.partition(" ")
+        if not pid_text.isdigit() or not command:
+            continue
+        try:
+            parts = [part for part in shlex.split(command, posix=True) if part]
+        except Exception:
+            parts = command.split()
+        if parts:
+            results.append((int(pid_text), parts))
+    return results
+
+
+def _is_controller_for_specs(parts: list[str], specs_dir: Path) -> bool:
+    """True if ``parts`` is an ``ae.controller`` invocation watching ``specs_dir``."""
+    if "ae.controller" not in parts:
+        return False
+    if "--specs" not in parts:
+        return False
+    index = parts.index("--specs") + 1
+    if index >= len(parts):
+        return False
+    try:
+        return Path(parts[index]).expanduser().resolve() == specs_dir
     except OSError:
-        with suppress(OSError):
-            os.kill(pid, signal.SIGKILL)
+        return False
 
 
 def _split_lines(raw: str) -> list[str]:

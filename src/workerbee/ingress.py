@@ -486,6 +486,8 @@ https://{self.dashboard_host} {{
             run_args.extend(["--label", label])
         if self.runtime == "docker":
             run_args.extend(["--add-host", "host.docker.internal:host-gateway"])
+        if self.runtime == "podman":
+            run_args.extend(["--add-host", "host.containers.internal:192.168.5.2"])
         run_args.extend(
             [
                 os.getenv("WORKERBEE_CADDY_IMAGE", "docker.io/library/caddy:2.8"),
