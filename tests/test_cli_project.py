@@ -153,6 +153,53 @@ def test_runbook_update_cli_reads_file_content(tmp_path: Path, monkeypatch) -> N
     assert captured["update"]["source"] == "test"
 
 
+def test_runbook_update_json_error_includes_workerbee_error_code(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    class FakeDaemon:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def project_runbook_update(self, **_kwargs: object) -> dict[str, object]:
+            raise cli.WorkerBeeError(
+                code="RUNBOOK_SECRET_DETECTED",
+                message="runbook update appears to contain a secret value",
+                details={"findings": [{"field": "content", "line": 1, "marker": "token"}]},
+            )
+
+    monkeypatch.setattr(cli, "WorkerBeeDaemon", FakeDaemon)
+
+    assert (
+        cli.main(
+            [
+                "--json",
+                "--state-root",
+                str(tmp_path / "state"),
+                "runbook",
+                "update",
+                "--cwd",
+                str(tmp_path),
+                "--project",
+                "Demo App",
+                "--content",
+                "token=abcdefghi",
+            ]
+        )
+        == 1
+    )
+
+    captured = capsys.readouterr()
+    payload = json.loads(captured.out)
+    assert captured.err == ""
+    assert payload["ok"] is False
+    assert payload["error"]["code"] == "RUNBOOK_SECRET_DETECTED"
+    assert payload["error"]["details"] == {
+        "findings": [{"field": "content", "line": 1, "marker": "token"}]
+    }
+
+
 def test_logs_cli_accepts_mcp_style_profile_target(
     tmp_path: Path,
     monkeypatch,

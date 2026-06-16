@@ -87,6 +87,11 @@ def test_session_start_persists_cwd_and_lazy_mode(
     assert result["project_runbook"]["markdown_path"].endswith(
         "/artifacts/runbooks/project-runbook.md"
     )
+    assert result["project_runbook"]["ensure"] == {
+        "enabled": True,
+        "changed": True,
+        "action": "created",
+    }
     assert Path(result["project_runbook"]["markdown_path"]).is_file()
     assert result["project_status"]["project_runbook"]["exists"] is True
     records = daemon._read_registry()  # noqa: SLF001 - verifies persisted session metadata
@@ -111,6 +116,11 @@ def test_session_start_preserves_existing_project_runbook(
     second = daemon.session_start(cwd=cwd, project="demo")
 
     assert second["project_runbook"]["markdown_path"] == str(runbook_path)
+    assert second["project_runbook"]["ensure"] == {
+        "enabled": True,
+        "changed": False,
+        "action": "existing",
+    }
     assert runbook_path.read_text(encoding="utf-8") == (
         "# Custom project runbook\n\nKeep this path.\n"
     )
@@ -146,9 +156,46 @@ def test_project_status_backfills_missing_runbook_for_existing_project(
     status = daemon.project_status("legacy")
 
     assert status["project_runbook"]["exists"] is True
+    assert status["project_runbook"]["ensure"] == {
+        "enabled": True,
+        "changed": True,
+        "action": "created",
+    }
     assert Path(status["project_runbook"]["markdown_path"]) == runbook_path
     assert runbook_path.is_file()
     assert "WorkerBee Project Runbook - legacy" in runbook_path.read_text(encoding="utf-8")
+
+
+def test_project_status_recovers_missing_runbook_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    cwd = tmp_path / "checkout"
+    cwd.mkdir()
+    daemon = WorkerBeeDaemon(state_root=tmp_path / "state", cwd=tmp_path)
+    daemon._register_project(  # noqa: SLF001 - simulates a partially recovered project
+        "legacy",
+        cwd_hint=str(cwd),
+        git_root=str(cwd),
+        git_branch="dev",
+        explicit_project=True,
+    )
+    runbook_dir = tmp_path / "state" / "projects" / "legacy" / "artifacts" / "runbooks"
+    runbook_dir.mkdir(parents=True)
+    runbook_path = runbook_dir / "project-runbook.md"
+    metadata_path = runbook_dir / "project-runbook.json"
+    runbook_path.write_text("# Recovered Runbook\n\nKeep this file.\n", encoding="utf-8")
+
+    status = daemon.project_status("legacy")
+
+    assert status["project_runbook"]["ensure"] == {
+        "enabled": True,
+        "changed": True,
+        "action": "metadata-recovered",
+    }
+    assert metadata_path.is_file()
+    assert runbook_path.read_text(encoding="utf-8") == "# Recovered Runbook\n\nKeep this file.\n"
 
 
 def test_agent_instructions_include_first_run_security_review_guidance() -> None:
@@ -163,6 +210,7 @@ def test_agent_instructions_include_first_run_security_review_guidance() -> None
     assert "project_runbook" in instructions
     assert "workerbee_v1_project_runbook_update" in instructions
     assert "Keep secrets out of runbooks" in instructions
+    assert "redacted placeholders" in instructions
     assert "first time WorkerBee is coming up" in instructions
     assert "temporary native k1s" in instructions
     assert "bring, run, or start the project up in WorkerBee" in instructions

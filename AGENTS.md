@@ -27,7 +27,9 @@ When `workerbee_v1_session_start` returns `project_runbook`, review it before
 choosing a bring-up, deploy, validation, or repair path. After a successful
 bring-up, deployment, repair, or security review, update it with
 `workerbee_v1_project_runbook_update` so later agents and human operators can
-repeat the proven project-specific process. Keep secrets out of runbooks.
+repeat the proven project-specific process. Keep secrets out of runbooks; use
+redacted placeholders for tokens, passwords, API keys, and private key material
+because runbook updates reject high-confidence secret leaks.
 
 If the user asks to bring, run, or start the project up in WorkerBee, treat that
 as a request for a running app workload. Build needed local images, stage and

@@ -225,7 +225,7 @@ def test_project_runbook_update_export_import_and_path_guard(tmp_path: Path) -> 
 
     text = runbook_path.read_text(encoding="utf-8")
     assert "## Update -" in text
-    assert "Summary: validated path" in text
+    assert "Summary:\n> validated path" in text
     assert "workerbee_v1_project_status" in text
     assert appended["history_count"] == 1
 
@@ -256,6 +256,104 @@ def test_project_runbook_update_export_import_and_path_guard(tmp_path: Path) -> 
     with pytest.raises(WorkerBeeError) as escape_exc:
         daemon.project_runbook_export(project="demo-app", path="../escape.md")
     assert escape_exc.value.code == "RUNBOOK_PATH_OUTSIDE_REPO"
+
+
+def test_project_runbook_update_sanitizes_metadata_fields(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    daemon = WorkerBeeDaemon(state_root=tmp_path / "state", cwd=checkout)
+
+    result = daemon.project_runbook_update(
+        project="Demo App",
+        content="- Validate the hardened route.",
+        source="Agent\n# Bad `Source`",
+        summary="# Heading\n- item `code`",
+    )
+
+    runbook_text = Path(result["markdown_path"]).read_text(encoding="utf-8")
+    assert result["source"] == "agent-bad-source"
+    assert result["summary"] == "Heading - item 'code'"
+    assert "Source: `agent-bad-source`" in runbook_text
+    assert "Summary:\n> Heading - item 'code'" in runbook_text
+    assert "# Heading\n- item `code`" not in runbook_text
+
+
+def test_project_runbook_update_rejects_high_confidence_secrets(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    daemon = WorkerBeeDaemon(state_root=tmp_path / "state", cwd=checkout)
+
+    with pytest.raises(WorkerBeeError) as api_key_exc:
+        daemon.project_runbook_update(
+            project="Demo App",
+            content="OPENAI_API_KEY=sk-live-secret123",
+            summary="leaked key",
+        )
+    payload = api_key_exc.value.public_dict()
+    assert payload["code"] == "RUNBOOK_SECRET_DETECTED"
+    assert payload["details"] == {
+        "findings": [{"field": "content", "line": 1, "marker": "api_key"}]
+    }
+    assert "sk-live-secret123" not in json.dumps(payload)
+
+    with pytest.raises(WorkerBeeError) as private_key_exc:
+        daemon.project_runbook_update(
+            project="Demo App",
+            content="-----BEGIN OPENSSH PRIVATE KEY-----\nabc123",
+        )
+    assert private_key_exc.value.code == "RUNBOOK_SECRET_DETECTED"
+    assert private_key_exc.value.details["findings"][0] == {
+        "field": "content",
+        "line": 1,
+        "marker": "private_key",
+    }
+
+    assert not (
+        tmp_path
+        / "state"
+        / "projects"
+        / "demo-app"
+        / "artifacts"
+        / "runbooks"
+        / "project-runbook.md"
+    ).exists()
+
+
+def test_project_runbook_update_allows_placeholder_secret_guidance(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    daemon = WorkerBeeDaemon(state_root=tmp_path / "state", cwd=checkout)
+
+    result = daemon.project_runbook_update(
+        project="Demo App",
+        content=(
+            "Set TOKEN in your environment.\n"
+            "Use token=*** in docs.\n"
+            "Reference api_key=sops://workerbee/demo when needed."
+        ),
+        summary="Use password=$WORKERBEE_PASSWORD for local examples only.",
+    )
+
+    text = Path(result["markdown_path"]).read_text(encoding="utf-8")
+    assert "token=***" in text
+    assert "sops://workerbee/demo" in text
+
+
+def test_project_runbook_import_rejects_high_confidence_secrets(tmp_path: Path) -> None:
+    checkout = tmp_path / "checkout"
+    checkout.mkdir()
+    repo_runbook = checkout / "docs" / "workerbee-runbook.md"
+    repo_runbook.parent.mkdir()
+    repo_runbook.write_text("# Bad\n\nclient_secret: supersecretvalue\n", encoding="utf-8")
+    daemon = WorkerBeeDaemon(state_root=tmp_path / "state", cwd=checkout)
+
+    with pytest.raises(WorkerBeeError) as exc:
+        daemon.project_runbook_import(project="Demo App", path="docs/workerbee-runbook.md")
+
+    assert exc.value.code == "RUNBOOK_SECRET_DETECTED"
+    assert exc.value.details["findings"] == [
+        {"field": "content", "line": 3, "marker": "client_secret"}
+    ]
 
 
 def test_with_project_prepares_containerd_privilege_for_actions(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import time
 from pathlib import Path
@@ -13,6 +14,52 @@ from workerbee.contract import WorkerBeeError
 PROJECT_RUNBOOK_API_VERSION = "workerbee.project-runbook/v1"
 DEFAULT_REPO_RUNBOOK_PATH = "docs/workerbee-runbook.md"
 RUNBOOK_UPDATE_MODES = {"append", "replace"}
+RUNBOOK_SOURCE_MAX_LENGTH = 48
+RUNBOOK_SUMMARY_MAX_LENGTH = 240
+RUNBOOK_SECRET_VALUE_MIN_LENGTH = 8
+RUNBOOK_SECRET_REFERENCE_PREFIXES = (
+    "sops://",
+    "vault://",
+    "op://",
+    "1password://",
+    "aws-secretsmanager://",
+    "gcp-secret-manager://",
+    "azure-keyvault://",
+)
+RUNBOOK_SECRET_PLACEHOLDER_WORDS = (
+    "changeme",
+    "dummy",
+    "example",
+    "placeholder",
+    "redacted",
+    "replace-me",
+    "test",
+    "your-",
+    "your_",
+)
+RUNBOOK_SECRET_MARKER_RE = re.compile(
+    r"""(?ix)
+    (?<![a-z0-9])
+    (?P<marker>
+        [a-z0-9_.-]*
+        (?:
+            api[_-]?key
+            | client[_-]?secret
+            | access[_-]?key
+            | private[_-]?key
+            | password
+            | passwd
+            | token
+            | secret
+        )
+        [a-z0-9_.-]*
+    )
+    \s*[:=]\s*
+    (?P<value>.+?)
+    \s*$
+    """
+)
+RUNBOOK_PRIVATE_KEY_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")
 
 
 def project_runbook_status(
@@ -54,6 +101,8 @@ def ensure_project_runbook(
 ) -> dict[str, Any]:
     paths = _paths(state_dir)
     metadata = _read_metadata(paths["metadata"])
+    ensure_action = "existing"
+    ensure_changed = False
     if not paths["markdown"].is_file():
         now = _now()
         paths["dir"].mkdir(parents=True, exist_ok=True)
@@ -82,6 +131,8 @@ def ensure_project_runbook(
             "history_count": 0,
         }
         _write_metadata(paths["metadata"], metadata)
+        ensure_action = "created"
+        ensure_changed = True
     elif not metadata:
         now = _now()
         metadata = {
@@ -96,6 +147,8 @@ def ensure_project_runbook(
             "history_count": 0,
         }
         _write_metadata(paths["metadata"], metadata)
+        ensure_action = "metadata-recovered"
+        ensure_changed = True
 
     return _status_payload(
         state_dir=state_dir,
@@ -108,6 +161,11 @@ def ensure_project_runbook(
         dashboard_url=dashboard_url,
         exists=True,
         metadata=metadata,
+        ensure={
+            "enabled": True,
+            "changed": ensure_changed,
+            "action": ensure_action,
+        },
     )
 
 
@@ -131,6 +189,7 @@ def update_project_runbook(
             message="runbook update content is empty",
             remediation="Pass non-empty markdown content.",
         )
+    _raise_if_runbook_secrets(content=update, summary=summary)
 
     paths = _paths(state_dir)
     before_exists = paths["markdown"].is_file()
@@ -138,6 +197,8 @@ def update_project_runbook(
         _snapshot(paths)
     paths["dir"].mkdir(parents=True, exist_ok=True)
     now = _now()
+    safe_source = _safe_source(source)
+    safe_summary = _safe_summary(summary)
 
     if selected_mode == "replace":
         new_text = f"{update}\n"
@@ -151,11 +212,13 @@ def update_project_runbook(
                 git_branch=git_branch,
             )
         current = paths["markdown"].read_text(encoding="utf-8").rstrip()
-        summary_line = f"\nSummary: {summary.strip()}" if summary and summary.strip() else ""
+        metadata_lines = f"Source: `{safe_source}`\n"
+        if safe_summary:
+            metadata_lines = f"{metadata_lines}Summary:\n> {safe_summary}\n"
         new_text = (
             f"{current}\n\n"
             f"## Update - {now}\n\n"
-            f"Source: `{_safe_source(source)}`{summary_line}\n\n"
+            f"{metadata_lines}\n"
             f"{update}\n"
         )
     paths["markdown"].write_text(new_text, encoding="utf-8")
@@ -175,8 +238,8 @@ def update_project_runbook(
             "api_version": PROJECT_RUNBOOK_API_VERSION,
             "project": project,
             "updated_at": now,
-            "source": _safe_source(source),
-            "summary": summary.strip() if summary and summary.strip() else None,
+            "source": safe_source,
+            "summary": safe_summary,
             "history_count": len(list(paths["history"].glob("project-runbook-*.md"))),
         }
     )
@@ -315,6 +378,7 @@ def _status_payload(
     dashboard_url: str | None,
     exists: bool,
     metadata: dict[str, Any],
+    ensure: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     repo_path = metadata.get("repo_path") if isinstance(metadata.get("repo_path"), str) else None
     repo_file = None
@@ -346,6 +410,12 @@ def _status_payload(
         "repo_exists": bool(repo_file and repo_file.is_file()),
         "recommended_repo_path": DEFAULT_REPO_RUNBOOK_PATH,
         "history_count": int(metadata.get("history_count") or 0),
+        "ensure": ensure
+        or {
+            "enabled": False,
+            "changed": False,
+            "action": "status-only",
+        },
     }
 
 
@@ -419,8 +489,15 @@ Dashboard: {dashboard}
 
 ## Update Policy
 
+- Public session and runbook status calls may create or recover this state-local runbook. Inspect
+  the returned `ensure.action` field to distinguish `created`, `metadata-recovered`, `existing`,
+  and read-only helper `status-only` results.
 - After a successful bring-up, deploy, repair, or security review, append the reproducible steps
   with `workerbee_v1_project_runbook_update`.
+- Runbook updates and imports reject high-confidence secret assignments and private key blocks.
+  Use redacted placeholders such as `TOKEN=***` or references to secret managers instead.
+- Update `source` and `summary` metadata are normalized before storage so appended sections remain
+  single-line and Markdown-safe.
 - When this runbook is ready to persist in the repo, export it to
   `{DEFAULT_REPO_RUNBOOK_PATH}` with explicit overwrite approval.
 """
@@ -498,8 +575,121 @@ def _relative_to_base(path: Path, *, cwd: Path, git_root: Path | None) -> str:
 
 
 def _safe_source(source: str) -> str:
-    value = str(source or "agent").strip() or "agent"
-    return value[:80]
+    value = str(source or "agent").strip().lower()
+    value = re.sub(r"[^a-z0-9_.:-]+", "-", value).strip("-._:")
+    if not value:
+        value = "agent"
+    return value[:RUNBOOK_SOURCE_MAX_LENGTH].rstrip("-._:") or "agent"
+
+
+def _safe_summary(summary: str | None) -> str | None:
+    value = str(summary or "").strip()
+    if not value:
+        return None
+    value = value.replace("`", "'")
+    value = re.sub(r"\s+", " ", value).strip()
+    value = value.lstrip("#>-*+ ")
+    if not value:
+        return None
+    if len(value) > RUNBOOK_SUMMARY_MAX_LENGTH:
+        value = f"{value[: RUNBOOK_SUMMARY_MAX_LENGTH - 3].rstrip()}..."
+    return value
+
+
+def _raise_if_runbook_secrets(*, content: str, summary: str | None) -> None:
+    findings = [
+        *_runbook_secret_findings(content, field="content"),
+        *_runbook_secret_findings(summary or "", field="summary"),
+    ]
+    if not findings:
+        return
+    raise WorkerBeeError(
+        code="RUNBOOK_SECRET_DETECTED",
+        message="runbook update appears to contain a secret value",
+        details={"findings": findings},
+        remediation=(
+            "Remove secret values before updating the runbook. Use redacted placeholders such as "
+            "`TOKEN=***` or references to secret managers instead."
+        ),
+    )
+
+
+def _runbook_secret_findings(value: str, *, field: str) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for line_number, line in enumerate(value.splitlines(), start=1):
+        if RUNBOOK_PRIVATE_KEY_RE.search(line):
+            findings.append(
+                {
+                    "field": field,
+                    "line": line_number,
+                    "marker": "private_key",
+                }
+            )
+        marker_match = RUNBOOK_SECRET_MARKER_RE.search(line)
+        if not marker_match:
+            continue
+        marker = _secret_marker(marker_match.group("marker"))
+        secret_value = _strip_secret_value(marker_match.group("value"))
+        if _runbook_secret_value_is_placeholder(secret_value):
+            continue
+        findings.append(
+            {
+                "field": field,
+                "line": line_number,
+                "marker": marker,
+            }
+        )
+    return findings
+
+
+def _secret_marker(value: str) -> str:
+    marker = value.lower().replace("-", "_").replace(".", "_")
+    if "api_key" in marker:
+        return "api_key"
+    if "client_secret" in marker:
+        return "client_secret"
+    if "access_key" in marker:
+        return "access_key"
+    if "private_key" in marker:
+        return "private_key"
+    if "password" in marker or "passwd" in marker:
+        return "password"
+    if "token" in marker:
+        return "token"
+    return "secret"
+
+
+def _strip_secret_value(value: str) -> str:
+    stripped = value.split("#", 1)[0].strip().rstrip(",;")
+    if len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
+        stripped = stripped[1:-1].strip()
+    return stripped
+
+
+def _runbook_secret_value_is_placeholder(value: str) -> bool:
+    if not value:
+        return True
+    lowered = value.lower()
+    if len(value) < RUNBOOK_SECRET_VALUE_MIN_LENGTH:
+        return True
+    if any(lowered.startswith(prefix) for prefix in RUNBOOK_SECRET_REFERENCE_PREFIXES):
+        return True
+    if re.fullmatch(r"[*xX]+", value):
+        return True
+    if re.fullmatch(r"<[^>\s]+>", value):
+        return True
+    if re.fullmatch(r"\$[A-Za-z_][A-Za-z0-9_]*", value):
+        return True
+    if re.fullmatch(r"\$\{[^}]+\}", value):
+        return True
+    if re.fullmatch(r"\$\([^)]+\)", value):
+        return True
+    if re.fullmatch(r"\{\{[^}]+\}\}", value):
+        return True
+    if any(word in lowered for word in RUNBOOK_SECRET_PLACEHOLDER_WORDS):
+        return True
+    # Keep this guard high-confidence: explanatory prose is not treated as a leaked secret.
+    return bool(re.search(r"\s", value))
 
 
 def _now() -> str:

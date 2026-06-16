@@ -150,7 +150,9 @@ queues, or integration behavior that benefits from a running local stack.
    the requested behavior is verified. Use probe `headers` for signed requests such as S3 PUTs.
 13. After a successful bring-up, deployment, repair, or security review, update the project runbook
    with `workerbee_v1_project_runbook_update`. Keep secrets out; record commands, routes, caveats,
-   validation results, and follow-up steps that a future agent or operator can repeat.
+   validation results, and follow-up steps that a future agent or operator can repeat. Use
+   redacted placeholders for tokens, passwords, API keys, and private key material because runbook
+   updates reject high-confidence secret leaks.
 14. For larger multi-feature requests, when prior WorkerBee stages are performing well, plan a
    coherent feature batch and work one feature checkpoint at a time. After each checkpoint, run
    repo tests plus relevant WorkerBee deploy/status/log/probe validation. If validation fails,
@@ -218,7 +220,9 @@ When `workerbee_v1_session_start` returns `project_runbook`, review it before
 choosing a bring-up, deploy, validation, or repair path. After a successful
 bring-up, deployment, repair, or security review, update it with
 `workerbee_v1_project_runbook_update` so later agents and human operators can
-repeat the proven project-specific process. Keep secrets out of runbooks.
+repeat the proven project-specific process. Keep secrets out of runbooks; use
+redacted placeholders for tokens, passwords, API keys, and private key material
+because runbook updates reject high-confidence secret leaks.
 
 If the user asks to bring, run, or start the project up in WorkerBee, treat that
 as a request for a running app workload. Build needed local images, stage and
@@ -402,7 +406,8 @@ def runbook_payload() -> dict[str, Any]:
             ),
             (
                 "After successful bring-up, deployment, repair, or security review, update the "
-                "project runbook with workerbee_v1_project_runbook_update and keep secrets out."
+                "project runbook with workerbee_v1_project_runbook_update; use redacted "
+                "placeholders because updates reject high-confidence secret leaks."
             ),
             (
                 "When commit authority is present, commit each green checkpoint before moving "

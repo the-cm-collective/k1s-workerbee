@@ -34,6 +34,7 @@ from workerbee.containerd_helper import (
     stop_containerd_helper,
     temporary_containerd_privilege_env,
 )
+from workerbee.contract import WorkerBeeError
 from workerbee.daemon import WorkerBeeDaemon
 from workerbee.ingress import export_global_ingress_ca
 from workerbee.k1s_runtime import resolve_k1s_runtime
@@ -1224,6 +1225,19 @@ def main(argv: list[str] | None = None) -> int:
                 json_out=args.json,
             )
     except Exception as exc:  # noqa: BLE001
+        if getattr(args, "json", False):
+            if isinstance(exc, WorkerBeeError):
+                error = exc.public_dict()
+            else:
+                error = {
+                    "code": "CLI_ERROR",
+                    "message": str(exc),
+                    "details": {},
+                    "retryable": False,
+                    "remediation": None,
+                }
+            print(json.dumps({"ok": False, "error": error}, indent=2, sort_keys=True))
+            return 1
         print(f"workerbee: {exc}", file=sys.stderr)
         return 1
     parser.error(f"unsupported command: {args.cmd}")
