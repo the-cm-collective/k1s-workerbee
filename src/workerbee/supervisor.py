@@ -49,6 +49,7 @@ from workerbee.runtime_support import (
     containerd_namespace,
     containerd_network_name,
     containerd_network_subnet,
+    ensure_podman_network,
     nerdctl_binary,
     resolve_runtime,
     runtime_command_args,
@@ -1251,18 +1252,7 @@ https://{api_host} {{
 
     def _ensure_network(self, runtime: str, network: str) -> None:
         if runtime == "podman":
-            exists = subprocess.run(
-                ["podman", "network", "exists", network],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            if exists.returncode != 0:
-                subprocess.run(
-                    ["podman", "network", "create", network],
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
+            ensure_podman_network(network)
         elif runtime == CONTAINERD_RUNTIME:
             state_root = self.state_dir.parent.parent
             exists = subprocess.run(

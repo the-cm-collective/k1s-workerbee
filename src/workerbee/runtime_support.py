@@ -23,6 +23,7 @@ WORKERBEE_LABEL = "workerbee.managed=true"
 CONTAINERD_RUNTIME = "containerd"
 CONTAINERD_RESERVED_NAMESPACES = frozenset({"ae", "k8s.io", "moby", "default"})
 CONTAINERD_REQUIRED_CNI_PLUGINS = ("bridge", "host-local", "loopback", "portmap")
+PODMAN_COMPATIBLE_CNI_VERSION = "0.4.0"
 MICROK8S_ROOT = Path("/var/snap/microk8s")
 MICROK8S_CONTAINERD_SOCKET = MICROK8S_ROOT / "common" / "run" / "containerd.sock"
 BUILD_SUMMARY_TAIL_LINES = 8
@@ -110,6 +111,7 @@ def runtime_diagnostics(
         diagnostics["ok"] = True
         if runtime == "podman":
             diagnostics["podman_rootless"] = _podman_rootless()
+            diagnostics["podman_cni"] = podman_cni_diagnostics()
         if runtime == "docker":
             diagnostics["docker_desktop_hint"] = _docker_desktop_hint()
         if runtime == CONTAINERD_RUNTIME:
@@ -130,6 +132,245 @@ def runtime_diagnostics(
         diagnostics["ok"] = False
         diagnostics["error"] = exc.public_dict()
     return diagnostics
+
+
+def ensure_podman_network(network: str, *, podman_bin: str = "podman") -> dict[str, Any]:
+    """Create a WorkerBee Podman network and normalize legacy CNI configs when needed."""
+    if not network:
+        raise WorkerBeeError(
+            code="PODMAN_NETWORK_MISSING",
+            message="Podman network name is required",
+            remediation="Restart the WorkerBee project so it can allocate a scoped network name.",
+        )
+    cmd = RuntimeCommand(podman_bin)
+    exists = cmd.run(["network", "exists", network], timeout=10)
+    created = False
+    if exists.returncode != 0:
+        create = cmd.run(["network", "create", network], timeout=30)
+        if create.returncode != 0:
+            raise WorkerBeeError(
+                code="PODMAN_NETWORK_CREATE_FAILED",
+                message=create.stdout.strip() or f"podman network create {network} failed",
+                details={"network": network, "stdout": create.stdout},
+                remediation=(
+                    "Inspect Podman/CNI state, remove stale WorkerBee networks, then retry."
+                ),
+            )
+        created = True
+
+    before = podman_cni_diagnostics(network=network)
+    normalized = _normalize_workerbee_podman_cni(network)
+    after = podman_cni_diagnostics(network=network)
+    target = after.get("target_config")
+    if isinstance(target, dict) and target.get("incompatible"):
+        raise WorkerBeeError(
+            code="PODMAN_CNI_INCOMPATIBLE",
+            message=f"Podman network {network} has an incompatible CNI firewall config",
+            details={"network": network, "diagnostics": after, "normalization": normalized},
+            remediation=(
+                "Use a compatible Podman CNI config version, remove stale WorkerBee CNI files, "
+                "or run WorkerBee with the native containerd runtime."
+            ),
+        )
+
+    inspect = cmd.run(["network", "inspect", network], timeout=10)
+    if inspect.returncode != 0:
+        raise WorkerBeeError(
+            code="PODMAN_NETWORK_INSPECT_FAILED",
+            message=inspect.stdout.strip() or f"podman network inspect {network} failed",
+            details={
+                "network": network,
+                "stdout": inspect.stdout,
+                "diagnostics": after,
+                "normalization": normalized,
+            },
+            remediation="Inspect Podman/CNI warnings and recreate the WorkerBee project network.",
+        )
+    return {
+        "ok": True,
+        "network": network,
+        "created": created,
+        "diagnostics_before": before,
+        "diagnostics_after": after,
+        "normalization": normalized,
+    }
+
+
+def podman_cni_diagnostics(network: str | None = None) -> dict[str, Any]:
+    configs = _podman_cni_configs()
+    target = None
+    invalid: list[dict[str, Any]] = []
+    workerbee_invalid: list[dict[str, Any]] = []
+    foreign_invalid: list[dict[str, Any]] = []
+    for cfg in configs:
+        if network and cfg.get("name") == network:
+            target = cfg
+        if cfg.get("incompatible"):
+            invalid.append(cfg)
+            if cfg.get("workerbee_owned"):
+                workerbee_invalid.append(cfg)
+            else:
+                foreign_invalid.append(cfg)
+    return {
+        "config_dirs": [str(path) for path in _podman_cni_config_dirs()],
+        "target_network": network,
+        "target_config": target,
+        "invalid_config_count": len(invalid),
+        "workerbee_invalid_config_count": len(workerbee_invalid),
+        "foreign_invalid_config_count": len(foreign_invalid),
+        "invalid_configs": invalid,
+        "foreign_invalid_configs": foreign_invalid,
+    }
+
+
+def _normalize_workerbee_podman_cni(network: str) -> dict[str, Any]:
+    if not network.startswith("workerbee-"):
+        return {"changed": False, "reason": "network_not_workerbee_owned", "network": network}
+    changes: list[dict[str, Any]] = []
+    target_seen = False
+    for cfg in _podman_cni_configs():
+        name = str(cfg.get("name") or "")
+        if name == network:
+            target_seen = True
+        if not cfg.get("workerbee_owned"):
+            continue
+        if not cfg.get("incompatible"):
+            continue
+        path = Path(str(cfg.get("path") or ""))
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "changed": False,
+                "reason": "target_config_unreadable",
+                "network": network,
+                "path": str(path),
+                "error": str(exc),
+            }
+        data["cniVersion"] = PODMAN_COMPATIBLE_CNI_VERSION
+        content = json.dumps(data, indent=2) + "\n"
+        try:
+            backup = path.with_suffix(path.suffix + ".bak-workerbee")
+            if not backup.exists():
+                backup.write_text(path.read_text(encoding="utf-8"), encoding="utf-8")
+            path.write_text(content, encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "changed": False,
+                "reason": "target_config_write_failed",
+                "network": network,
+                "path": str(path),
+                "error": str(exc),
+            }
+        changes.append(
+            {
+                "path": str(path),
+                "name": name or None,
+                "target": name == network,
+                "from_cni_version": cfg.get("cni_version"),
+                "to_cni_version": PODMAN_COMPATIBLE_CNI_VERSION,
+            }
+        )
+    if not changes:
+        return {
+            "changed": False,
+            "reason": "target_config_compatible" if target_seen else "target_config_not_found",
+            "network": network,
+        }
+    return {"changed": True, "network": network, "changes": changes}
+
+
+def _podman_cni_config_dirs() -> list[Path]:
+    candidates: list[Path] = []
+    for raw in (
+        os.getenv("CNI_CONF_DIR"),
+        os.getenv("NETCONFPATH"),
+        os.getenv("CNI_CONFIG_PATH"),
+    ):
+        if raw:
+            candidates.extend(Path(item).expanduser() for item in raw.split(os.pathsep) if item)
+    candidates.extend(
+        [
+            Path("/etc/cni/net.d"),
+            Path.home() / ".config" / "cni" / "net.d",
+        ]
+    )
+    seen: set[Path] = set()
+    result: list[Path] = []
+    for candidate in candidates:
+        try:
+            key = candidate.resolve(strict=False)
+        except OSError:
+            key = candidate
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(candidate)
+    return result
+
+
+def _podman_cni_configs() -> list[dict[str, Any]]:
+    configs: list[dict[str, Any]] = []
+    for directory in _podman_cni_config_dirs():
+        try:
+            entries = sorted(
+                path
+                for path in directory.iterdir()
+                if path.is_file() and path.suffix in {".conf", ".conflist"}
+            )
+        except OSError:
+            continue
+        for path in entries:
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception as exc:  # noqa: BLE001
+                configs.append(
+                    {
+                        "path": str(path),
+                        "name": None,
+                        "cni_version": None,
+                        "plugins": [],
+                        "workerbee_owned": False,
+                        "incompatible": False,
+                        "error": str(exc),
+                    }
+                )
+                continue
+            name = str(data.get("name") or "")
+            plugins = _cni_plugin_types(data)
+            cni_version = str(data.get("cniVersion") or "")
+            incompatible = _podman_cni_firewall_incompatible(cni_version, plugins)
+            configs.append(
+                {
+                    "path": str(path),
+                    "name": name or None,
+                    "cni_version": cni_version or None,
+                    "plugins": plugins,
+                    "workerbee_owned": name.startswith("workerbee-"),
+                    "incompatible": incompatible,
+                }
+            )
+    return configs
+
+
+def _cni_plugin_types(data: dict[str, Any]) -> list[str]:
+    raw_plugins = data.get("plugins")
+    plugins = raw_plugins if isinstance(raw_plugins, list) else [data]
+    result: list[str] = []
+    for plugin in plugins:
+        if isinstance(plugin, dict) and plugin.get("type"):
+            result.append(str(plugin["type"]))
+    return result
+
+
+def _podman_cni_firewall_incompatible(cni_version: str, plugins: list[str]) -> bool:
+    if "firewall" not in plugins:
+        return False
+    try:
+        major = int(str(cni_version).split(".", 1)[0])
+    except Exception:
+        return False
+    return major >= 1
 
 
 def cleanup_runtime(

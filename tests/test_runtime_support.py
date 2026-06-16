@@ -9,6 +9,7 @@ import pytest
 
 from workerbee.contract import WorkerBeeError
 from workerbee.runtime_support import (
+    PODMAN_COMPATIBLE_CNI_VERSION,
     build_image_with_runtime,
     cleanup_runtime,
     containerd_base_args,
@@ -20,6 +21,8 @@ from workerbee.runtime_support import (
     containerd_network_name,
     containerd_network_subnet,
     containerd_safety_info,
+    ensure_podman_network,
+    podman_cni_diagnostics,
     raise_if_containerd_microk8s_conflict,
     runtime_command_args,
     write_containerd_cli_wrapper,
@@ -517,6 +520,105 @@ def test_containerd_cni_bin_dir_detects_complete_path(tmp_path: Path, monkeypatc
     monkeypatch.setattr("workerbee.runtime_support._cni_dir_complete", fake_complete)
 
     assert containerd_cni_bin_dir() == str(plugins)
+
+
+def test_podman_cni_diagnostics_classifies_workerbee_and_foreign_invalid_configs(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    workerbee = tmp_path / "workerbee-demo.conflist"
+    workerbee.write_text(
+        json.dumps(
+            {
+                "cniVersion": "1.0.0",
+                "name": "workerbee-demo",
+                "plugins": [{"type": "bridge"}, {"type": "firewall"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    foreign = tmp_path / "nerdctl-bridge.conflist"
+    foreign.write_text(
+        json.dumps(
+            {
+                "cniVersion": "1.0.0",
+                "name": "bridge",
+                "plugins": [{"type": "bridge"}, {"type": "firewall"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("workerbee.runtime_support._podman_cni_config_dirs", lambda: [tmp_path])
+
+    result = podman_cni_diagnostics(network="workerbee-demo")
+
+    assert result["target_config"]["name"] == "workerbee-demo"
+    assert result["workerbee_invalid_config_count"] == 1
+    assert result["foreign_invalid_config_count"] == 1
+
+
+def test_ensure_podman_network_normalizes_workerbee_owned_cni_config(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    config = tmp_path / "workerbee-demo.conflist"
+    config.write_text(
+        json.dumps(
+            {
+                "cniVersion": "1.0.0",
+                "name": "workerbee-demo",
+                "plugins": [{"type": "bridge"}, {"type": "firewall"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    other_workerbee = tmp_path / "workerbee-other.conflist"
+    other_workerbee.write_text(
+        json.dumps(
+            {
+                "cniVersion": "1.0.0",
+                "name": "workerbee-other",
+                "plugins": [{"type": "bridge"}, {"type": "firewall"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    foreign = tmp_path / "nerdctl-bridge.conflist"
+    foreign.write_text(
+        json.dumps(
+            {
+                "cniVersion": "1.0.0",
+                "name": "bridge",
+                "plugins": [{"type": "bridge"}, {"type": "firewall"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(_self, args: list[str], **_kwargs):
+        calls.append(list(args))
+        return SimpleNamespace(returncode=0, stdout="")
+
+    monkeypatch.setattr("workerbee.runtime_support._podman_cni_config_dirs", lambda: [tmp_path])
+    monkeypatch.setattr("workerbee.runtime_support.RuntimeCommand.run", fake_run)
+
+    result = ensure_podman_network("workerbee-demo")
+
+    rewritten = json.loads(config.read_text(encoding="utf-8"))
+    assert rewritten["cniVersion"] == PODMAN_COMPATIBLE_CNI_VERSION
+    assert json.loads(other_workerbee.read_text(encoding="utf-8"))["cniVersion"] == (
+        PODMAN_COMPATIBLE_CNI_VERSION
+    )
+    assert json.loads(foreign.read_text(encoding="utf-8"))["cniVersion"] == "1.0.0"
+    assert (tmp_path / "workerbee-demo.conflist.bak-workerbee").exists()
+    assert result["normalization"]["changed"] is True
+    assert {item["name"] for item in result["normalization"]["changes"]} == {
+        "workerbee-demo",
+        "workerbee-other",
+    }
+    assert ["network", "exists", "workerbee-demo"] in calls
+    assert ["network", "inspect", "workerbee-demo"] in calls
 
 
 def test_containerd_cleanup_does_not_target_reserved_namespaces(

@@ -298,6 +298,24 @@ def test_logs_falls_back_to_exited_runtime_container(
     assert any(cmd[:3] == ["docker", "ps", "-aq"] for cmd in calls)
 
 
+def test_ensure_network_uses_podman_cni_compatibility_helper(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="podman")
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "workerbee.supervisor.ensure_podman_network",
+        lambda network: calls.append(network) or {"ok": True},
+    )
+
+    sup._ensure_network("podman", "workerbee-demo")  # noqa: SLF001
+
+    assert calls == ["workerbee-demo"]
+
+
 def test_logs_uses_apishim_before_runtime_fallback(
     tmp_path: Path,
     monkeypatch,

@@ -1325,6 +1325,16 @@ class WorkerBeeDaemon:
                     prune=prune,
                 )
                 stack = supervisor.load_stack()
+                if (
+                    stack is not None
+                    and stack.runtime == "podman"
+                    and isinstance(result.get("app_status"), dict)
+                    and result["app_status"].get("degraded_workload_count")
+                ):
+                    result["runtime_diagnostics"] = runtime_diagnostics(
+                        "podman",
+                        state_root=self.state_root,
+                    )
                 deployment = self._record_deployment(
                     project=name,
                     stage=stage,
