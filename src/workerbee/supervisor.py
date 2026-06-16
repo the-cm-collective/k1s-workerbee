@@ -345,6 +345,7 @@ class WorkerBeeSupervisor:
         *,
         tag: str | None = None,
         dockerfile: Path | None = None,
+        hardening_profile: str | None = None,
     ) -> dict[str, Any]:
         runtime = self._resolve_runtime()
         build_context = context.expanduser().resolve()
@@ -363,6 +364,7 @@ class WorkerBeeSupervisor:
             dockerfile=dockerfile,
             tag=image_tag,
             labels=labels,
+            hardening_profile=hardening_profile,
         )
         result = {
             **result,

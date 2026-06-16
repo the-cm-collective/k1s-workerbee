@@ -330,7 +330,10 @@ def test_capabilities_surface_probe_and_image_build_hints(tmp_path: Path, monkey
     assert "PUT" in probe["methods"]
     assert probe["headers"] is True
     assert probe["body_fields"] == ["json_body", "body"]
-    assert "dockerfile" in payload["tool_hints"]["workerbee_v1_image_build"]
+    image_build = payload["tool_hints"]["workerbee_v1_image_build"]
+    assert "dockerfile" in image_build
+    assert "hardening_profile" in image_build
+    assert image_build["profiles"] == ["standard", "hardened"]
     assert "app_ref" in payload["tool_hints"]["workerbee_v1_workload_restart"]
 
 

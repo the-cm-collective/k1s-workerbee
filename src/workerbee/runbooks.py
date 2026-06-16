@@ -385,6 +385,10 @@ Dashboard: {dashboard}
   WorkerBee artifacts.
 - Build local images, validate staged manifests, deploy locally, inspect status/logs, and probe
   ingress before marking the stack ready.
+- Use `hardening_profile="hardened"` for WorkerBee-generated or deliberately minimal images. Leave
+  arbitrary repo Dockerfiles on the standard advisory profile unless a hardening change is in scope.
+- Generated native k1s manifests include non-root, seccomp, capability-drop, and read-only root
+  filesystem defaults; loosen them only when runtime validation proves the app needs writes.
 - Keep first-run generated artifacts in WorkerBee state unless a human asks to persist them.
 
 ## Teardown / Cleanup
@@ -404,6 +408,8 @@ Dashboard: {dashboard}
   without pasting secret values.
 - Run project status before security review. If no deployment metadata exists, deploy or pass an
   explicit stage before reviewing.
+- Review image build hardening metadata and manifest security findings before widening permissions
+  or base images.
 - Summarize critical and high findings before lower-severity notes.
 
 ## Known Caveats

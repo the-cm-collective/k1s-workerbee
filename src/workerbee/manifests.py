@@ -1450,10 +1450,22 @@ spec:
       httpGet: {{ path: /healthz, port: {port} }}
       initialDelaySeconds: 1
       periodSeconds: 2
+{_native_runtime_security()}
   resources:
     requests:
       cpu: 0.05
       memory: 64Mi
+"""
+
+
+def _native_runtime_security(*, read_only_root: bool = True) -> str:
+    return f"""  security:
+    runAsUser: 1000
+    runAsGroup: 1000
+    readOnlyRootFilesystem: {str(read_only_root).lower()}
+    dropCapabilities:
+      - ALL
+    seccompProfileType: RuntimeDefault
 """
 
 
@@ -1502,6 +1514,7 @@ spec:
     - name: data
       mountPath: /data
       retention: Delete
+{_native_runtime_security()}
   resources:
     requests:
       cpu: 0.05
@@ -1536,6 +1549,7 @@ spec:
   ingress:
     host: api.{domain}
     path: /
+{_native_runtime_security()}
   resources:
     requests:
       cpu: 0.05
@@ -1574,6 +1588,7 @@ spec:
   ingress:
     host: app.{domain}
     path: /
+{_native_runtime_security()}
   resources:
     requests:
       cpu: 0.05

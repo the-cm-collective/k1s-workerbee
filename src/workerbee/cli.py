@@ -345,6 +345,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Dockerfile path, relative to the build context by default",
     )
+    build.add_argument(
+        "--hardening-profile",
+        choices=["standard", "hardened"],
+        default=None,
+        help="Advisory image hardening profile to include in build metadata",
+    )
     deploy_native = sub.add_parser("deploy", help="Apply a native k1s manifest")
     deploy_native.add_argument("-f", "--file", type=Path, required=True)
     deploy_native.add_argument("-n", "--namespace", default=None)
@@ -1110,6 +1116,7 @@ def main(argv: list[str] | None = None) -> int:
                         args.context,
                         tag=args.tag,
                         dockerfile=args.dockerfile,
+                        hardening_profile=args.hardening_profile,
                     ),
                 ),
                 json_out=args.json,

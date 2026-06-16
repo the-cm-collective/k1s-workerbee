@@ -70,6 +70,9 @@ def test_prepare_and_validate_native_stage(tmp_path: Path, monkeypatch) -> None:
 
     prepared = prepare_stage(supervisor=sup, name="Demo Bundle", template="frontend-api-store")
     validation = validate_stage(Path(prepared["stage_dir"]))
+    api_text = (Path(prepared["stage_dir"]) / "manifests" / "api.k1s.yaml").read_text(
+        encoding="utf-8"
+    )
 
     assert prepared["project"] == "demo-app"
     assert validation["ok"] is True
@@ -79,6 +82,10 @@ def test_prepare_and_validate_native_stage(tmp_path: Path, monkeypatch) -> None:
         "demo-app/store",
     ]
     assert "workerbee-demo-app-api:dev" in validation["images"]
+    assert "security:\n    runAsUser: 1000" in api_text
+    assert "readOnlyRootFilesystem: true" in api_text
+    assert "dropCapabilities:\n      - ALL" in api_text
+    assert "seccompProfileType: RuntimeDefault" in api_text
     assert (Path(prepared["stage_dir"]) / "bundle.json").is_file()
     images = Path(prepared["stage_dir"]) / "images.json"
     assert "workerbee-demo-app-api:dev" in images.read_text(encoding="utf-8")
@@ -1236,6 +1243,12 @@ def test_realtime_template_contains_websocket_ingress(tmp_path: Path, monkeypatc
     assert "host.containers.internal" in frontend_text
     assert "port: 8080\n    targetPort: 8080" not in db_text
     assert "wss://api.demo-app.workerbee.localhost:19443/ws" in frontend_text
+    for text in (backend_text, frontend_text, db_text):
+        assert "security:\n    runAsUser: 1000" in text
+        assert "runAsGroup: 1000" in text
+        assert "readOnlyRootFilesystem: true" in text
+        assert "dropCapabilities:\n      - ALL" in text
+        assert "seccompProfileType: RuntimeDefault" in text
 
 
 def test_k1s_export_rejects_kubernetes_stage(tmp_path: Path, monkeypatch) -> None:

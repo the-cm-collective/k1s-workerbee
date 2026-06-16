@@ -31,6 +31,24 @@ def test_project_mode_accepts_cwd_project_and_open(tmp_path: Path) -> None:
     assert args.open is True
 
 
+def test_build_image_parser_accepts_hardening_profile(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "build-image",
+            str(tmp_path),
+            "--tag",
+            "workerbee-demo:test",
+            "--hardening-profile",
+            "hardened",
+        ]
+    )
+
+    assert args.cmd == "build-image"
+    assert args.context == tmp_path
+    assert args.tag == "workerbee-demo:test"
+    assert args.hardening_profile == "hardened"
+
+
 def test_runbook_parser_accepts_project_scoped_commands(tmp_path: Path) -> None:
     update = build_parser().parse_args(
         [

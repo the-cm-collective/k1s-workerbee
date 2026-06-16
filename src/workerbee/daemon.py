@@ -1183,6 +1183,7 @@ class WorkerBeeDaemon:
                     supervisor.build_image(
                         path,
                         tag=f"workerbee-{name}-realtime-{app}:dev",
+                        hardening_profile="hardened",
                     )
                     for app, path in contexts.items()
                 ]
@@ -1726,7 +1727,13 @@ class WorkerBeeDaemon:
                     "dockerfile": (
                         "Set dockerfile for repo-root builds with nested Dockerfiles, "
                         "for example dockerfile='backend/Dockerfile'."
-                    )
+                    ),
+                    "hardening_profile": (
+                        "Optional advisory profile: standard for existing repo Dockerfiles, "
+                        "hardened for WorkerBee-generated or deliberately minimal images. "
+                        "Build results include static hardening metadata and findings."
+                    ),
+                    "profiles": ["standard", "hardened"],
                 },
                 "workerbee_v1_logs": {
                     "include_exited": (

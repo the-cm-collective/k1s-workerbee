@@ -17,7 +17,11 @@ prepare/validate/deploy, project status, logs, exec, HTTPS ingress status and
 probes, security assessment/review, secret policy checks, dashboard URLs, trust
 guidance, cleanup, and artifact export. Use named stages or returned `stage_dir`
 values for manifest operations. Use app names plus the optional `namespace` for
-logs/exec; do not guess generated runtime container names.
+logs/exec; do not guess generated runtime container names. Use image build
+hardening metadata to prefer minimal, non-root images; pass
+`hardening_profile="hardened"` for WorkerBee-generated or deliberately minimal
+images, and leave arbitrary repo Dockerfiles on `standard` unless asked to
+harden them.
 
 When `workerbee_v1_session_start` returns `project_runbook`, review it before
 choosing a bring-up, deploy, validation, or repair path. After a successful

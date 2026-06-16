@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import socket
@@ -26,6 +27,16 @@ MICROK8S_ROOT = Path("/var/snap/microk8s")
 MICROK8S_CONTAINERD_SOCKET = MICROK8S_ROOT / "common" / "run" / "containerd.sock"
 BUILD_SUMMARY_TAIL_LINES = 8
 BUILD_SUMMARY_MATCH_LIMIT = 12
+HARDENING_PROFILES = frozenset({"standard", "hardened"})
+DEFAULT_HARDENING_PROFILE = "standard"
+_MINIMAL_BASE_MARKERS = ("alpine", "slim", "distroless", "scratch", "wolfi", "chainguard")
+_PACKAGE_MANAGER_MARKERS = {
+    "apk": re.compile(r"\bapk\s+add\b"),
+    "apt": re.compile(r"\bapt(?:-get)?\s+install\b"),
+    "dnf": re.compile(r"\bdnf\s+install\b"),
+    "microdnf": re.compile(r"\bmicrodnf\s+install\b"),
+    "yum": re.compile(r"\byum\s+install\b"),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,7 +153,7 @@ def cleanup_runtime(
     actions.extend(_cleanup_containers(cmd, state_hash=state_hash, execute=execute))
     actions.extend(_cleanup_networks(cmd, targets=project_networks, execute=execute))
     if purge_images:
-        actions.extend(_cleanup_images(cmd, execute=execute))
+        actions.extend(_cleanup_images(cmd, state_hash=state_hash, execute=execute))
     return {
         "ok": True,
         "runtime": selected,
@@ -642,12 +653,21 @@ def build_image_with_runtime(
     tag: str,
     dockerfile: Path | None = None,
     labels: list[str] | None = None,
+    hardening_profile: str | None = None,
     timeout: int = 300,
 ) -> dict[str, Any]:
     selected = resolve_runtime(runtime)
     build_context = context.expanduser().resolve()
     build_file = _resolve_dockerfile(build_context, dockerfile)
-    label_values = labels or workerbee_runtime_labels(state_root=state_root, project=project)
+    profile = _normalize_hardening_profile(hardening_profile)
+    hardening = _analyze_container_build_file(
+        _build_file_for_analysis(build_context, build_file),
+        profile=profile,
+    )
+    label_values = list(labels or workerbee_runtime_labels(state_root=state_root, project=project))
+    profile_label = f"workerbee.hardening_profile={profile}"
+    if not any(label.startswith("workerbee.hardening_profile=") for label in label_values):
+        label_values.append(profile_label)
     if selected == CONTAINERD_RUNTIME:
         return _build_image_containerd(
             state_root=state_root,
@@ -656,6 +676,8 @@ def build_image_with_runtime(
             dockerfile=build_file,
             tag=tag,
             labels=label_values,
+            hardening=hardening,
+            hardening_profile=profile,
             timeout=timeout,
         )
     cmd = [selected, "build", "-t", tag]
@@ -679,6 +701,8 @@ def build_image_with_runtime(
         "context": str(build_context),
         "dockerfile": str(build_file) if build_file else None,
         "labels": label_values,
+        "hardening_profile": profile,
+        "hardening": hardening,
         "cmd": cmd,
         "stdout": proc.stdout,
         "build_summary": _build_output_summary(proc.stdout, backend=selected, tag=tag),
@@ -833,6 +857,8 @@ def _build_image_containerd(
     dockerfile: Path | None,
     tag: str,
     labels: list[str],
+    hardening: dict[str, Any],
+    hardening_profile: str,
     timeout: int,
 ) -> dict[str, Any]:
     base = containerd_base_args(state_root=state_root, project=project)
@@ -870,6 +896,8 @@ def _build_image_containerd(
                 "context": str(context),
                 "dockerfile": str(dockerfile) if dockerfile else None,
                 "labels": labels,
+                "hardening_profile": hardening_profile,
+                "hardening": hardening,
                 "cmd": cmd,
                 "stdout": proc.stdout,
                 "build_summary": _build_output_summary(
@@ -899,6 +927,8 @@ def _build_image_containerd(
                 "context": str(context),
                 "dockerfile": str(dockerfile) if dockerfile else None,
                 "labels": labels,
+                "hardening_profile": hardening_profile,
+                "hardening": hardening,
                 "cmd": result["cmd"],
                 "stdout": result["stdout"],
                 "build_summary": result["summary"],
@@ -913,6 +943,8 @@ def _build_image_containerd(
                 "context": str(context),
                 "dockerfile": str(dockerfile) if dockerfile else None,
                 "labels": labels,
+                "hardening_profile": hardening_profile,
+                "hardening": hardening,
                 "attempts": attempts,
                 "build_summary": _build_attempts_summary(attempts, tag=tag),
             },
@@ -1063,6 +1095,224 @@ def _build_log_error_line(line: str) -> bool:
     return any(marker in lowered for marker in ("error", "failed", "failure", "unable to"))
 
 
+def _normalize_hardening_profile(profile: str | None) -> str:
+    value = (profile or DEFAULT_HARDENING_PROFILE).strip().lower()
+    if value not in HARDENING_PROFILES:
+        raise WorkerBeeError(
+            code="INVALID_HARDENING_PROFILE",
+            message="image hardening profile must be one of: standard, hardened",
+            details={"profile": profile, "allowed": sorted(HARDENING_PROFILES)},
+            remediation=(
+                "Use hardening_profile='standard' for existing images or 'hardened' "
+                "for generated/minimal images."
+            ),
+        )
+    return value
+
+
+def _build_file_for_analysis(context: Path, dockerfile: Path | None) -> Path | None:
+    if dockerfile is not None:
+        return dockerfile
+    for name in ("Dockerfile", "Containerfile", "dockerfile", "containerfile"):
+        candidate = context / name
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
+
+
+def _analyze_container_build_file(build_file: Path | None, *, profile: str) -> dict[str, Any]:
+    findings: list[dict[str, str]] = []
+    if build_file is None or not build_file.is_file():
+        findings.append(
+            _image_hardening_finding(
+                code="IMAGE_BUILD_FILE_NOT_FOUND",
+                severity="info",
+                message=(
+                    "No Dockerfile or Containerfile was found for static image "
+                    "hardening analysis."
+                ),
+                remediation=(
+                    "Pass dockerfile=... for repo-root builds or add a Containerfile "
+                    "to the context."
+                ),
+            )
+        )
+        return {
+            "profile": profile,
+            "build_file": str(build_file) if build_file else None,
+            "base_images": [],
+            "final_base_image": None,
+            "base_image_family": "unknown",
+            "minimal_base": False,
+            "package_managers": [],
+            "declared_user": None,
+            "runs_as_non_root": False,
+            "exposed_ports": [],
+            "multi_stage": False,
+            "findings": findings,
+            "passed": True,
+        }
+    try:
+        lines = list(_logical_container_build_lines(build_file.read_text(encoding="utf-8")))
+    except OSError as exc:
+        findings.append(
+            _image_hardening_finding(
+                code="IMAGE_BUILD_FILE_READ_FAILED",
+                severity="info",
+                message=f"Could not read build file for static hardening analysis: {exc}",
+                remediation="Verify the build file path is readable, then rerun the build.",
+            )
+        )
+        return {
+            "profile": profile,
+            "build_file": str(build_file),
+            "base_images": [],
+            "final_base_image": None,
+            "base_image_family": "unknown",
+            "minimal_base": False,
+            "package_managers": [],
+            "declared_user": None,
+            "runs_as_non_root": False,
+            "exposed_ports": [],
+            "multi_stage": False,
+            "findings": findings,
+            "passed": True,
+        }
+    base_images: list[str] = []
+    package_managers: set[str] = set()
+    exposed_ports: list[str] = []
+    declared_user: str | None = None
+    for line in lines:
+        from_match = re.match(r"FROM\s+(?:--platform=\S+\s+)?(?P<image>\S+)", line, re.IGNORECASE)
+        if from_match:
+            base_images.append(from_match.group("image"))
+            continue
+        user_match = re.match(r"USER\s+(?P<user>\S+)", line, re.IGNORECASE)
+        if user_match:
+            declared_user = user_match.group("user")
+            continue
+        expose_match = re.match(r"EXPOSE\s+(?P<ports>.+)", line, re.IGNORECASE)
+        if expose_match:
+            exposed_ports.extend(expose_match.group("ports").split())
+            continue
+        if re.match(r"RUN\s+", line, re.IGNORECASE):
+            lowered = line.lower()
+            for name, pattern in _PACKAGE_MANAGER_MARKERS.items():
+                if pattern.search(lowered):
+                    package_managers.add(name)
+    final_base_image = base_images[-1] if base_images else None
+    base_family = _base_image_family(final_base_image)
+    minimal_base = _base_is_minimal(final_base_image)
+    runs_as_non_root = _declared_user_is_non_root(declared_user)
+    if not runs_as_non_root:
+        findings.append(
+            _image_hardening_finding(
+                code="IMAGE_USER_ROOT_OR_MISSING",
+                severity="medium" if profile == "hardened" else "info",
+                message="The final image does not declare a non-root USER.",
+                remediation="Add USER 1000 or another non-root runtime user in the final stage.",
+            )
+        )
+    if final_base_image and not minimal_base:
+        findings.append(
+            _image_hardening_finding(
+                code="IMAGE_BASE_NOT_MINIMAL",
+                severity="low" if profile == "hardened" else "info",
+                message=f"The final base image {final_base_image!r} is not recognized as minimal.",
+                remediation=(
+                    "Prefer scratch, distroless, Alpine, Wolfi/Chainguard, or a slim "
+                    "runtime base when compatible."
+                ),
+            )
+        )
+    if package_managers:
+        findings.append(
+            _image_hardening_finding(
+                code="IMAGE_PACKAGE_MANAGER_USAGE",
+                severity="low" if profile == "hardened" else "info",
+                message="The build file installs packages with a distro package manager.",
+                remediation=(
+                    "Use multi-stage builds and keep package managers out of the final "
+                    "runtime layer where practical."
+                ),
+            )
+        )
+    blocking = {"critical", "high", "medium"} if profile == "hardened" else {"critical", "high"}
+    return {
+        "profile": profile,
+        "build_file": str(build_file),
+        "base_images": base_images,
+        "final_base_image": final_base_image,
+        "base_image_family": base_family,
+        "minimal_base": minimal_base,
+        "package_managers": sorted(package_managers),
+        "declared_user": declared_user,
+        "runs_as_non_root": runs_as_non_root,
+        "exposed_ports": exposed_ports,
+        "multi_stage": len(base_images) > 1,
+        "findings": findings,
+        "passed": not any(item["severity"] in blocking for item in findings),
+    }
+
+
+def _logical_container_build_lines(text: str):
+    current = ""
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        current = f"{current} {stripped}" if current else stripped
+        if current.endswith("\\"):
+            current = current[:-1].rstrip()
+            continue
+        yield current
+        current = ""
+    if current:
+        yield current
+
+
+def _base_image_family(image: str | None) -> str:
+    if not image:
+        return "unknown"
+    lowered = image.lower()
+    for marker in ("distroless", "scratch", "chainguard", "wolfi", "alpine", "slim"):
+        if marker in lowered:
+            return marker
+    name = lowered.split("@", 1)[0].split(":", 1)[0].split("/")[-1]
+    return name or "unknown"
+
+
+def _base_is_minimal(image: str | None) -> bool:
+    if not image:
+        return False
+    lowered = image.lower()
+    return any(marker in lowered for marker in _MINIMAL_BASE_MARKERS)
+
+
+def _declared_user_is_non_root(user: str | None) -> bool:
+    if not user:
+        return False
+    principal = user.strip().split()[0].split(":", 1)[0]
+    if principal.startswith("$") or "{" in principal or "}" in principal:
+        return False
+    return principal not in {"", "0", "root"}
+
+
+def _image_hardening_finding(
+    *,
+    code: str,
+    severity: str,
+    message: str,
+    remediation: str,
+) -> dict[str, str]:
+    return {
+        "code": code,
+        "severity": severity,
+        "message": message,
+        "remediation": remediation,
+    }
+
+
 def _cleanup_containers(
     cmd: RuntimeCommand,
     *,
@@ -1129,22 +1379,71 @@ def _cleanup_images(
     cmd: RuntimeCommand,
     *,
     execute: bool,
+    state_hash: str | None = None,
     all_images: bool = False,
 ) -> list[dict[str, Any]]:
+    if not all_images and state_hash:
+        proc = cmd.run(
+            [
+                "images",
+                "--filter",
+                f"label=workerbee.state_root_hash={state_hash}",
+                "--format",
+                "{{.Repository}}:{{.Tag}} {{.ID}}",
+            ],
+            timeout=15,
+        )
+        if proc.returncode == 0:
+            images = _image_cleanup_actions_from_rows(
+                proc.stdout,
+                all_images=True,
+                selection="label",
+            )
+            if execute and images:
+                cmd.run(["rmi", "-f", *[str(item["id"]) for item in images]], timeout=120)
+            return images
     proc = cmd.run(["images", "--format", "{{.Repository}}:{{.Tag}} {{.ID}}"], timeout=15)
-    images = []
-    for line in proc.stdout.splitlines():
-        ref, _, image_id = line.partition(" ")
-        if image_id and (
-            all_images
-            or ref.startswith("workerbee-")
-            or ref.startswith("localhost/workerbee-")
-            or "/workerbee-" in ref
-        ):
-            images.append({"kind": "image", "id": image_id, "ref": ref, "action": "remove"})
+    images = _image_cleanup_actions_from_rows(
+        proc.stdout,
+        all_images=all_images,
+        selection="namespace" if all_images else "name-fallback",
+    )
     if execute and images:
         cmd.run(["rmi", "-f", *[str(item["id"]) for item in images]], timeout=120)
     return images
+
+
+def _image_cleanup_actions_from_rows(
+    raw: str,
+    *,
+    all_images: bool = False,
+    selection: str,
+) -> list[dict[str, Any]]:
+    images = []
+    for line in raw.splitlines():
+        ref, _, image_id = line.partition(" ")
+        if not image_id:
+            continue
+        if not all_images and not _workerbee_image_ref(ref):
+            continue
+        images.append(
+            {
+                "kind": "image",
+                "id": image_id,
+                "ref": ref,
+                "action": "remove",
+                "selection": selection,
+            }
+        )
+    return images
+
+
+def _workerbee_image_ref(ref: str) -> bool:
+    return (
+        ref.startswith("workerbee-")
+        or ref.startswith("localhost/workerbee-")
+        or "/workerbee-" in ref
+    )
 
 
 def _resolve_dockerfile(context: Path, dockerfile: Path | None) -> Path | None:

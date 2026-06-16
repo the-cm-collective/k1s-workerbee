@@ -153,7 +153,11 @@ prepare/validate/deploy, project status, logs, exec, HTTPS ingress status and
 probes, security assessment/review, secret policy checks, dashboard URLs, trust
 guidance, cleanup, and artifact export. Use named stages or returned `stage_dir`
 values for manifest operations. Use app names plus the optional `namespace` for
-logs/exec; do not guess generated runtime container names.
+logs/exec; do not guess generated runtime container names. Use image build
+hardening metadata to prefer minimal, non-root images; pass
+`hardening_profile="hardened"` for WorkerBee-generated or deliberately minimal
+images, and leave arbitrary repo Dockerfiles on `standard` unless asked to
+harden them.
 
 If the user asks to bring, run, or start the project up in WorkerBee, treat that
 as a request for a running app workload. Build needed local images, stage and

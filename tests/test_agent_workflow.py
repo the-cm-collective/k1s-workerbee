@@ -200,12 +200,15 @@ def test_runbook_treats_bring_project_up_as_app_deploy() -> None:
     assert "workerbee_v1_project_start" in markdown
     assert "project_runbook" in markdown
     assert "workerbee_v1_project_runbook_update" in markdown
+    assert 'hardening_profile="hardened"' in markdown
     assert "Compose-shaped repos" in markdown
     assert "Review returned project_runbook" in loop
+    assert "hardening_profile='hardened'" in loop
     assert "workerbee_v1_project_runbook_update" in loop
     assert "Treat bring/run/start the project up in WorkerBee" in loop
     assert "workerbee_v1_project_start" in loop
     assert "map services to separate one-container workloads" in first_run
+    assert "hardened security defaults" in first_run
 
 
 def test_runbook_includes_feature_checkpoint_loop() -> None:

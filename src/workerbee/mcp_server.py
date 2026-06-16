@@ -798,9 +798,10 @@ def serve_mcp(
         context: str,
         tag: str | None = None,
         dockerfile: str | None = None,
+        hardening_profile: str | None = None,
         project: str = "default",
     ) -> dict[str, Any]:
-        """Build a local image context."""
+        """Build a local image context with optional hardening metadata."""
         return protect(
             "ImageBuild",
             project,
@@ -810,6 +811,7 @@ def serve_mcp(
                     Path(context),
                     tag=tag,
                     dockerfile=Path(dockerfile) if dockerfile else None,
+                    hardening_profile=hardening_profile,
                 ),
             ),
         )

@@ -127,14 +127,16 @@ queues, or integration behavior that benefits from a running local stack.
 5. Use WorkerBee MCP to build local images, prepare or stage manifests, validate manifests, deploy
    locally, inspect status/logs, probe HTTPS ingress, and export k1s/Kubernetes/Helm artifacts.
    For repo-root image builds with nested Dockerfiles, pass `dockerfile="path/to/Dockerfile"`.
+   Use `hardening_profile="hardened"` for WorkerBee-generated or deliberately minimal images, and
+   leave arbitrary repo Dockerfiles on `standard` unless the task asks to harden them.
 6. When the user asks to bring, run, or start the project up in WorkerBee, treat that as a request
    for a running app workload: build needed images, stage and validate manifests, deploy with
    `workerbee_v1_manifest_deploy_local`, then inspect status/logs and probe ingress. Do not stop
    after `workerbee_v1_project_start` if deployable manifests or Containerfiles/Dockerfiles exist.
 7. If this is the first WorkerBee run for a repo, there may be no deployed workload to inspect yet.
    Prefer existing repo manifests and Containerfiles/Dockerfiles. When they are absent, create a
-   temporary native k1s staged deployment in WorkerBee state, then build, validate, and deploy it
-   before runtime validation or security review.
+   temporary hardened native k1s staged deployment in WorkerBee state, then build, validate, and
+   deploy it before runtime validation or security review.
 8. For Compose-shaped repos, translate the topology to WorkerBee's supported shape instead of
    trying to run Compose directly: one container per workload, API/worker/store as separate
    workloads, and one-shot initialization as an explicit Job or temporary setup workload.
@@ -187,8 +189,10 @@ state with distinct `project` values unless one agent owns the shared profile li
 
 def agent_instructions_markdown() -> str:
     """Return the canonical AGENTS.md WorkerBee instruction block."""
-    return f"""{AGENT_INSTRUCTIONS_START}
-## WorkerBee
+    return (
+        AGENT_INSTRUCTIONS_START  # noqa: S608 - static Markdown contains "select".
+        + "\n"
+        + """## WorkerBee
 
 When a task involves containers, services, manifests, ingress, databases,
 queues, security review, or integration behavior, call WorkerBee MCP
@@ -204,7 +208,11 @@ prepare/validate/deploy, project status, logs, exec, HTTPS ingress status and
 probes, security assessment/review, secret policy checks, dashboard URLs, trust
 guidance, cleanup, and artifact export. Use named stages or returned `stage_dir`
 values for manifest operations. Use app names plus the optional `namespace` for
-logs/exec; do not guess generated runtime container names.
+logs/exec; do not guess generated runtime container names. Use image build
+hardening metadata to prefer minimal, non-root images; pass
+`hardening_profile="hardened"` for WorkerBee-generated or deliberately minimal
+images, and leave arbitrary repo Dockerfiles on `standard` unless asked to
+harden them.
 
 When `workerbee_v1_session_start` returns `project_runbook`, review it before
 choosing a bring-up, deploy, validation, or repair path. After a successful
@@ -263,8 +271,10 @@ tools: `workerbee_v1_edge_link_start`, `workerbee_v1_edge_link_status`,
 `--from-microk8s`/MicroK8s bootstrap only for the local dev HA stack, keep
 bootstrap secrets out of output, and validate heartbeat plus GPU advertisement
 when relevant.
-{AGENT_INSTRUCTIONS_END}
 """
+        + AGENT_INSTRUCTIONS_END
+        + "\n"
+    )
 
 
 def install_agent_instructions(
@@ -355,7 +365,11 @@ def runbook_payload() -> dict[str, Any]:
                 "Review returned project_runbook details before choosing a project-specific "
                 "bring-up, deploy, validation, or repair path."
             ),
-            "Build images with local shell scripts or workerbee_v1_image_build.",
+            (
+                "Build images with local shell scripts or workerbee_v1_image_build; use "
+                "hardening_profile='hardened' for WorkerBee-generated/minimal images and "
+                "leave existing repo Dockerfiles standard unless asked."
+            ),
             "Use image_build dockerfile=... for repo-root builds with nested Dockerfiles.",
             "Prepare/stage manifests, validate them, deploy locally, then inspect status/logs.",
             "Use named stages or returned stage_dir values for manifest operations.",
@@ -401,7 +415,8 @@ def runbook_payload() -> dict[str, Any]:
             "Prefer existing manifests and Containerfiles/Dockerfiles from the repo.",
             (
                 "When no deployable manifests exist, generate temporary native k1s staged "
-                "artifacts in WorkerBee state and deploy them locally."
+                "artifacts with hardened security defaults in WorkerBee state and deploy them "
+                "locally."
             ),
             (
                 "For Compose-shaped repos, map services to separate one-container workloads; "
@@ -415,6 +430,7 @@ def runbook_payload() -> dict[str, Any]:
         "security_review": [
             "Call workerbee_v1_project_status before review.",
             "Call workerbee_v1_security_review_project for deployed project review.",
+            "Review image build hardening metadata before widening permissions or base images.",
             "If review reports no deployment metadata, stage/deploy the app and rerun review.",
             "Summarize critical/high findings first, then include the report path.",
         ],

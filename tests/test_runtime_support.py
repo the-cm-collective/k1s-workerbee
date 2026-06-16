@@ -238,6 +238,90 @@ def test_docker_build_accepts_explicit_dockerfile_with_repo_root_context(
     assert calls[0][-1] == str(context)
 
 
+def test_hardened_image_build_returns_static_hardening_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    context.mkdir()
+    (context / "Containerfile").write_text(
+        "FROM python:3.11-alpine\n"
+        "RUN apk add --no-cache curl\n"
+        "USER 1000\n"
+        "EXPOSE 8080\n",
+        encoding="utf-8",
+    )
+
+    def fake_run(_cmd: list[str], **_kwargs):
+        return SimpleNamespace(returncode=0, stdout="ok")
+
+    monkeypatch.setattr("workerbee.runtime_support.subprocess.run", fake_run)
+
+    result = build_image_with_runtime(
+        runtime="docker",
+        state_root=tmp_path,
+        project="demo",
+        context=context,
+        tag="workerbee-demo:test",
+        hardening_profile="hardened",
+    )
+
+    assert result["hardening_profile"] == "hardened"
+    assert "workerbee.hardening_profile=hardened" in result["labels"]
+    assert result["hardening"]["base_image_family"] == "alpine"
+    assert result["hardening"]["minimal_base"] is True
+    assert result["hardening"]["runs_as_non_root"] is True
+    assert result["hardening"]["declared_user"] == "1000"
+    assert result["hardening"]["exposed_ports"] == ["8080"]
+    assert result["hardening"]["package_managers"] == ["apk"]
+    assert result["hardening"]["passed"] is True
+
+
+def test_hardened_image_build_flags_missing_non_root_user(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    context = tmp_path / "context"
+    context.mkdir()
+    (context / "Dockerfile").write_text("FROM ubuntu:24.04\n", encoding="utf-8")
+
+    def fake_run(_cmd: list[str], **_kwargs):
+        return SimpleNamespace(returncode=0, stdout="ok")
+
+    monkeypatch.setattr("workerbee.runtime_support.subprocess.run", fake_run)
+
+    result = build_image_with_runtime(
+        runtime="docker",
+        state_root=tmp_path,
+        project="demo",
+        context=context,
+        tag="workerbee-demo:test",
+        hardening_profile="hardened",
+    )
+
+    findings = {item["code"]: item for item in result["hardening"]["findings"]}
+    assert result["hardening"]["passed"] is False
+    assert findings["IMAGE_USER_ROOT_OR_MISSING"]["severity"] == "medium"
+    assert findings["IMAGE_BASE_NOT_MINIMAL"]["severity"] == "low"
+
+
+def test_image_build_rejects_unknown_hardening_profile(tmp_path: Path) -> None:
+    context = tmp_path / "context"
+    context.mkdir()
+
+    with pytest.raises(WorkerBeeError) as exc_info:
+        build_image_with_runtime(
+            runtime="docker",
+            state_root=tmp_path,
+            project="demo",
+            context=context,
+            tag="workerbee-demo:test",
+            hardening_profile="strict",
+        )
+
+    assert exc_info.value.code == "INVALID_HARDENING_PROFILE"
+
+
 def test_containerd_fallback_build_loads_image_from_state_local_tar(
     tmp_path: Path,
     monkeypatch,
@@ -468,6 +552,85 @@ def test_containerd_cleanup_does_not_target_reserved_namespaces(
         f"workerbee-{_state_hash(tmp_path)}-demo",
     }
     assert not namespaces.intersection({"ae", "k8s.io", "moby", "default"})
+
+
+def test_cleanup_runtime_purge_images_prefers_state_hash_label_filter(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[list[str]] = []
+    state_hash = _state_hash(tmp_path)
+
+    def fake_run(_self, args: list[str], **_kwargs):
+        calls.append(args)
+
+        class Result:
+            returncode = 0
+            stdout = ""
+
+        if args[:2] == ["network", "ls"]:
+            Result.stdout = ""
+        if args[:2] == ["images", "--filter"]:
+            assert f"label=workerbee.state_root_hash={state_hash}" in args
+            Result.stdout = "workerbee-demo:dev image-a\nexample/app:dev image-b\n"
+        return Result()
+
+    monkeypatch.setattr("workerbee.runtime_support.resolve_runtime", lambda _runtime: "podman")
+    monkeypatch.setattr("workerbee.runtime_support.RuntimeCommand.run", fake_run)
+
+    result = cleanup_runtime(
+        state_root=tmp_path,
+        runtime="podman",
+        execute=True,
+        purge_images=True,
+    )
+
+    images = [item for item in result["actions"] if item["kind"] == "image"]
+    assert [item["selection"] for item in images] == ["label", "label"]
+    assert {item["id"] for item in images} == {"image-a", "image-b"}
+    assert any(call[:3] == ["rmi", "-f", "image-a"] for call in calls)
+    assert not any(call[:2] == ["images", "--format"] for call in calls)
+
+
+def test_cleanup_runtime_purge_images_falls_back_to_name_matching_when_label_filter_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def fake_run(_self, args: list[str], **_kwargs):
+        calls.append(args)
+
+        class Result:
+            returncode = 0
+            stdout = ""
+
+        if args[:2] == ["images", "--filter"]:
+            Result.returncode = 125
+            Result.stdout = "unknown flag: --filter"
+        if args[:2] == ["images", "--format"]:
+            Result.stdout = (
+                "workerbee-demo:dev image-a\n"
+                "example/app:dev image-b\n"
+                "localhost/workerbee-api:dev image-c\n"
+            )
+        return Result()
+
+    monkeypatch.setattr("workerbee.runtime_support.resolve_runtime", lambda _runtime: "docker")
+    monkeypatch.setattr("workerbee.runtime_support.RuntimeCommand.run", fake_run)
+
+    result = cleanup_runtime(
+        state_root=tmp_path,
+        runtime="docker",
+        execute=False,
+        purge_images=True,
+    )
+
+    images = [item for item in result["actions"] if item["kind"] == "image"]
+    assert [item["id"] for item in images] == ["image-a", "image-c"]
+    assert all(item["selection"] == "name-fallback" for item in images)
+    assert any(call[:2] == ["images", "--filter"] for call in calls)
+    assert any(call[:2] == ["images", "--format"] for call in calls)
 
 
 def _state_hash(path: Path) -> str:

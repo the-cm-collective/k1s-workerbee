@@ -63,6 +63,7 @@ def build_images(*, runtime: str, state_dir: Path, project: str) -> dict[str, st
             context=ctx,
             tag=tag,
             labels=workerbee_runtime_labels(state_root=state_root, project=project),
+            hardening_profile="hardened",
         )
         tags[name] = tag
     return tags
