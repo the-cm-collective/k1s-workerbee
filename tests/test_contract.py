@@ -133,6 +133,31 @@ def test_agent_feedback_recommends_diagnostics_for_probe_mismatch() -> None:
     ]
 
 
+def test_agent_feedback_guides_direct_containerd_profile_recovery() -> None:
+    result = fail(
+        WorkerBeeError(
+            code="K1S_PROFILE_REQUIRES_CONTAINERD",
+            message="WorkerBee k1s profiles require explicit direct containerd runtime",
+            remediation=(
+                "Start WorkerBee with `--runtime containerd --containerd-privilege "
+                "sudo-helper` before using profile commands."
+            ),
+        ),
+        kind="ProfileStop",
+        project="baseline-032-api-clean-wb",
+    )
+
+    feedback = result["data"]["agent_feedback"]
+
+    assert feedback["severity"] == "error"
+    assert "K1S_PROFILE_REQUIRES_CONTAINERD" in feedback["summary"]
+    assert [item["tool"] for item in feedback["next_actions"]] == [
+        "workerbee_v1_capabilities",
+        "workerbee_v1_project_status",
+    ]
+    assert "token" not in json.dumps(feedback).lower()
+
+
 def test_agent_feedback_calls_out_running_control_plane_without_workload() -> None:
     result = ok(
         kind="ProjectStart",

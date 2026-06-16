@@ -171,6 +171,15 @@ the sibling `../k1s` checkout. Use an explicit direct-containerd WorkerBee proje
 `workerbee_v1_manifest_deploy_local(target="profile")`, inspect with
 `workerbee_v1_profile_workload_status` and `workerbee_v1_logs(target="profile")`, and use
 `workerbee_v1_profile_workload_validate` for the bundled realtime frontend/backend/db smoke test.
+Before profile start, stop, purge, or profile-target deploy, verify WorkerBee is running in explicit
+direct-containerd mode with `workerbee_v1_capabilities` and confirm `runtime.selected` is
+`containerd`. If a profile tool returns `K1S_PROFILE_REQUIRES_CONTAINERD`, restart or select the
+direct-containerd MCP path with `--runtime containerd --containerd-privilege sudo-helper`, then
+retry the profile lifecycle command. Do not manually target reserved containerd namespaces such as
+`ae`, `k8s.io`, `moby`, or `default`; cleanup must stay inside WorkerBee state-hash namespaces.
+After profile evidence or validation, stop stale profiles with
+`workerbee_v1_profile_stop(purge=true)` and re-check status/log/probe state before starting another
+measured run.
 Use separate agents only for separable k1s/WorkerBee work, and isolate shared WorkerBee runtime
 state with distinct `project` values unless one agent owns the shared profile lifecycle.
 """
@@ -237,8 +246,16 @@ with `workerbee_v1_profile_start`, deploy staged workloads with
 `workerbee_v1_manifest_deploy_local(target="profile")`, inspect with
 `workerbee_v1_profile_workload_status` and `workerbee_v1_logs(target="profile")`,
 and run `workerbee_v1_profile_workload_validate` for the bundled realtime smoke
-test. Restart profiles after k1s source changes and restart MCP after WorkerBee
-source changes.
+test. Before profile start/stop/purge or profile-target deploy, verify
+`workerbee_v1_capabilities` reports `runtime.selected == containerd`. If a
+profile tool reports `K1S_PROFILE_REQUIRES_CONTAINERD`, restart or select the
+direct-containerd MCP path with `--runtime containerd --containerd-privilege
+sudo-helper` and retry the profile lifecycle command. Restart profiles after
+k1s source changes and restart MCP after WorkerBee source changes. Stop stale
+profiles with `workerbee_v1_profile_stop(purge=true)` when profile evidence or
+validation is complete, and keep manual cleanup scoped to WorkerBee state-hash
+namespaces rather than reserved namespaces such as `ae`, `k8s.io`, `moby`, or
+`default`.
 
 For short-lived links from this host to an external k1s core, use the edge-link
 tools: `workerbee_v1_edge_link_start`, `workerbee_v1_edge_link_status`,
@@ -419,7 +436,24 @@ def runbook_payload() -> dict[str, Any]:
                 "Run workerbee_v1_profile_workload_validate for the bundled realtime "
                 "WebSocket smoke test."
             ),
+            (
+                "Before profile start/stop/purge or profile-target deploy, verify "
+                "workerbee_v1_capabilities reports runtime.selected == containerd."
+            ),
+            (
+                "If K1S_PROFILE_REQUIRES_CONTAINERD appears, restart or select the "
+                "direct-containerd MCP path with --runtime containerd --containerd-privilege "
+                "sudo-helper, then retry the profile lifecycle command."
+            ),
             "Restart profiles after k1s source changes; restart MCP after WorkerBee changes.",
+            (
+                "After profile evidence or validation, stop stale profiles with "
+                "workerbee_v1_profile_stop(purge=true)."
+            ),
+            (
+                "Keep manual cleanup scoped to WorkerBee state-hash namespaces and avoid "
+                "reserved namespaces such as ae, k8s.io, moby, or default."
+            ),
             "See docs/k1s-dev-workflow.md for the complete tandem workflow.",
         ],
         "temporary_files": (

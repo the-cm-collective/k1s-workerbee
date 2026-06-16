@@ -111,7 +111,9 @@ def test_session_start_preserves_existing_project_runbook(
     second = daemon.session_start(cwd=cwd, project="demo")
 
     assert second["project_runbook"]["markdown_path"] == str(runbook_path)
-    assert runbook_path.read_text(encoding="utf-8") == "# Custom project runbook\n\nKeep this path.\n"
+    assert runbook_path.read_text(encoding="utf-8") == (
+        "# Custom project runbook\n\nKeep this path.\n"
+    )
 
 
 def test_project_status_backfills_missing_runbook_for_existing_project(
@@ -173,6 +175,9 @@ def test_agent_instructions_include_first_run_security_review_guidance() -> None
     assert "checkpoint commits" in instructions
     assert "workerbee_v1_profile_start" in instructions
     assert "workerbee_v1_profile_workload_validate" in instructions
+    assert "K1S_PROFILE_REQUIRES_CONTAINERD" in instructions
+    assert "workerbee_v1_profile_stop(purge=true)" in instructions
+    assert "reserved namespaces" in instructions
     assert "workerbee_v1_edge_link_start" in instructions
     assert "workerbee_v1_edge_link_validate" in instructions
 
@@ -226,8 +231,13 @@ def test_runbook_includes_tandem_k1s_dev_workflow() -> None:
 
     assert "sibling `../k1s` checkout" in markdown
     assert "distinct `project` values" in markdown
+    assert "K1S_PROFILE_REQUIRES_CONTAINERD" in markdown
+    assert "workerbee_v1_profile_stop(purge=true)" in markdown
+    assert "reserved containerd namespaces" in markdown
     assert "../k1s checkout as k1s_root" in profile_loop
     assert "stable explicit project such as k1s-dev" in profile_loop
+    assert "runtime.selected" in profile_loop
+    assert "profile evidence or validation" in profile_loop
     assert "docs/k1s-dev-workflow.md" in profile_loop
 
 

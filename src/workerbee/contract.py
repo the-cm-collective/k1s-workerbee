@@ -462,6 +462,21 @@ def _feedback_next_actions(
                 )
             )
             actions.append(_action("workerbee_v1_logs", project_args, "inspect recent app logs"))
+        elif code == "K1S_PROFILE_REQUIRES_CONTAINERD":
+            actions.append(
+                _action(
+                    "workerbee_v1_capabilities",
+                    {},
+                    "verify the MCP daemon selected explicit direct-containerd runtime",
+                )
+            )
+            actions.append(
+                _action(
+                    "workerbee_v1_project_status",
+                    project_args,
+                    "refresh project state before retrying the profile lifecycle command",
+                )
+            )
         else:
             actions.append(
                 _action(

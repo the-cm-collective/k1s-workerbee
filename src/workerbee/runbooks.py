@@ -387,6 +387,17 @@ Dashboard: {dashboard}
   ingress before marking the stack ready.
 - Keep first-run generated artifacts in WorkerBee state unless a human asks to persist them.
 
+## Teardown / Cleanup
+
+- For k1s profile work, verify `workerbee_v1_capabilities` reports
+  `runtime.selected == containerd` before profile start, stop, purge, or profile-target deploy.
+- Stop profile workloads with `workerbee_v1_profile_stop(purge=true)` after evidence or validation
+  when the profile is not intended to stay running.
+- If profile cleanup reports `K1S_PROFILE_REQUIRES_CONTAINERD`, restart or select WorkerBee with
+  `--runtime containerd --containerd-privilege sudo-helper`, then retry the profile stop/purge.
+- Keep fallback cleanup scoped to WorkerBee state-hash namespaces and state-local data roots. Do not
+  prune reserved namespaces such as `ae`, `k8s.io`, `moby`, or `default`.
+
 ## Security / Review
 
 - Keep secrets out of this runbook. Reference secret managers, SOPS paths, or evidence files
