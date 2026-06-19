@@ -265,13 +265,15 @@ class GlobalIngress:
             recovery = self._recover_caddy_ca_mismatch(verification)
             if not recovery.get("ok"):
                 raise RuntimeError(_caddy_ca_verification_error(recovery))
-        info = self.info()
-        self.info_file.write_text(json.dumps(info.public_dict(), indent=2), encoding="utf-8")
-        return info
+        return self.persist_info()
 
     def sync_projects(self, projects: list[str]) -> dict[str, Any]:
         self._write_caddyfile(projects)
-        return self.reload()
+        result = self.reload()
+        if result.get("ok"):
+            self.persist_info()
+            result["ingress_metadata_repaired"] = True
+        return result
 
     def reload(self) -> dict[str, Any]:
         if not self._container_running():
@@ -334,8 +336,7 @@ class GlobalIngress:
                 "regenerate_command": INGRESS_CA_REGENERATE_COMMAND,
             }
             raise RuntimeError(_caddy_ca_verification_error(recovery))
-        info = self.info()
-        self.info_file.write_text(json.dumps(info.public_dict(), indent=2), encoding="utf-8")
+        info = self.persist_info()
         new_sha = _safe_sha256(self.ca_bundle) if _safe_is_file(self.ca_bundle) else None
         public = info.public_dict()
         return {
@@ -441,6 +442,12 @@ class GlobalIngress:
             ca_http_port=self.ca_http_port,
             dns=self._dns_public_dict(),
         )
+
+    def persist_info(self) -> GlobalIngressInfo:
+        info = self.info()
+        self.global_dir.mkdir(parents=True, exist_ok=True)
+        self.info_file.write_text(json.dumps(info.public_dict(), indent=2), encoding="utf-8")
+        return info
 
     def _dns_public_dict(self) -> dict[str, Any]:
         if self.dns_status is not None:

@@ -2598,6 +2598,57 @@ def test_global_ingress_status_reports_missing_metadata(tmp_path: Path) -> None:
     }
 
 
+def test_global_ingress_sync_projects_repairs_missing_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    ingress.global_dir.mkdir(parents=True)
+    monkeypatch.setattr(ingress, "_container_running", lambda: True)
+    monkeypatch.setattr(
+        "workerbee.ingress.subprocess.run",
+        lambda _cmd, **_kwargs: SimpleNamespace(returncode=0, stdout=""),
+    )
+
+    result = ingress.sync_projects(["demo"])
+
+    assert result["ok"] is True
+    assert result["ingress_metadata_repaired"] is True
+    metadata = json.loads(ingress.info_file.read_text(encoding="utf-8"))
+    assert metadata["https_port"] == 19443
+    assert metadata["dashboard_url"] == "https://dashboard.workerbee.localhost:19443/"
+    assert metadata["caddy_container"] == ingress.container
+
+
+def test_daemon_global_dashboard_repairs_missing_live_ingress_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    daemon = WorkerBeeDaemon(state_root=tmp_path, runtime="podman")
+    daemon.ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    monkeypatch.setattr(
+        "workerbee.ingress.subprocess.run",
+        lambda _cmd, **_kwargs: SimpleNamespace(returncode=0, stdout="abc123\n"),
+    )
+
+    status = daemon.global_dashboard()
+
+    assert daemon.ingress.info_file.is_file()
+    assert status["enabled"] is True
+    assert status["running"] is True
+    assert status["https_port"] == 19443
+
+
 def test_global_ingress_status_marks_missing_container_stale(
     tmp_path: Path,
     monkeypatch,

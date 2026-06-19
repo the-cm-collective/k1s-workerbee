@@ -14,6 +14,7 @@ import struct
 import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from importlib.resources import files
@@ -2164,6 +2165,8 @@ class WorkerBeeDaemon:
 
     def global_dashboard(self) -> dict[str, Any]:
         if self.ingress is not None:
+            with suppress(Exception):
+                self.ingress.persist_info()
             return global_ingress_status(self.state_root, runtime=self.ingress.runtime)
         return global_ingress_status(self.state_root, runtime=self.runtime_requested)
 
