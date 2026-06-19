@@ -10,6 +10,14 @@ from workerbee.manifests import _load_yaml_documents, validate_stage
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLE_ROOT = REPO_ROOT / "examples" / "ai-fabric-lab"
 SCRIPT = REPO_ROOT / "scripts" / "dev" / "ai_fabric_lab.py"
+WORKERBEE_STATUS_REFRESH_GAP = (
+    "Final WorkerBee MCP project status should be refreshed in workerbee-status.json "
+    "before promotion."
+)
+SHORT_SOAK_PROMOTION_GAP = (
+    "Baseline or quality soak evidence is present but 60s is below the 1800s "
+    "promotion threshold."
+)
 
 
 def _load_module(path: Path, name: str) -> ModuleType:
@@ -919,7 +927,7 @@ def test_ai_fabric_lab_runtime_profile_records_mixed_soak_evidence(
     monkeypatch.setattr(
         lab,
         "_health_snapshot",
-        lambda **kwargs: {
+        lambda **_kwargs: {
             "ok": True,
             "checked_at": "2026-06-03T00:00:00+00:00",
             "endpoints": {
@@ -937,12 +945,12 @@ def test_ai_fabric_lab_runtime_profile_records_mixed_soak_evidence(
     monkeypatch.setattr(
         lab,
         "_host_alias_snapshot",
-        lambda **kwargs: {"ok": True, "checked_at": "2026-06-03T00:00:00+00:00"},
+        lambda **_kwargs: {"ok": True, "checked_at": "2026-06-03T00:00:00+00:00"},
     )
     monkeypatch.setattr(
         lab,
         "_lane_readiness_snapshot",
-        lambda **kwargs: {
+        lambda **_kwargs: {
             "ok": True,
             "lanes": {
                 "coordinator": {"ok": True, "model_id": "general-coordinator"},
@@ -953,7 +961,7 @@ def test_ai_fabric_lab_runtime_profile_records_mixed_soak_evidence(
     monkeypatch.setattr(
         lab,
         "_run_quality_contract",
-        lambda **kwargs: {"ok": True, "results": [], "findings": []},
+        lambda **_kwargs: {"ok": True, "results": [], "findings": []},
     )
     monkeypatch.setattr(
         lab,
@@ -974,7 +982,7 @@ def test_ai_fabric_lab_runtime_profile_records_mixed_soak_evidence(
     monkeypatch.setattr(
         lab,
         "_run_evidence_closeout",
-        lambda **kwargs: {"ok": True, "record_count": 3, "findings": []},
+        lambda **_kwargs: {"ok": True, "record_count": 3, "findings": []},
     )
 
     result = lab.validate_runtime(
@@ -1021,10 +1029,7 @@ def test_ai_fabric_lab_runtime_profile_records_mixed_soak_evidence(
         "promotion_duration_seconds": 1800,
         "promotion_ready": False,
     }
-    assert (
-        "Baseline or quality soak evidence is present but 60s is below the 1800s promotion threshold."
-        in operator_report["known_gaps"]
-    )
+    assert SHORT_SOAK_PROMOTION_GAP in operator_report["known_gaps"]
 
 
 def test_ai_fabric_lab_normalizes_workerbee_cli_project_status() -> None:
@@ -1094,7 +1099,7 @@ def test_ai_fabric_lab_acceptance_closeout_writes_contract_artifacts(
     monkeypatch.setattr(
         lab,
         "_health_snapshot",
-        lambda **kwargs: {
+        lambda **_kwargs: {
             "ok": True,
             "checked_at": "2026-06-02T00:00:00+00:00",
             "endpoints": {
@@ -1117,12 +1122,12 @@ def test_ai_fabric_lab_acceptance_closeout_writes_contract_artifacts(
     monkeypatch.setattr(
         lab,
         "_host_alias_snapshot",
-        lambda **kwargs: {"ok": True, "checked_at": "2026-06-02T00:00:00+00:00"},
+        lambda **_kwargs: {"ok": True, "checked_at": "2026-06-02T00:00:00+00:00"},
     )
     monkeypatch.setattr(
         lab,
         "_lane_readiness_snapshot",
-        lambda **kwargs: {
+        lambda **_kwargs: {
             "ok": True,
             "lanes": {
                 "coordinator": {"ok": True, "model_id": "general-coordinator"},
@@ -1144,7 +1149,7 @@ def test_ai_fabric_lab_acceptance_closeout_writes_contract_artifacts(
     monkeypatch.setattr(
         lab,
         "_run_quality_comparison",
-        lambda **kwargs: {
+        lambda **_kwargs: {
             "ok": True,
             "results": [
                 {
@@ -1159,7 +1164,7 @@ def test_ai_fabric_lab_acceptance_closeout_writes_contract_artifacts(
     monkeypatch.setattr(
         lab,
         "_run_stress_burst",
-        lambda **kwargs: {
+        lambda **_kwargs: {
             "ok": True,
             "final_vram_growth_mib": 12,
             "request_count": 4,
@@ -1170,17 +1175,17 @@ def test_ai_fabric_lab_acceptance_closeout_writes_contract_artifacts(
     monkeypatch.setattr(
         lab,
         "_run_recovery_smoke",
-        lambda **kwargs: {"ok": True, "results": [], "findings": []},
+        lambda **_kwargs: {"ok": True, "results": [], "findings": []},
     )
     monkeypatch.setattr(
         lab,
         "_run_advisor_scenarios",
-        lambda **kwargs: {"ok": True, "scenario_count": 2, "findings": []},
+        lambda **_kwargs: {"ok": True, "scenario_count": 2, "findings": []},
     )
     monkeypatch.setattr(
         lab,
         "_run_evidence_closeout",
-        lambda **kwargs: {"ok": True, "record_count": 3, "findings": []},
+        lambda **_kwargs: {"ok": True, "record_count": 3, "findings": []},
     )
 
     result = lab.validate_runtime(
@@ -1223,10 +1228,7 @@ def test_ai_fabric_lab_acceptance_closeout_writes_contract_artifacts(
     assert profile["evidence"]["advisory_trace_refs"][0]["trace_id"] == "trace-acceptance"
     assert operator_report["api_version"] == "workerbee.ai-fabric.operator-report/v1"
     assert operator_report["recommended_next_action"].startswith("promote")
-    assert (
-        "Final WorkerBee MCP project status should be refreshed in workerbee-status.json before promotion."
-        in operator_report["known_gaps"]
-    )
+    assert WORKERBEE_STATUS_REFRESH_GAP in operator_report["known_gaps"]
     workerbee_status = json.loads(
         (run_dir / "workerbee-status.json").read_text(encoding="utf-8")
     )
@@ -1269,7 +1271,7 @@ def test_ai_fabric_lab_acceptance_closeout_copies_workerbee_status(
     monkeypatch.setattr(
         lab,
         "_health_snapshot",
-        lambda **kwargs: {
+        lambda **_kwargs: {
             "ok": True,
             "checked_at": "2026-06-02T00:00:00+00:00",
             "endpoints": {
@@ -1292,12 +1294,12 @@ def test_ai_fabric_lab_acceptance_closeout_copies_workerbee_status(
     monkeypatch.setattr(
         lab,
         "_host_alias_snapshot",
-        lambda **kwargs: {"ok": True, "checked_at": "2026-06-02T00:00:00+00:00"},
+        lambda **_kwargs: {"ok": True, "checked_at": "2026-06-02T00:00:00+00:00"},
     )
     monkeypatch.setattr(
         lab,
         "_lane_readiness_snapshot",
-        lambda **kwargs: {
+        lambda **_kwargs: {
             "ok": True,
             "lanes": {
                 "coordinator": {"ok": True, "model_id": "general-coordinator"},
@@ -1319,12 +1321,12 @@ def test_ai_fabric_lab_acceptance_closeout_copies_workerbee_status(
     monkeypatch.setattr(
         lab,
         "_run_quality_comparison",
-        lambda **kwargs: {"ok": True, "results": [], "findings": []},
+        lambda **_kwargs: {"ok": True, "results": [], "findings": []},
     )
     monkeypatch.setattr(
         lab,
         "_run_stress_burst",
-        lambda **kwargs: {
+        lambda **_kwargs: {
             "ok": True,
             "final_vram_growth_mib": 12,
             "request_count": 4,
@@ -1335,17 +1337,17 @@ def test_ai_fabric_lab_acceptance_closeout_copies_workerbee_status(
     monkeypatch.setattr(
         lab,
         "_run_recovery_smoke",
-        lambda **kwargs: {"ok": True, "results": [], "findings": []},
+        lambda **_kwargs: {"ok": True, "results": [], "findings": []},
     )
     monkeypatch.setattr(
         lab,
         "_run_advisor_scenarios",
-        lambda **kwargs: {"ok": True, "scenario_count": 2, "findings": []},
+        lambda **_kwargs: {"ok": True, "scenario_count": 2, "findings": []},
     )
     monkeypatch.setattr(
         lab,
         "_run_evidence_closeout",
-        lambda **kwargs: {"ok": True, "record_count": 3, "findings": []},
+        lambda **_kwargs: {"ok": True, "record_count": 3, "findings": []},
     )
 
     result = lab.validate_runtime(
@@ -1381,10 +1383,7 @@ def test_ai_fabric_lab_acceptance_closeout_copies_workerbee_status(
     assert copied["ok"] is True
     assert copied["source"] == "workerbee.mcp.project_status"
     assert copied["data"]["app_status"]["ready_workload_count"] == 8
-    assert (
-        "Final WorkerBee MCP project status should be refreshed in workerbee-status.json before promotion."
-        not in operator_report["known_gaps"]
-    )
+    assert WORKERBEE_STATUS_REFRESH_GAP not in operator_report["known_gaps"]
 
 
 def test_ai_fabric_lab_lane_readiness_retries_until_models_answer() -> None:
@@ -2022,7 +2021,8 @@ def test_ai_fabric_f1_f2_locality_closeout_seeds_controller_evidence(
     assert post_calls[0]["headers"] == {"Authorization": "Bearer admin-token"}
     records = post_calls[0]["payload"]["records"]
     assert records["fabric_nodes"][0]["capabilities"]["storage_devices"][0]["medium"] == "nvme"
-    assert records["fabric_nodes"][0]["capabilities"]["identity_roles"]["fabric"].endswith("/fabric")
+    fabric_role = records["fabric_nodes"][0]["capabilities"]["identity_roles"]["fabric"]
+    assert fabric_role.endswith("/fabric")
     assert records["fabric_chunks"][0]["namespace"] == "ai-fabric-lab"
     assert records["fabric_residencies"][0]["node_id"] == "node-a"
     assert records["fabric_movements"][0]["direction"] == "pull"
@@ -2069,17 +2069,21 @@ def test_ai_fabric_f3_advisory_closeout_writes_phase_assurance_artifacts(
     monkeypatch.setattr(
         lab,
         "_health_snapshot",
-        lambda **kwargs: {"ok": True, "checked_at": "2026-06-04T00:00:00+00:00"},
+        lambda **_kwargs: {"ok": True, "checked_at": "2026-06-04T00:00:00+00:00"},
     )
     monkeypatch.setattr(
         lab,
         "_host_alias_snapshot",
-        lambda **kwargs: {"ok": True, "endpoints": {}, "checked_at": "2026-06-04T00:00:00+00:00"},
+        lambda **_kwargs: {
+            "ok": True,
+            "endpoints": {},
+            "checked_at": "2026-06-04T00:00:00+00:00",
+        },
     )
     monkeypatch.setattr(
         lab,
         "import_runtime_facts",
-        lambda *args, **kwargs: {
+        lambda *_args, **kwargs: {
             "ok": True,
             "das_url": kwargs["das_url"],
             "track": kwargs["track"],

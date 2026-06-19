@@ -3,6 +3,27 @@
 All notable WorkerBee changes are documented here. Earlier entries are best
 effort summaries reconstructed from release notes and git history.
 
+## v0.1.6.dev2 - 2026-06-19
+
+- Added the AI fabric lab validation package with native k1s stages, model
+  lanes, LoRA adapter smoke coverage, retrieval evidence, DAS advisory
+  scenarios, Hyperon sidecar scaffolding, and retained validation reports.
+- Added per-project runbooks so Codex agents and operators can preserve and
+  refine proven WorkerBee bring-up, deploy, repair, and validation paths.
+- Added WorkerBee image hardening build metadata for minimal/hardened image
+  review without changing existing repo Dockerfiles by default.
+- Added workload restart support for local development images that reuse stable
+  `:dev` tags.
+- Improved direct-containerd and profile workflows with runtime preference,
+  profile ingress/log hardening, exposed profile workload ingress, and cleanup
+  guidance.
+- Fixed stale project ingress, persisted ingress CA state across restarts,
+  wildcard listener detection during port allocation, project port collision
+  handling, containerd MCP log fallback, and WorkerBee-owned Podman CNI
+  normalization.
+- Published as a development-channel candidate pinned to
+  `k1s-workerbee-runtime==0.1.6.dev2`.
+
 ## v0.1.6.dev1 - 2026-05-31
 
 - Added the k1s edge-link runner and HA-aware external-core targets.

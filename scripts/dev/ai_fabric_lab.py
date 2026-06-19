@@ -2315,7 +2315,8 @@ def _findings_from_failed_checks(checks: dict[str, bool], *, code: str) -> list[
 
 
 def _fabric_phase_payload(phase_assurance: dict[str, Any], phase_id: str) -> dict[str, Any]:
-    phases = phase_assurance.get("phases") if isinstance(phase_assurance.get("phases"), dict) else {}
+    phases_raw = phase_assurance.get("phases")
+    phases = phases_raw if isinstance(phases_raw, dict) else {}
     phase = phases.get(phase_id) if isinstance(phases.get(phase_id), dict) else {}
     return phase
 
@@ -2326,7 +2327,8 @@ def _f3_phase_payload(phase_assurance: dict[str, Any]) -> dict[str, Any]:
 
 def _k1s_advisory_state_summary(state: dict[str, Any]) -> dict[str, Any]:
     advisory = state.get("advisory") if isinstance(state.get("advisory"), dict) else {}
-    latest_trace = advisory.get("latest_trace") if isinstance(advisory.get("latest_trace"), dict) else {}
+    latest_trace_raw = advisory.get("latest_trace")
+    latest_trace = latest_trace_raw if isinstance(latest_trace_raw, dict) else {}
     return {
         "ok": bool(state.get("ok")),
         "mode": state.get("mode"),
@@ -2767,7 +2769,8 @@ def _operator_report(
     ]
     if workerbee_status.get("ok") is not True:
         gaps.append(
-            "Final WorkerBee MCP project status should be refreshed in workerbee-status.json before promotion."
+            "Final WorkerBee MCP project status should be refreshed in "
+            "workerbee-status.json before promotion."
         )
     evidence = (
         runtime_profile.get("evidence")
@@ -2793,7 +2796,11 @@ def _operator_report(
         "run_id": str(summary.get("run_id") or ""),
         "stage": "examples/ai-fabric-lab/stage-lora-adapter-smoke",
         "track": runtime_profile.get("track"),
-        "ok": bool(acceptance.get("ok")) if acceptance.get("acceptance") else bool(summary.get("ok")),
+        "ok": (
+            bool(acceptance.get("ok"))
+            if acceptance.get("acceptance")
+            else bool(summary.get("ok"))
+        ),
         "validation": validation,
         "known_gaps": gaps,
         "recommended_next_action": (

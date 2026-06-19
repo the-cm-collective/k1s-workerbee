@@ -724,9 +724,12 @@ def _missing_phase_evidence(subject: str, facts: list[dict[str, Any]]) -> bool:
         if not _phase_fact_applies(subject, fact_subject):
             continue
         predicate = fact.get("predicate")
-        if predicate == "present" and _is_phase_evidence_subject(fact_subject):
-            if _condition_state(fact.get("object")) in DEGRADED_STATES:
-                return True
+        if (
+            predicate == "present"
+            and _is_phase_evidence_subject(fact_subject)
+            and _condition_state(fact.get("object")) in DEGRADED_STATES
+        ):
+            return True
         if predicate == "status" and _condition_state(fact.get("object")) in DEGRADED_STATES:
             return True
     return False
