@@ -45,6 +45,42 @@ def test_run_ae_retries_remote_apply_read_timeout(
     assert len(calls) == 2
 
 
+def test_run_ae_retries_remote_apply_http_500(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_runtime(monkeypatch)
+    monkeypatch.setattr("workerbee.supervisor.secret_env_for_project", lambda _state: {})
+    monkeypatch.setattr("workerbee.supervisor.time.sleep", lambda _seconds: None)
+    calls: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kwargs: Any) -> SimpleNamespace:
+        calls.append(cmd)
+        if len(calls) == 1:
+            return SimpleNamespace(
+                returncode=1,
+                stdout=(
+                    "remote apply failed: 500 Server Error: Internal Server Error "
+                    "for url: http://127.0.0.1:19108/apply\n"
+                ),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=0, stdout="applied desired state\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    sup = WorkerBeeSupervisor(project="demo", state_dir=tmp_path / "state", runtime="docker")
+
+    result = sup.run_ae(
+        ["--server", "http://127.0.0.1:19108", "--token", "secret", "apply", "-f", "app.yaml"],
+        info=_stack(tmp_path),
+        timeout=120,
+    )
+
+    assert result["returncode"] == 0
+    assert result["attempts"] == 2
+    assert len(calls) == 2
+
+
 def test_deploy_manifest_posts_directly_with_workerbee_timeout(
     tmp_path: Path,
     monkeypatch,

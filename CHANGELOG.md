@@ -26,6 +26,8 @@ effort summaries reconstructed from release notes and git history.
   and runtime operations.
 - Fixed profile workload HTTPS validation after ingress restarts or cleanup by
   repairing global ingress metadata on reload and live daemon status checks.
+- Improved profile workload deploy validation by retrying transient remote
+  `apply` failures from container runtime startup races.
 - Published as a development-channel candidate pinned to
   `k1s-workerbee-runtime==0.1.6.dev2`.
 

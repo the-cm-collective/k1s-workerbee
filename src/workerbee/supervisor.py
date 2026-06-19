@@ -1209,7 +1209,7 @@ https://{api_host} {{
                 result["retried"] = True
             if proc.returncode == 0:
                 return result
-            if attempt < attempts and _retryable_remote_apply_timeout(cmd_args, result):
+            if attempt < attempts and _retryable_remote_apply_failure(cmd_args, result):
                 time.sleep(_env_float("WORKERBEE_AE_APPLY_RETRY_DELAY", 3.0))
                 continue
             raise RuntimeError(json.dumps(result, indent=2))
@@ -2323,11 +2323,19 @@ def _is_remote_apply(args: list[str]) -> bool:
     return "apply" in args and "--server" in args
 
 
-def _retryable_remote_apply_timeout(args: list[str], result: dict[str, Any]) -> bool:
+def _retryable_remote_apply_failure(args: list[str], result: dict[str, Any]) -> bool:
     if not _is_remote_apply(args):
         return False
     combined = f"{result.get('stdout') or ''}\n{result.get('stderr') or ''}".lower()
-    return "read timed out" in combined or "read timeout" in combined
+    return any(
+        marker in combined
+        for marker in (
+            "read timed out",
+            "read timeout",
+            "500 server error",
+            "internal server error for url",
+        )
+    )
 
 
 def _project_cleanup_label_filters(project: str, *, include_namespaces: bool) -> list[str]:
