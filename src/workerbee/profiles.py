@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 from urllib import request as urllib_request
 
-from workerbee.containerd_helper import remove_containerd_helper_tree
+from workerbee.containerd_helper import ensure_containerd_helper, remove_containerd_helper_tree
 from workerbee.contract import WorkerBeeError
 from workerbee.http import request, wait_for_http
 from workerbee.ingress import ProjectIngressConfig
@@ -198,13 +198,19 @@ class K1sProfileRunner:
                 remediation="Use WorkerBeeDaemon.profile_start or `workerbee edge-link start`.",
             )
         self._require_containerd()
+        helper = self._ensure_containerd_helper(timeout=timeout)
         info = self.load()
         if info and info.profile != descriptor.name:
             self.stop(purge=False)
             info = None
         if info and self._all_components_running(info):
             info = self._refresh_ingress_info(info, descriptor)
-            return {"ok": True, "started": False, "profile": info.public_dict()}
+            return {
+                "ok": True,
+                "started": False,
+                "profile": info.public_dict(),
+                "containerd_helper": helper,
+            }
 
         self._ensure_layout(descriptor)
         self._ensure_network()
@@ -286,6 +292,7 @@ class K1sProfileRunner:
             "started": True,
             "profile": info.public_dict(),
             "readiness": readiness,
+            "containerd_helper": helper,
         }
 
     def status(self, *, refresh_ingress: bool = True) -> dict[str, Any]:
@@ -346,6 +353,7 @@ class K1sProfileRunner:
                 details={"profile": info.profile},
                 retryable=True,
             )
+        helper = self._ensure_containerd_helper(timeout=timeout)
         info = self._refresh_ingress_info(info, _profile_descriptor(info.profile))
         urls = info.ingress_urls
         if not self.ingress or not urls.get("controller") or not urls.get("api"):
@@ -379,6 +387,7 @@ class K1sProfileRunner:
             "read_token": info.read_token,
             "apishim_token": info.apishim_token,
             "urls": urls,
+            "containerd_helper": helper,
         }
 
     def workload_status(
@@ -643,6 +652,10 @@ class K1sProfileRunner:
                     "sudo-helper` before using profile commands."
                 ),
             )
+
+    def _ensure_containerd_helper(self, *, timeout: float) -> dict[str, Any]:
+        helper_timeout = min(max(float(timeout), 1.0), 30.0)
+        return ensure_containerd_helper(self.state_root, timeout=helper_timeout)
 
     def _choose_profile_port(
         self,

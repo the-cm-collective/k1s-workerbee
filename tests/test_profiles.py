@@ -11,6 +11,35 @@ from workerbee.ingress import ProjectIngressConfig
 from workerbee.profiles import K1sProfileInfo, K1sProfileRunner, builtin_profiles
 
 
+@pytest.fixture(autouse=True)
+def _containerd_helper_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[Path]:
+    calls: list[Path] = []
+
+    def fake_ensure_containerd_helper(root: Path, **_kwargs: object) -> dict[str, object]:
+        resolved = root.expanduser().resolve()
+        calls.append(resolved)
+        return {
+            "ok": True,
+            "running": True,
+            "started": False,
+            "socket": str(resolved / "global" / "containerd-helper.sock"),
+            "wrapper": str(resolved / "global" / "bin" / "workerbee-nerdctl"),
+            "env": {
+                "WORKERBEE_CONTAINERD_HELPER_SOCKET": str(
+                    resolved / "global" / "containerd-helper.sock"
+                )
+            },
+        }
+
+    monkeypatch.setattr(
+        "workerbee.profiles.ensure_containerd_helper",
+        fake_ensure_containerd_helper,
+    )
+    return calls
+
+
 def test_builtin_profiles_are_direct_containerd_only() -> None:
     result = builtin_profiles()
 
@@ -386,6 +415,7 @@ def test_profile_controller_dashboard_uses_public_apishim_ingress(
 def test_profile_connection_uses_internal_loopback_and_keeps_public_urls(
     tmp_path: Path,
     monkeypatch,
+    _containerd_helper_calls: list[Path],
 ) -> None:
     monkeypatch.setattr("workerbee.profiles.resolve_runtime", lambda _runtime: "containerd")
     monkeypatch.setattr("workerbee.profiles.port_is_free", lambda _port: True)
@@ -436,6 +466,9 @@ def test_profile_connection_uses_internal_loopback_and_keeps_public_urls(
     started = runner.start(profile="k1s-dev-min-sqlite", timeout=0.01)
     connection = runner.connection(profile="k1s-dev-min-sqlite")
 
+    assert started["containerd_helper"]["socket"].endswith("containerd-helper.sock")
+    assert connection["containerd_helper"]["socket"].endswith("containerd-helper.sock")
+    assert _containerd_helper_calls == [tmp_path.resolve(), tmp_path.resolve()]
     assert connection["server"] == started["profile"]["controller_url"]
     assert connection["api_server"] == started["profile"]["apishim_url"]
     assert connection["server"].startswith("http://127.0.0.1:")

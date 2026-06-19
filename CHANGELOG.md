@@ -21,6 +21,9 @@ effort summaries reconstructed from release notes and git history.
   wildcard listener detection during port allocation, project port collision
   handling, containerd MCP log fallback, and WorkerBee-owned Podman CNI
   normalization.
+- Fixed direct-containerd profile workload validation so containerized k1s
+  controllers always have a live WorkerBee helper socket for image inspection
+  and runtime operations.
 - Published as a development-channel candidate pinned to
   `k1s-workerbee-runtime==0.1.6.dev2`.
 
