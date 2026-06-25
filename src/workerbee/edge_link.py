@@ -2011,6 +2011,7 @@ def _edge_cell_contract(
         "boot_assurance": boot_assurance,
         "assurance_enforcement": _ai_max_assurance_enforcement_view(members, installer),
         "autonomy_state": autonomy_state,
+        "governance_evidence": _ai_max_governance_evidence_fixture(),
         "disconnected_drill_report": disconnected_drill_report,
         "ha_lab_deployment_plan": ha_lab_deployment_plan,
         "ha_recovery_drill_report": _ai_max_ha_recovery_drill_report(
@@ -2277,6 +2278,74 @@ def _ai_max_assurance_member(
         "quarantined": bool(quarantined),
         "failure_reasons": list(failure_reasons),
         "alert": alert,
+    }
+
+
+def _ai_max_governance_evidence_fixture() -> dict[str, Any]:
+    return {
+        "use_case": "nigerian-language-translation",
+        "readiness": "governance-evidence-ready",
+        "dataset_card": {
+            "dataset_id": "ng-translation-public-demo-v1",
+            "name": "Nigerian language translation public demo corpus",
+            "languages": ["ha", "ig", "yo", "en"],
+            "domain": "public-service-local-domain",
+            "data_residency": "NG-local-lab",
+            "classification": "public-demo",
+            "consent_lawful_basis": "placeholder-consent-lawful-basis",
+            "retention_deletion_marker": "stage15-retention-delete-marker",
+        },
+        "model_card": {
+            "model_id": "ng-translation-ai-max-stage15",
+            "name": "Nigerian language translation model",
+            "version": "stage15-local-v1",
+            "task": "translation",
+            "languages": ["ha", "ig", "yo", "en"],
+            "base_model_ref": "models/llama:stage11-local",
+            "artifact_ref": "models/ng-translation:stage15-local",
+            "owner": "k1s-public-ai-governance",
+            "operator": "k1s-edge-operator",
+        },
+        "eval_report": {
+            "benchmark_ref": "benchmarks/ng-translation-stage15",
+            "eval_set_ref": "evalsets/ng-translation-local-v1",
+            "metrics": {
+                "chrf": 0.62,
+                "semantic_adequacy": 0.81,
+                "toxicity_pass_rate": 0.99,
+            },
+            "approval_threshold": 0.8,
+            "passed": True,
+            "local_domain_note": "Nigerian-language local-domain simulation only",
+        },
+        "risk_assessment": {
+            "risk_level": "medium",
+            "human_oversight": True,
+            "bias_note": "bias review required for Hausa Igbo Yoruba English",
+            "fairness_note": "fairness checks tracked by language and domain",
+            "security_note": "prompt and data handling reviewed locally",
+            "mitigation_status": "mitigations-documented",
+        },
+        "approval_record": {
+            "approver_role": "ai-governance-reviewer",
+            "approved_at": "2026-06-25T00:00:00Z",
+            "release_gate": "stage15-governance-evidence-ready",
+            "rollback_ref": "rollback/ng-translation-stage15",
+        },
+        "rollback_record": {
+            "trigger": "quality-regression-or-governance-review",
+            "previous_version": "stage14-local-v0",
+            "evidence_marker": "stage15-rollback-evidence-marker",
+        },
+        "summary": {
+            "translation_workload_ready": True,
+            "dataset_card_ready": True,
+            "model_card_ready": True,
+            "eval_report_ready": True,
+            "risk_assessment_ready": True,
+            "approval_gate_ready": True,
+            "rollback_ready": True,
+        },
     }
 
 

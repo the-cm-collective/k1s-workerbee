@@ -216,6 +216,16 @@ The resulting WorkerBee state exposes an `edge_cell_contract` block with:
 - `assurance_enforcement.policy: exclude-quarantined-from-placement`
 - `assurance_enforcement.tampered_quarantine_fixture` with deterministic
   `boot-measurement-mismatch` quarantine metadata and reduced usable fabric size
+- `governance_evidence.readiness: governance-evidence-ready`
+- `governance_evidence.use_case: nigerian-language-translation`
+- `governance_evidence.dataset_card.dataset_id:
+  ng-translation-public-demo-v1`
+- `governance_evidence.model_card.task: translation`
+- `governance_evidence.eval_report.metrics.semantic_adequacy: 0.81`
+- `governance_evidence.approval_record.release_gate:
+  stage15-governance-evidence-ready`
+- `governance_evidence.rollback_record.evidence_marker:
+  stage15-rollback-evidence-marker`
 - `autonomy_state.current_state: connected`
 - `autonomy_state.cache.ready: true`
 - `autonomy_state.supported_transitions` for core-link loss, degraded local
@@ -266,6 +276,13 @@ schedulable. The deterministic tampered fixture shows how a failed cell-node
 would be marked quarantined, excluded from usable fabric capacity, and assigned
 alert/failure metadata. WorkerBee does not apply real kubelet/node admission,
 network quarantine, TPM-backed enforcement, or alert transport in this path.
+
+The `governance_evidence` block is the Stage 15 local governance evidence
+fixture for the Nigerian-language translation workload. It mirrors the k1s
+contract shape as WorkerBee metadata: dataset card, model card, eval report,
+risk assessment, approval gate, rollback marker, and readiness summary. This is
+not legal compliance completion, consent verification, production approval, or
+an external governance workflow.
 
 The `autonomy_state` block is the Stage 11 local state-machine simulation. It
 starts connected with a ready gateway cache, shows the supported transition
