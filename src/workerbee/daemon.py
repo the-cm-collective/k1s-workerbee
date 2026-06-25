@@ -852,6 +852,7 @@ class WorkerBeeDaemon:
         namespace: str = "k1s-dev-a",
         site_id: str = "workerbee-edge",
         node_id: str = "workerbee-edge-node",
+        cell_node_count: int = 0,
         bundle: dict[str, Any] | str | None = None,
         bundle_path: str | Path | None = None,
         controller_url: str | None = None,
@@ -879,6 +880,7 @@ class WorkerBeeDaemon:
                         namespace=namespace,
                         site_id=site_id,
                         node_id=node_id,
+                        cell_node_count=cell_node_count,
                         bundle=bundle,
                         bundle_path=bundle_path,
                         controller_url=controller_url,
@@ -964,6 +966,7 @@ class WorkerBeeDaemon:
         namespace: str = "k1s-dev-a",
         site_id: str = "workerbee-edge",
         node_id: str = "workerbee-edge-node",
+        cell_node_count: int = 0,
         bundle: dict[str, Any] | str | None = None,
         bundle_path: str | Path | None = None,
         controller_url: str | None = None,
@@ -992,6 +995,7 @@ class WorkerBeeDaemon:
                         namespace=namespace,
                         site_id=site_id,
                         node_id=node_id,
+                        cell_node_count=cell_node_count,
                         bundle=bundle,
                         bundle_path=bundle_path,
                         controller_url=controller_url,
@@ -1031,6 +1035,7 @@ class WorkerBeeDaemon:
         namespace: str = "k1s-dev-a",
         site_id: str = "workerbee-edge",
         node_id: str = "workerbee-edge-node",
+        cell_node_count: int = 0,
         bundle: dict[str, Any] | str | None = None,
         bundle_path: str | Path | None = None,
         controller_url: str | None = None,
@@ -1057,6 +1062,7 @@ class WorkerBeeDaemon:
             namespace=namespace,
             site_id=site_id,
             node_id=node_id,
+            cell_node_count=cell_node_count,
             bundle=bundle,
             bundle_path=bundle_path,
             controller_url=controller_url,
@@ -1108,6 +1114,7 @@ class WorkerBeeDaemon:
         namespace: str = "k1s-dev-a",
         site_id: str = "workerbee-edge",
         node_id: str = "workerbee-edge-node",
+        cell_node_count: int = 0,
         bundle: dict[str, Any] | str | None = None,
         bundle_path: str | Path | None = None,
         controller_url: str | None = None,
@@ -1135,6 +1142,7 @@ class WorkerBeeDaemon:
             namespace=namespace,
             site_id=site_id,
             node_id=node_id,
+            cell_node_count=cell_node_count,
             bundle=bundle,
             bundle_path=bundle_path,
             controller_url=controller_url,
@@ -1314,6 +1322,7 @@ class WorkerBeeDaemon:
         name = project_slug(project or self.default_project)
         target = _normalize_deploy_target(target)
         if target == "workerbee":
+
             def deploy_and_record(supervisor: WorkerBeeSupervisor) -> dict[str, Any]:
                 stage_dir = resolve_stage_dir(supervisor, stage)
                 previous = self._latest_deployment(name)
@@ -1632,9 +1641,7 @@ class WorkerBeeDaemon:
             "review": review,
         }
         reports_dir = (
-            daemon_project_state_dir(project, state_root=self.state_root)
-            / "reports"
-            / "security"
+            daemon_project_state_dir(project, state_root=self.state_root) / "reports" / "security"
         )
         reports_dir.mkdir(parents=True, exist_ok=True)
         path = reports_dir / f"{report_id}.json"
@@ -2717,8 +2724,10 @@ class WorkerBeeDaemon:
         now = time.time()
         records = self._read_registry()
         existing = records.get(project) or {}
-        selected_mode = normalize_project_mode(mode) if mode is not None else _safe_project_mode(
-            existing.get("mode")
+        selected_mode = (
+            normalize_project_mode(mode)
+            if mode is not None
+            else _safe_project_mode(existing.get("mode"))
         )
         record = ProjectRecord(
             project=project,
@@ -2761,9 +2770,7 @@ class WorkerBeeDaemon:
             projects = data.get("projects") if isinstance(data, dict) else None
             if isinstance(projects, dict):
                 return {
-                    str(name): value
-                    for name, value in projects.items()
-                    if isinstance(value, dict)
+                    str(name): value for name, value in projects.items() if isinstance(value, dict)
                 }
         except Exception:
             return {}
@@ -3305,8 +3312,7 @@ def _dashboard_summary(
     app_ready = [
         item
         for item in projects
-        if isinstance(item.get("app_status"), dict)
-        and item["app_status"].get("state") == "ready"
+        if isinstance(item.get("app_status"), dict) and item["app_status"].get("state") == "ready"
     ]
     app_degraded = [
         item
@@ -3668,14 +3674,14 @@ def _profile_ingress_refresh_metadata(
     )
     dashboard_url = str(profile_urls.get("dashboard")) if profile_urls.get("dashboard") else None
     missing_before = running and (not before_dashboard_url or before_site_text is None)
-    changed = running and before_site_text is not None and after_site_text is not None and (
-        before_site_text != after_site_text
+    changed = (
+        running
+        and before_site_text is not None
+        and after_site_text is not None
+        and (before_site_text != after_site_text)
     )
     repaired = bool(
-        refresh_ingress
-        and dashboard_url
-        and after_site_text
-        and (missing_before or changed)
+        refresh_ingress and dashboard_url and after_site_text and (missing_before or changed)
     )
     if error:
         reason = error
@@ -3934,12 +3940,7 @@ def _caddy_public_urls(
 def _exposed_route_summary(routes: list[dict[str, Any]]) -> str:
     if not routes:
         return "none"
-    hosts = {
-        host
-        for route in routes
-        for host in route.get("hosts", [])
-        if isinstance(host, str)
-    }
+    hosts = {host for route in routes for host in route.get("hosts", []) if isinstance(host, str)}
     return f"{len(routes)} route(s), {len(hosts)} host(s)"
 
 
@@ -4004,7 +4005,7 @@ def _render_global_ingress_panel(global_dashboard: Any) -> str:
         _info_item(
             "Ingress",
             f'<span class="pill {"ok" if data.get("running") else "warn"}">'
-            f'{"running" if data.get("running") else "stopped"}</span>',
+            f"{'running' if data.get('running') else 'stopped'}</span>",
             html=True,
         ),
         _info_item("Exposure", data.get("exposure") or "loopback"),
@@ -4081,11 +4082,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
         app_class = (
             "ok"
             if app_state == "ready"
-            else (
-                "warn"
-                if app_state in {"degraded", "orphaned", "unknown"}
-                else "idle"
-            )
+            else ("warn" if app_state in {"degraded", "orphaned", "unknown"} else "idle")
         )
         ingress_status = str(item.get("ingress_status") or "idle")
         ingress_class = (
@@ -4431,7 +4428,7 @@ def _render_dashboard(payload: dict[str, Any], *, action_token: str = "") -> str
                 <th>Git Branch</th><th>Error</th><th>State</th><th>Actions</th>
               </tr>
             </thead>
-            <tbody id="projects-body">{''.join(rows)}</tbody>
+            <tbody id="projects-body">{"".join(rows)}</tbody>
           </table>
         </div>
       </section>
@@ -5281,10 +5278,7 @@ def _link(raw: object) -> str:
 def _esc(raw: object) -> str:
     text = "" if raw is None else str(raw)
     return (
-        text.replace("&", "&amp;")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace('"', "&quot;")
+        text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
     )
 
 

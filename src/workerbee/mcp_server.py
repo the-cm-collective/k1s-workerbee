@@ -191,8 +191,7 @@ def serve_mcp(
     dns = getattr(ingress, "dns", None)
     if isinstance(dns, dict) and dns.get("enabled"):
         print(
-            f"WorkerBee DNS: {dns.get('bind_host')}:{dns.get('port')} "
-            f"for {dns.get('base_domain')}",
+            f"WorkerBee DNS: {dns.get('bind_host')}:{dns.get('port')} for {dns.get('base_domain')}",
             flush=True,
         )
     print(f"WorkerBee state root: {ingress.state_root}", flush=True)
@@ -401,6 +400,7 @@ def serve_mcp(
         namespace: str = "k1s-dev-a",
         site_id: str = "workerbee-edge",
         node_id: str = "workerbee-edge-node",
+        cell_node_count: int = 0,
         bundle: dict[str, Any] | str | None = None,
         bundle_path: str | None = None,
         controller_url: str | None = None,
@@ -430,6 +430,7 @@ def serve_mcp(
                 namespace=namespace,
                 site_id=site_id,
                 node_id=node_id,
+                cell_node_count=cell_node_count,
                 bundle=bundle,
                 bundle_path=bundle_path,
                 controller_url=controller_url,
@@ -483,6 +484,7 @@ def serve_mcp(
         namespace: str = "k1s-dev-a",
         site_id: str = "workerbee-edge",
         node_id: str = "workerbee-edge-node",
+        cell_node_count: int = 0,
         bundle: dict[str, Any] | str | None = None,
         bundle_path: str | None = None,
         controller_url: str | None = None,
@@ -513,6 +515,7 @@ def serve_mcp(
                 namespace=namespace,
                 site_id=site_id,
                 node_id=node_id,
+                cell_node_count=cell_node_count,
                 bundle=bundle,
                 bundle_path=bundle_path,
                 controller_url=controller_url,
@@ -540,6 +543,7 @@ def serve_mcp(
         namespace: str = "k1s-dev-a",
         site_id: str = "workerbee-edge",
         node_id: str = "workerbee-edge-node",
+        cell_node_count: int = 0,
         bundle: dict[str, Any] | str | None = None,
         bundle_path: str | None = None,
         controller_url: str | None = None,
@@ -568,6 +572,7 @@ def serve_mcp(
                 namespace=namespace,
                 site_id=site_id,
                 node_id=node_id,
+                cell_node_count=cell_node_count,
                 bundle=bundle,
                 bundle_path=bundle_path,
                 controller_url=controller_url,
@@ -607,6 +612,7 @@ def serve_mcp(
         namespace: str = "k1s-dev-a",
         site_id: str = "workerbee-edge",
         node_id: str = "workerbee-edge-node",
+        cell_node_count: int = 0,
         bundle: dict[str, Any] | str | None = None,
         bundle_path: str | None = None,
         controller_url: str | None = None,
@@ -636,6 +642,7 @@ def serve_mcp(
                 namespace=namespace,
                 site_id=site_id,
                 node_id=node_id,
+                cell_node_count=cell_node_count,
                 bundle=bundle,
                 bundle_path=bundle_path,
                 controller_url=controller_url,

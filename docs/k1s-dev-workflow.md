@@ -169,6 +169,42 @@ scripts/dev/wb-containerd --project wb014 edge-link validate \
   --namespace k1s-dev-a
 ```
 
+### AI Max Edge Cell Simulation
+
+The default `k1s-edge-link` path remains the legacy one-node simulation: one
+gateway component and one node-agent component using `--node-id` as the gateway
+compute node.
+
+To simulate the corrected AI Max edge-cell contract locally, opt in with three
+additional cell nodes:
+
+```bash
+scripts/dev/wb-containerd --project wb014 edge-link start \
+  --k1s-root ../k1s \
+  --from-microk8s \
+  --release k1s-dev-a \
+  --namespace k1s-dev-a \
+  --site-id workerbee-edge \
+  --node-id workerbee-edge-node \
+  --cell-node-count 3
+```
+
+The resulting WorkerBee state exposes an `edge_cell_contract` block with:
+
+- `profile: ai-max-edge-cell-v1`
+- `size: 4`
+- `gateway_node_id: workerbee-edge-node`
+- three deterministic cell node IDs:
+  `workerbee-edge-node-cell-1` through `workerbee-edge-node-cell-3`
+- `compute_node_ids` containing all four nodes
+- per-member labels with `role` set to `gateway` or `cell-node` and
+  `compute_eligible: true`
+
+The simulation starts one gateway component, one gateway node-agent component,
+and three additional node-agent components. The legacy `node_id` and
+`agent_endpoint` fields still refer to the gateway compute node so existing
+edge-link consumers continue to work.
+
 Stop and optionally purge the short-lived link when the test is complete:
 
 ```bash

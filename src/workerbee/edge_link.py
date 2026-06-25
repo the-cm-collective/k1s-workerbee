@@ -50,6 +50,8 @@ DEFAULT_RATHOLE_IMAGE = "docker.io/rapiz1/rathole:v0.5.0"
 DEFAULT_GPU_SMOKE_IMAGE = "docker.io/nvidia/cuda:12.4.1-base-ubuntu22.04"
 DEFAULT_K1S_PYTHON_IMAGE = "docker.io/library/python:3.12-slim"
 DEFAULT_EDGE_LOCAL_ADDR = "127.0.0.1:18081"
+AI_MAX_EDGE_CELL_PROFILE = "ai-max-edge-cell-v1"
+AI_MAX_EDGE_CELL_NODE_COUNT = 3
 
 
 @dataclass(slots=True)
@@ -93,6 +95,8 @@ class K1sEdgeLinkInfo:
     agent_endpoint: str = ""
     edge_local_addr: str = DEFAULT_EDGE_LOCAL_ADDR
     agent_host_port: int | None = None
+    cell_node_count: int = 0
+    edge_cell_contract: dict[str, Any] = field(default_factory=dict)
     gateway_image: str = ""
     node_image: str = ""
     gpu: dict[str, Any] = field(default_factory=dict)
@@ -151,10 +155,12 @@ class K1sEdgeLinkRunner:
         wildcard_apps_domain: str | None = None,
         advertise_host: str | None = None,
         edge_local_addr: str | None = None,
+        cell_node_count: int = 0,
         timeout: float = 180.0,
         build_images: bool = True,
     ) -> dict[str, Any]:
         self._require_containerd()
+        cell_nodes = _normalize_cell_node_count(cell_node_count)
         bootstrap = self._resolve_bootstrap(
             from_microk8s=from_microk8s,
             release=release,
@@ -183,6 +189,7 @@ class K1sEdgeLinkRunner:
             and info.site_id == site
             and info.node_id == node
             and info.edge_local_addr == edge_local
+            and info.cell_node_count == cell_nodes
             and info.rathole_server_addrs == rathole_addrs
             and self._all_components_running(info)
         ):
@@ -215,6 +222,23 @@ class K1sEdgeLinkRunner:
                 ),
             )
         agent_endpoint = f"http://{host}:{agent_port}"
+        cell_agent_ports = [
+            choose_port(
+                19109 + idx,
+                start=19109,
+                end=19209,
+                host="0.0.0.0",  # noqa: S104 - external core must reach simulated node agents.
+                reserved=ports,
+            )
+            for idx in range(1, cell_nodes + 1)
+        ]
+        edge_cell_contract = _edge_cell_contract(
+            gateway_node_id=node,
+            site_id=site,
+            advertise_host=host,
+            gateway_agent_port=agent_port,
+            cell_agent_ports=cell_agent_ports,
+        )
         gpu = self._detect_nvidia()
         components = [
             self._start_edge_nats(
@@ -247,7 +271,23 @@ class K1sEdgeLinkRunner:
                 agent_endpoint=agent_endpoint,
                 host_port=agent_port,
                 gpu=gpu,
+                component="node",
+                role_label="gateway",
             ),
+            *[
+                self._start_node(
+                    site_id=site,
+                    node_id=str(item["node_id"]),
+                    bootstrap=bootstrap,
+                    agent_endpoint=str(item["agent_endpoint"]),
+                    host_port=int(item["agent_host_port"]),
+                    gpu=gpu,
+                    component=str(item["component"]),
+                    role_label="cell-node",
+                )
+                for item in edge_cell_contract.get("members") or []
+                if item.get("role") == "cell-node"
+            ],
         ]
         info = K1sEdgeLinkInfo(
             project=self.project,
@@ -275,6 +315,8 @@ class K1sEdgeLinkRunner:
             agent_endpoint=agent_endpoint,
             edge_local_addr=edge_local,
             agent_host_port=agent_port,
+            cell_node_count=cell_nodes,
+            edge_cell_contract=edge_cell_contract,
             gateway_image=self.gateway_image,
             node_image=self.node_image,
             gpu=gpu,
@@ -358,6 +400,8 @@ class K1sEdgeLinkRunner:
             checks.append(self._controller_health_check(info))
             node_check = self._wait_node_check(info, timeout=min(timeout, 60.0))
             checks.append(node_check)
+            if info.edge_cell_contract:
+                checks.append(self._wait_compute_nodes_check(info, timeout=min(timeout, 60.0)))
             gpu_check = self._gpu_advertisement_check(info, node_check.get("node"))
             checks.append(gpu_check)
             if require_gpu_smoke:
@@ -829,11 +873,13 @@ class K1sEdgeLinkRunner:
         agent_endpoint: str,
         host_port: int,
         gpu: dict[str, Any],
+        component: str = "node",
+        role_label: str = "gateway",
     ) -> K1sEdgeLinkComponent:
-        name = self._component_name("node")
+        name = self._component_name(component)
         self._rm_container(name)
-        data = self.edge_dir / "data" / "node"
-        run_dir = self.edge_dir / "run" / "node"
+        data = self.edge_dir / "data" / component
+        run_dir = self.edge_dir / "run" / component
         data.mkdir(parents=True, exist_ok=True)
         run_dir.mkdir(parents=True, exist_ok=True)
         env = self._node_env(
@@ -842,14 +888,15 @@ class K1sEdgeLinkRunner:
             bootstrap=bootstrap,
             agent_endpoint=agent_endpoint,
             gpu=gpu,
+            role_label=role_label,
         )
         command = (
             "cd /workspace && "
             "python -m pip install --no-cache-dir -r /workspace/requirements.txt "
             ">/tmp/k1s-pip-install.log 2>&1 && "
             "exec python -m ae.node --runtime-backend containerd --host 0.0.0.0 "
-            "--port 9109 --controller-url \"$AE_CONTROLLER_URL\" "
-            "--advertise-endpoint \"$AE_AGENT_ENDPOINT\""
+            '--port 9109 --controller-url "$AE_CONTROLLER_URL" '
+            '--advertise-endpoint "$AE_AGENT_ENDPOINT"'
         )
         args = [
             "run",
@@ -872,14 +919,14 @@ class K1sEdgeLinkRunner:
             *self._nvidia_mount_args(gpu),
             *self._external_host_args(bootstrap),
             *self._env_args(env),
-            *self._label_args("node"),
+            *self._label_args(component),
             self.node_image,
             "-ec",
             command,
         ]
         return self._run_component(
             name=name,
-            role="node",
+            role=component,
             image=self.node_image,
             args=args,
             host_port=host_port,
@@ -925,6 +972,7 @@ class K1sEdgeLinkRunner:
         bootstrap: dict[str, Any],
         agent_endpoint: str,
         gpu: dict[str, Any],
+        role_label: str = "gateway",
     ) -> dict[str, str]:
         project_data_root = containerd_data_root(self.state_root, project=self.project)
         project_cni_conf = containerd_cni_conf_dir(self.state_root, project=self.project)
@@ -972,8 +1020,8 @@ class K1sEdgeLinkRunner:
                 "AE_NODE_ID": node_id,
                 "AE_NODE_NAME": node_id,
                 "AE_NODE_LABELS": (
-                    f"role=gateway,profile={EDGE_LINK_PROFILE_NAME},site={site_id},"
-                    f"site_id={site_id},node_id={node_id}"
+                    f"role={role_label},compute_eligible=true,profile={EDGE_LINK_PROFILE_NAME},"
+                    f"site={site_id},site_id={site_id},node_id={node_id}"
                 ),
                 "AE_AGENT_ENDPOINT": agent_endpoint,
                 "AE_NATS_URL": f"nats://worker:dev@{self._component_name('edge-nats')}:4223",
@@ -988,11 +1036,7 @@ class K1sEdgeLinkRunner:
         suggested = bootstrap.get("suggested_edge_env")
         if isinstance(suggested, dict):
             env.update(
-                {
-                    str(key): str(value)
-                    for key, value in suggested.items()
-                    if value is not None
-                }
+                {str(key): str(value) for key, value in suggested.items() if value is not None}
             )
         mapping = {
             "AE_CONTROLLER_URL": bootstrap.get("controller_url"),
@@ -1141,8 +1185,7 @@ class K1sEdgeLinkRunner:
         if not info.components:
             return False
         return all(
-            bool(self._component_status(component).get("running"))
-            for component in info.components
+            bool(self._component_status(component).get("running")) for component in info.components
         )
 
     def _rm_container(self, name: str) -> dict[str, Any]:
@@ -1235,7 +1278,9 @@ class K1sEdgeLinkRunner:
         hosts: set[str] = set()
         controller_url = str(bootstrap.get("controller_url") or "").strip()
         if controller_url:
-            parsed = urlsplit(controller_url if "://" in controller_url else f"http://{controller_url}")
+            parsed = urlsplit(
+                controller_url if "://" in controller_url else f"http://{controller_url}"
+            )
             if parsed.hostname:
                 hosts.add(parsed.hostname)
         for key in ("nats_leaf_addr", "rathole_server_addr", "registry_host"):
@@ -1392,6 +1437,14 @@ class K1sEdgeLinkRunner:
                 fresh_after=info.started_at,
             ),
         ]
+        if info.edge_cell_contract:
+            checks.append(
+                self._wait_compute_nodes_check(
+                    info,
+                    timeout=max(1.0, deadline - time.time()),
+                    fresh_after=info.started_at,
+                )
+            )
         return {"ok": all(bool(check.get("ok")) for check in checks), "checks": checks}
 
     def _wait_controller_health_check(
@@ -1449,20 +1502,57 @@ class K1sEdgeLinkRunner:
         return seen_at is not None and seen_at >= fresh_after
 
     def _node_record(self, info: K1sEdgeLinkInfo) -> dict[str, Any] | None:
+        return self._node_records(info).get(info.node_id)
+
+    def _node_records(self, info: K1sEdgeLinkInfo) -> dict[str, dict[str, Any]]:
         try:
             resp = request(f"{info.controller_url.rstrip('/')}/v1/nodes", timeout=5.0)
             if resp.status != 200:
-                return None
+                return {}
             data = resp.json()
         except Exception:
-            return None
+            return {}
         nodes = data.get("nodes") if isinstance(data, dict) else []
         if not isinstance(nodes, list):
-            return None
+            return {}
+        records: dict[str, dict[str, Any]] = {}
         for node in nodes:
-            if isinstance(node, dict) and str(node.get("node_id") or "") == info.node_id:
-                return node
-        return None
+            if not isinstance(node, dict):
+                continue
+            node_id = str(node.get("node_id") or "")
+            if node_id:
+                records[node_id] = node
+        return records
+
+    def _wait_compute_nodes_check(
+        self,
+        info: K1sEdgeLinkInfo,
+        *,
+        timeout: float,
+        fresh_after: float | None = None,
+    ) -> dict[str, Any]:
+        expected = list((info.edge_cell_contract or {}).get("compute_node_ids") or [])
+        deadline = time.time() + timeout
+        observed: dict[str, dict[str, Any]] = {}
+        while time.time() < deadline:
+            records = self._node_records(info)
+            observed = {
+                node_id: records[node_id]
+                for node_id in expected
+                if node_id in records
+                and self._node_record_is_fresh(records[node_id], fresh_after=fresh_after)
+            }
+            if len(observed) == len(expected):
+                break
+            time.sleep(2.0)
+        missing = [node_id for node_id in expected if node_id not in observed]
+        return {
+            "name": "edge-cell-compute-node-heartbeats",
+            "ok": not missing,
+            "expected_node_ids": expected,
+            "observed_node_ids": sorted(observed),
+            "missing_node_ids": missing,
+        }
 
     def _gpu_advertisement_check(
         self,
@@ -1676,6 +1766,82 @@ def _edge_local_addr(explicit: str | None, bootstrap: dict[str, Any]) -> str:
         if text:
             return text
     return DEFAULT_EDGE_LOCAL_ADDR
+
+
+def _normalize_cell_node_count(value: int) -> int:
+    count = int(value or 0)
+    if count in {0, AI_MAX_EDGE_CELL_NODE_COUNT}:
+        return count
+    raise WorkerBeeError(
+        code="K1S_EDGE_CELL_UNSUPPORTED_SIZE",
+        message="k1s edge-cell simulation supports legacy mode or exactly 3 cell nodes",
+        details={
+            "cell_node_count": count,
+            "supported_cell_node_counts": [0, AI_MAX_EDGE_CELL_NODE_COUNT],
+            "edge_cell_size": 1 + AI_MAX_EDGE_CELL_NODE_COUNT,
+            "profile": AI_MAX_EDGE_CELL_PROFILE,
+        },
+        remediation=(
+            "Omit cell_node_count for legacy one-node edge-link behavior, or pass "
+            "cell_node_count=3/--cell-node-count 3 for the AI Max edge-cell simulation."
+        ),
+    )
+
+
+def _edge_cell_contract(
+    *,
+    gateway_node_id: str,
+    site_id: str,
+    advertise_host: str,
+    gateway_agent_port: int,
+    cell_agent_ports: list[int],
+) -> dict[str, Any]:
+    if not cell_agent_ports:
+        return {}
+    cell_node_ids = [f"{gateway_node_id}-cell-{idx}" for idx in range(1, len(cell_agent_ports) + 1)]
+    members: list[dict[str, Any]] = [
+        {
+            "node_id": gateway_node_id,
+            "role": "gateway",
+            "compute_eligible": True,
+            "component": "node",
+            "agent_host_port": int(gateway_agent_port),
+            "agent_endpoint": f"http://{advertise_host}:{int(gateway_agent_port)}",
+            "labels": {
+                "role": "gateway",
+                "compute_eligible": "true",
+                "site_id": site_id,
+            },
+        }
+    ]
+    for idx, (node_id, port) in enumerate(
+        zip(cell_node_ids, cell_agent_ports, strict=True),
+        start=1,
+    ):
+        members.append(
+            {
+                "node_id": node_id,
+                "role": "cell-node",
+                "compute_eligible": True,
+                "component": f"cell-node-{idx}",
+                "agent_host_port": int(port),
+                "agent_endpoint": f"http://{advertise_host}:{int(port)}",
+                "labels": {
+                    "role": "cell-node",
+                    "compute_eligible": "true",
+                    "site_id": site_id,
+                },
+            }
+        )
+    compute_node_ids = [member["node_id"] for member in members]
+    return {
+        "profile": AI_MAX_EDGE_CELL_PROFILE,
+        "size": len(compute_node_ids),
+        "gateway_node_id": gateway_node_id,
+        "cell_node_ids": cell_node_ids,
+        "compute_node_ids": compute_node_ids,
+        "members": members,
+    }
 
 
 def _dedupe(values: list[str]) -> list[str]:

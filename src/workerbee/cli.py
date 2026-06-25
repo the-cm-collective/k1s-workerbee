@@ -68,6 +68,12 @@ def _add_edge_link_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--site-id", default="workerbee-edge", help="External edge site id")
     parser.add_argument("--node-id", default="workerbee-edge-node", help="External edge node id")
     parser.add_argument(
+        "--cell-node-count",
+        type=int,
+        default=0,
+        help="Opt into AI Max edge-cell simulation with exactly 3 additional cell nodes",
+    )
+    parser.add_argument(
         "--bundle",
         dest="bundle_path",
         type=Path,
@@ -108,6 +114,7 @@ def _edge_link_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "namespace": getattr(args, "namespace", "k1s-dev-a"),
         "site_id": getattr(args, "site_id", "workerbee-edge"),
         "node_id": getattr(args, "node_id", "workerbee-edge-node"),
+        "cell_node_count": int(getattr(args, "cell_node_count", 0) or 0),
         "bundle_path": getattr(args, "bundle_path", None),
         "controller_url": getattr(args, "controller_url", None),
         "agent_token": getattr(args, "agent_token", None),
