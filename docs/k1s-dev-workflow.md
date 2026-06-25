@@ -216,6 +216,11 @@ The resulting WorkerBee state exposes an `edge_cell_contract` block with:
 - `assurance_enforcement.policy: exclude-quarantined-from-placement`
 - `assurance_enforcement.tampered_quarantine_fixture` with deterministic
   `boot-measurement-mismatch` quarantine metadata and reduced usable fabric size
+- `autonomy_state.current_state: connected`
+- `autonomy_state.cache.ready: true`
+- `autonomy_state.supported_transitions` for core-link loss, degraded local
+  service continuity, restore, and reconcile completion/failure
+- `autonomy_state.sample_transition_trace` ending at `reconciled`
 - `boot_assurance.secure_image_validation: enabled`
 - `boot_assurance.boot_validation: measured-verified`
 - `boot_assurance.validation_failure_action: disable-quarantine`
@@ -244,6 +249,12 @@ schedulable. The deterministic tampered fixture shows how a failed cell-node
 would be marked quarantined, excluded from usable fabric capacity, and assigned
 alert/failure metadata. WorkerBee does not apply real kubelet/node admission,
 network quarantine, TPM-backed enforcement, or alert transport in this path.
+
+The `autonomy_state` block is the Stage 11 local state-machine simulation. It
+starts connected with a ready gateway cache, shows the supported transition
+table, and includes a sample trace through core-link loss, degraded local-only
+service continuity, restore, reconcile, and final `reconciled` state. WorkerBee
+does not run the actual outage/probe drill in this path; that remains Stage 12.
 
 The simulation starts one gateway component, one gateway node-agent component,
 and three additional node-agent components. The legacy `node_id` and

@@ -2007,6 +2007,7 @@ def _edge_cell_contract(
         "installer": installer,
         "boot_assurance": boot_assurance,
         "assurance_enforcement": _ai_max_assurance_enforcement_view(members, installer),
+        "autonomy_state": _ai_max_autonomy_state_machine(),
         "cells": cells,
         "members": members,
     }
@@ -2267,6 +2268,68 @@ def _ai_max_assurance_member(
         "quarantined": bool(quarantined),
         "failure_reasons": list(failure_reasons),
         "alert": alert,
+    }
+
+
+def _ai_max_autonomy_state_machine() -> dict[str, Any]:
+    supported_events = [
+        "core-link-lost",
+        "local-services-retained",
+        "core-link-restored",
+        "reconcile-completed",
+        "reconcile-failed",
+    ]
+    supported_transitions = [
+        {
+            "from": "connected",
+            "event": "core-link-lost",
+            "to": "core-link-unavailable",
+        },
+        {
+            "from": "core-link-unavailable",
+            "event": "local-services-retained",
+            "to": "degraded-local-only",
+        },
+        {
+            "from": "degraded-local-only",
+            "event": "core-link-restored",
+            "to": "reconciling",
+        },
+        {
+            "from": "reconciling",
+            "event": "reconcile-completed",
+            "to": "reconciled",
+        },
+        {
+            "from": "reconciling",
+            "event": "reconcile-failed",
+            "to": "degraded-local-only",
+        },
+    ]
+    sample_trace = [
+        supported_transitions[0],
+        supported_transitions[1],
+        supported_transitions[2],
+        supported_transitions[3],
+    ]
+    return {
+        "mode": "local-simulated",
+        "current_state": "connected",
+        "local_service_continuity": True,
+        "cache": {
+            "ready": True,
+            "approved_workload_ref": "inferencecell/default/ai-max-edge-cell",
+            "model_artifact_ref": "models/llama:stage11-local",
+            "service_endpoints": {
+                "gateway-api": "http://gateway.local:18080",
+                "cell-monitor": "http://gateway.local:19090",
+            },
+            "last_core_sync": "core-sync-stage11",
+        },
+        "supported_events": supported_events,
+        "supported_transitions": supported_transitions,
+        "sample_transition_trace": sample_trace,
+        "sample_final_state": "reconciled",
     }
 
 

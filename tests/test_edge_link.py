@@ -287,6 +287,78 @@ def _assert_ai_max_installer_assurance(contract: dict[str, Any]) -> None:
             "members": tampered_members,
         },
     }
+    assert contract["autonomy_state"] == {
+        "mode": "local-simulated",
+        "current_state": "connected",
+        "local_service_continuity": True,
+        "cache": {
+            "ready": True,
+            "approved_workload_ref": "inferencecell/default/ai-max-edge-cell",
+            "model_artifact_ref": "models/llama:stage11-local",
+            "service_endpoints": {
+                "gateway-api": "http://gateway.local:18080",
+                "cell-monitor": "http://gateway.local:19090",
+            },
+            "last_core_sync": "core-sync-stage11",
+        },
+        "supported_events": [
+            "core-link-lost",
+            "local-services-retained",
+            "core-link-restored",
+            "reconcile-completed",
+            "reconcile-failed",
+        ],
+        "supported_transitions": [
+            {
+                "from": "connected",
+                "event": "core-link-lost",
+                "to": "core-link-unavailable",
+            },
+            {
+                "from": "core-link-unavailable",
+                "event": "local-services-retained",
+                "to": "degraded-local-only",
+            },
+            {
+                "from": "degraded-local-only",
+                "event": "core-link-restored",
+                "to": "reconciling",
+            },
+            {
+                "from": "reconciling",
+                "event": "reconcile-completed",
+                "to": "reconciled",
+            },
+            {
+                "from": "reconciling",
+                "event": "reconcile-failed",
+                "to": "degraded-local-only",
+            },
+        ],
+        "sample_transition_trace": [
+            {
+                "from": "connected",
+                "event": "core-link-lost",
+                "to": "core-link-unavailable",
+            },
+            {
+                "from": "core-link-unavailable",
+                "event": "local-services-retained",
+                "to": "degraded-local-only",
+            },
+            {
+                "from": "degraded-local-only",
+                "event": "core-link-restored",
+                "to": "reconciling",
+            },
+            {
+                "from": "reconciling",
+                "event": "reconcile-completed",
+                "to": "reconciled",
+            },
+        ],
+        "sample_final_state": "reconciled",
+    }
 
 
 def test_edge_link_runner_rejects_non_containerd_runtime(tmp_path: Path, monkeypatch) -> None:
