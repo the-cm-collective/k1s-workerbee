@@ -1986,6 +1986,7 @@ def _edge_cell_contract(
     compute_node_ids = [member["node_id"] for member in members]
     gateway_peer_ids = [cell["gateway_node_id"] for cell in cells[1:]]
     boot_assurance = _ai_max_boot_assurance_contract()
+    installer = _ai_max_installer_contract(boot_assurance)
     return {
         "profile": AI_MAX_EDGE_CELL_PROFILE,
         "size": AI_MAX_EDGE_CELL_SIZE,
@@ -2003,8 +2004,9 @@ def _edge_cell_contract(
             "lan_scope": lan_scope,
             "gateway_peer_ids": gateway_peer_ids,
         },
-        "installer": _ai_max_installer_contract(boot_assurance),
+        "installer": installer,
         "boot_assurance": boot_assurance,
+        "assurance_enforcement": _ai_max_assurance_enforcement_view(members, installer),
         "cells": cells,
         "members": members,
     }
@@ -2186,6 +2188,85 @@ def _ai_max_boot_evidence_record(
             "trust_root": AI_MAX_INSTALLER_SIGNER,
             "failure_reasons": list(failure_reasons),
         },
+    }
+
+
+def _ai_max_assurance_enforcement_view(
+    members: list[dict[str, Any]], installer: dict[str, Any]
+) -> dict[str, Any]:
+    healthy_members = [
+        _ai_max_assurance_member(
+            member,
+            status="verified",
+            schedulable=True,
+            quarantined=False,
+            failure_reasons=[],
+            alert="none",
+        )
+        for member in members
+    ]
+    quarantined_node_id = next(
+        (str(member["node_id"]) for member in members if member.get("role") == "cell-node"),
+        "cell-node-1",
+    )
+    tampered_members = [
+        _ai_max_assurance_member(
+            member,
+            status="tampered" if member.get("node_id") == quarantined_node_id else "verified",
+            schedulable=member.get("node_id") != quarantined_node_id,
+            quarantined=member.get("node_id") == quarantined_node_id,
+            failure_reasons=(
+                ["boot-measurement-mismatch"]
+                if member.get("node_id") == quarantined_node_id
+                else []
+            ),
+            alert="pending" if member.get("node_id") == quarantined_node_id else "none",
+        )
+        for member in members
+    ]
+    return {
+        "mode": "local-simulated",
+        "policy": "exclude-quarantined-from-placement",
+        "status": "healthy",
+        "usable_fabric_size": len(healthy_members),
+        "quarantined_count": 0,
+        "members": healthy_members,
+        "boot_evidence_status": [
+            {
+                "node_id": evidence["node_id"],
+                "role": evidence["role"],
+                "status": evidence["verification"]["status"],
+                "failure_reasons": list(evidence["verification"]["failure_reasons"]),
+            }
+            for evidence in list(installer.get("boot_evidence") or [])
+        ],
+        "tampered_quarantine_fixture": {
+            "status": "quarantined",
+            "quarantined_node_id": quarantined_node_id,
+            "usable_fabric_size": len([item for item in tampered_members if item["schedulable"]]),
+            "quarantined_count": len([item for item in tampered_members if item["quarantined"]]),
+            "members": tampered_members,
+        },
+    }
+
+
+def _ai_max_assurance_member(
+    member: dict[str, Any],
+    *,
+    status: str,
+    schedulable: bool,
+    quarantined: bool,
+    failure_reasons: list[str],
+    alert: str,
+) -> dict[str, Any]:
+    return {
+        "node_id": str(member["node_id"]),
+        "role": str(member["role"]),
+        "status": status,
+        "schedulable": bool(schedulable),
+        "quarantined": bool(quarantined),
+        "failure_reasons": list(failure_reasons),
+        "alert": alert,
     }
 
 

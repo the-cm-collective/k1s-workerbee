@@ -229,6 +229,64 @@ def _assert_ai_max_installer_assurance(contract: dict[str, Any]) -> None:
             },
         ],
     }
+    healthy_members = [
+        {
+            "node_id": item["node_id"],
+            "role": item["role"],
+            "status": "verified",
+            "schedulable": True,
+            "quarantined": False,
+            "failure_reasons": [],
+            "alert": "none",
+        }
+        for item in contract["members"]
+    ]
+    quarantined_node_id = next(
+        item["node_id"] for item in contract["members"] if item["role"] == "cell-node"
+    )
+    tampered_members = [
+        {
+            "node_id": item["node_id"],
+            "role": item["role"],
+            "status": "tampered" if item["node_id"] == quarantined_node_id else "verified",
+            "schedulable": item["node_id"] != quarantined_node_id,
+            "quarantined": item["node_id"] == quarantined_node_id,
+            "failure_reasons": (
+                ["boot-measurement-mismatch"] if item["node_id"] == quarantined_node_id else []
+            ),
+            "alert": "pending" if item["node_id"] == quarantined_node_id else "none",
+        }
+        for item in contract["members"]
+    ]
+    assert contract["assurance_enforcement"] == {
+        "mode": "local-simulated",
+        "policy": "exclude-quarantined-from-placement",
+        "status": "healthy",
+        "usable_fabric_size": len(contract["members"]),
+        "quarantined_count": 0,
+        "members": healthy_members,
+        "boot_evidence_status": [
+            {
+                "node_id": "gateway-1",
+                "role": "gateway",
+                "status": "verified",
+                "failure_reasons": [],
+            },
+            {
+                "node_id": "cell-node-1",
+                "role": "cell-node",
+                "status": "verified",
+                "failure_reasons": [],
+            },
+        ],
+        "tampered_quarantine_fixture": {
+            "status": "quarantined",
+            "quarantined_node_id": quarantined_node_id,
+            "usable_fabric_size": len(contract["members"]) - 1,
+            "quarantined_count": 1,
+            "members": tampered_members,
+        },
+    }
 
 
 def test_edge_link_runner_rejects_non_containerd_runtime(tmp_path: Path, monkeypatch) -> None:

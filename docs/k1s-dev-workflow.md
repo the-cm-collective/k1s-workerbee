@@ -212,6 +212,10 @@ The resulting WorkerBee state exposes an `edge_cell_contract` block with:
   `cell-node` simulated verifier records
 - `installer.tampered_boot_evidence_fixture` with a rejected artifact/nonce
   mismatch fixture for local test coverage
+- `assurance_enforcement.status: healthy`
+- `assurance_enforcement.policy: exclude-quarantined-from-placement`
+- `assurance_enforcement.tampered_quarantine_fixture` with deterministic
+  `boot-measurement-mismatch` quarantine metadata and reduced usable fabric size
 - `boot_assurance.secure_image_validation: enabled`
 - `boot_assurance.boot_validation: measured-verified`
 - `boot_assurance.validation_failure_action: disable-quarantine`
@@ -233,6 +237,13 @@ build or sign a real NixOS ISO, realize the NixOS installed-system images,
 manage production key custody, enforce TPM/Secure Boot, verify real TPM quotes,
 parse Secure Boot event logs, verify hardware attestation, apply USB policy, or
 harden alert transport in this path.
+
+The `assurance_enforcement` block is the Stage 10 local scheduling/quarantine
+simulation. The normal view is healthy and keeps all simulated members
+schedulable. The deterministic tampered fixture shows how a failed cell-node
+would be marked quarantined, excluded from usable fabric capacity, and assigned
+alert/failure metadata. WorkerBee does not apply real kubelet/node admission,
+network quarantine, TPM-backed enforcement, or alert transport in this path.
 
 The simulation starts one gateway component, one gateway node-agent component,
 and three additional node-agent components. The legacy `node_id` and
