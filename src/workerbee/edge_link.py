@@ -1988,6 +1988,8 @@ def _edge_cell_contract(
     boot_assurance = _ai_max_boot_assurance_contract()
     installer = _ai_max_installer_contract(boot_assurance)
     autonomy_state = _ai_max_autonomy_state_machine()
+    disconnected_drill_report = _ai_max_disconnected_drill_report(autonomy_state)
+    ha_lab_deployment_plan = _ai_max_ha_lab_deployment_plan(fabric_cell_count, lan_scope)
     return {
         "profile": AI_MAX_EDGE_CELL_PROFILE,
         "size": AI_MAX_EDGE_CELL_SIZE,
@@ -2009,8 +2011,12 @@ def _edge_cell_contract(
         "boot_assurance": boot_assurance,
         "assurance_enforcement": _ai_max_assurance_enforcement_view(members, installer),
         "autonomy_state": autonomy_state,
-        "disconnected_drill_report": _ai_max_disconnected_drill_report(autonomy_state),
-        "ha_lab_deployment_plan": _ai_max_ha_lab_deployment_plan(fabric_cell_count, lan_scope),
+        "disconnected_drill_report": disconnected_drill_report,
+        "ha_lab_deployment_plan": ha_lab_deployment_plan,
+        "ha_recovery_drill_report": _ai_max_ha_recovery_drill_report(
+            disconnected_drill_report,
+            ha_lab_deployment_plan,
+        ),
         "cells": cells,
         "members": members,
     }
@@ -2491,6 +2497,70 @@ def _ai_max_ha_lab_deployment_plan(fabric_cell_count: int, lan_scope: str) -> di
             "mutates_microk8s": False,
             "starts_workerbee_project": False,
             "requires_operator_confirmation_for_live_run": True,
+        },
+    }
+
+
+def _ai_max_ha_recovery_drill_report(
+    disconnected_drill_report: dict[str, Any],
+    ha_lab_deployment_plan: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "drill_id": "ai-max-ha-recovery-drill-stage14",
+        "name": "AI Max HA failure/recovery local simulation",
+        "version": "stage14-local-v1",
+        "mode": "simulation-only",
+        "target": dict(ha_lab_deployment_plan["target"]),
+        "planned_failure": {
+            "mode": "simulated-core-controller-interruption",
+            "scope": "api-health-window",
+            "outage_duration_budget": "PT5M",
+            "live_failure_injection": False,
+        },
+        "continuity_evidence": {
+            "local_service_available": disconnected_drill_report["local_service_available"],
+            "local_probe": dict(disconnected_drill_report["local_probe"]),
+            "source_report_id": disconnected_drill_report["drill_id"],
+        },
+        "restore_event": "simulated-core-controller-restored",
+        "reconciliation": {
+            "status": "reconciled",
+            "result": dict(disconnected_drill_report["reconciliation"]),
+            "final_state": disconnected_drill_report["final_state"],
+            "evidence_marker": "stage14-ha-recovery-marker",
+        },
+        "linked_reports": {
+            "disconnected_drill_report": {
+                "ref": "edge_cell_contract.disconnected_drill_report",
+                "drill_id": disconnected_drill_report["drill_id"],
+                "version": disconnected_drill_report["version"],
+            },
+            "ha_lab_deployment_plan": {
+                "ref": "edge_cell_contract.ha_lab_deployment_plan",
+                "plan_id": ha_lab_deployment_plan["plan_id"],
+                "version": ha_lab_deployment_plan["version"],
+            },
+        },
+        "safety": {
+            "dry_run": True,
+            "live_core_mutation": False,
+            "live_network_disruption": False,
+            "mutates_microk8s": False,
+            "requires_operator_confirmation_for_live_run": True,
+        },
+        "operator_next_actions": [
+            "review ha_lab_deployment_plan commands",
+            "confirm maintenance window and rollback path",
+            "execute live failure injection outside dry-run tests",
+            "run edge-link status and validate",
+            "run cleanup stop if a live drill was started",
+        ],
+        "assertions": {
+            "target_matches_ha_lab_plan": True,
+            "linked_to_disconnected_drill": True,
+            "local_service_continuity": bool(disconnected_drill_report["local_service_available"]),
+            "reconciled": disconnected_drill_report["final_state"] == "reconciled",
+            "no_live_mutation": True,
         },
     }
 

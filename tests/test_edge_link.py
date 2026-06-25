@@ -478,6 +478,68 @@ def _assert_ai_max_installer_assurance(contract: dict[str, Any]) -> None:
             "requires_operator_confirmation_for_live_run": True,
         },
     }
+    assert contract["ha_recovery_drill_report"] == {
+        "drill_id": "ai-max-ha-recovery-drill-stage14",
+        "name": "AI Max HA failure/recovery local simulation",
+        "version": "stage14-local-v1",
+        "mode": "simulation-only",
+        "target": {
+            "release": "k1s-dev-a",
+            "namespace": "k1s-dev-a",
+            "runtime": "microk8s",
+        },
+        "planned_failure": {
+            "mode": "simulated-core-controller-interruption",
+            "scope": "api-health-window",
+            "outage_duration_budget": "PT5M",
+            "live_failure_injection": False,
+        },
+        "continuity_evidence": {
+            "local_service_available": True,
+            "local_probe": contract["disconnected_drill_report"]["local_probe"],
+            "source_report_id": "ai-max-disconnected-local-drill-stage12",
+        },
+        "restore_event": "simulated-core-controller-restored",
+        "reconciliation": {
+            "status": "reconciled",
+            "result": contract["disconnected_drill_report"]["reconciliation"],
+            "final_state": "reconciled",
+            "evidence_marker": "stage14-ha-recovery-marker",
+        },
+        "linked_reports": {
+            "disconnected_drill_report": {
+                "ref": "edge_cell_contract.disconnected_drill_report",
+                "drill_id": "ai-max-disconnected-local-drill-stage12",
+                "version": "stage12-local-v1",
+            },
+            "ha_lab_deployment_plan": {
+                "ref": "edge_cell_contract.ha_lab_deployment_plan",
+                "plan_id": "ai-max-ha-lab-k1s-dev-a-stage13",
+                "version": "stage13-local-v1",
+            },
+        },
+        "safety": {
+            "dry_run": True,
+            "live_core_mutation": False,
+            "live_network_disruption": False,
+            "mutates_microk8s": False,
+            "requires_operator_confirmation_for_live_run": True,
+        },
+        "operator_next_actions": [
+            "review ha_lab_deployment_plan commands",
+            "confirm maintenance window and rollback path",
+            "execute live failure injection outside dry-run tests",
+            "run edge-link status and validate",
+            "run cleanup stop if a live drill was started",
+        ],
+        "assertions": {
+            "target_matches_ha_lab_plan": True,
+            "linked_to_disconnected_drill": True,
+            "local_service_continuity": True,
+            "reconciled": True,
+            "no_live_mutation": True,
+        },
+    }
 
 
 def test_edge_link_runner_rejects_non_containerd_runtime(tmp_path: Path, monkeypatch) -> None:

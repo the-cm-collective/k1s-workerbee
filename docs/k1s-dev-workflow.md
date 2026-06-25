@@ -232,6 +232,12 @@ The resulting WorkerBee state exposes an `edge_cell_contract` block with:
 - `ha_lab_deployment_plan.profile.cell_node_count: 3`
 - `ha_lab_deployment_plan.safety.dry_run: true`
 - `ha_lab_deployment_plan.safety.mutates_microk8s: false`
+- `ha_recovery_drill_report.version: stage14-local-v1`
+- `ha_recovery_drill_report.planned_failure.mode:
+  simulated-core-controller-interruption`
+- `ha_recovery_drill_report.continuity_evidence.local_service_available: true`
+- `ha_recovery_drill_report.reconciliation.final_state: reconciled`
+- `ha_recovery_drill_report.safety.mutates_microk8s: false`
 - `boot_assurance.secure_image_validation: enabled`
 - `boot_assurance.boot_validation: measured-verified`
 - `boot_assurance.validation_failure_action: disable-quarantine`
@@ -282,6 +288,16 @@ preflight checks, validation steps, and command snippets an operator can later
 run. This block is not a deploy action. It does not start WorkerBee, mutate
 MicroK8s, create namespaces, disrupt controllers, or run the disconnected drill;
 live use requires a separate operator action and confirmation.
+
+The `ha_recovery_drill_report` block is the Stage 14 HA failure/recovery drill
+simulation for the same `k1s-dev-a` lab target. It links to the Stage 12
+`disconnected_drill_report` and Stage 13 `ha_lab_deployment_plan`, records a
+simulated core/controller interruption window, local service continuity evidence,
+restore, reconciliation, deterministic operator next actions, and dry-run safety
+flags. It does not inject live failures, stop controllers, mutate MicroK8s, or
+run runtime probes against a live lab. Future live HA drills must be explicit
+operator actions with their own failure injection, probe capture, recovery
+verification, and cleanup.
 
 The simulation starts one gateway component, one gateway node-agent component,
 and three additional node-agent components. The legacy `node_id` and
