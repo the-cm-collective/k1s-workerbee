@@ -55,6 +55,9 @@ AI_MAX_EDGE_CELL_NODE_COUNT = 3
 AI_MAX_EDGE_CELL_SIZE = 4
 SUPPORTED_AI_MAX_FABRIC_CELL_COUNTS = {1, 2, 4, 8}
 DEFAULT_EDGE_LAN_SCOPE = "workerbee-lan"
+AI_MAX_INSTALLER_PROFILE = "nixos-ai-max-edge-cell-installer-v1"
+AI_MAX_INSTALLER_IMAGE = "nixos-ai-max-edge-cell-installer"
+AI_MAX_INSTALLER_SIGNER = "k1s-core-root-of-trust"
 
 
 @dataclass(slots=True)
@@ -1955,6 +1958,7 @@ def _edge_cell_contract(
 
     compute_node_ids = [member["node_id"] for member in members]
     gateway_peer_ids = [cell["gateway_node_id"] for cell in cells[1:]]
+    boot_assurance = _ai_max_boot_assurance_contract()
     return {
         "profile": AI_MAX_EDGE_CELL_PROFILE,
         "size": AI_MAX_EDGE_CELL_SIZE,
@@ -1972,8 +1976,53 @@ def _edge_cell_contract(
             "lan_scope": lan_scope,
             "gateway_peer_ids": gateway_peer_ids,
         },
+        "installer": _ai_max_installer_contract(boot_assurance),
+        "boot_assurance": boot_assurance,
         "cells": cells,
         "members": members,
+    }
+
+
+def _ai_max_boot_assurance_contract() -> dict[str, Any]:
+    return {
+        "secure_image_validation": "enabled",
+        "boot_validation": "measured-verified",
+        "tamper_detection": "enabled",
+        "validation_failure_action": "disable-quarantine",
+        "core_alerting": "when-connected",
+    }
+
+
+def _ai_max_installer_contract(boot_assurance: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "profile": AI_MAX_INSTALLER_PROFILE,
+        "image": AI_MAX_INSTALLER_IMAGE,
+        "signed_by": AI_MAX_INSTALLER_SIGNER,
+        "signer": {
+            "authority": AI_MAX_INSTALLER_SIGNER,
+            "source": "k1s-core-controller",
+        },
+        "assurance": dict(boot_assurance),
+        "install_paths": [
+            {
+                "path": "gateway",
+                "post_install": {
+                    "auto_boot": "enabled",
+                    "connect_target": "core",
+                    "usb_device_policy": "signed-only",
+                    "display_mode": "telemetry",
+                },
+            },
+            {
+                "path": "cell-node",
+                "post_install": {
+                    "auto_boot": "enabled",
+                    "connect_target": "gateway",
+                    "usb_device_policy": "limited",
+                    "display_mode": "connect-monitor-to-gateway",
+                },
+            },
+        ],
     }
 
 

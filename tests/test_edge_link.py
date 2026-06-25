@@ -39,6 +39,47 @@ def _bundle() -> dict[str, Any]:
     }
 
 
+def _assert_ai_max_installer_assurance(contract: dict[str, Any]) -> None:
+    boot_assurance = {
+        "secure_image_validation": "enabled",
+        "boot_validation": "measured-verified",
+        "tamper_detection": "enabled",
+        "validation_failure_action": "disable-quarantine",
+        "core_alerting": "when-connected",
+    }
+    assert contract["boot_assurance"] == boot_assurance
+    assert contract["installer"] == {
+        "profile": "nixos-ai-max-edge-cell-installer-v1",
+        "image": "nixos-ai-max-edge-cell-installer",
+        "signed_by": "k1s-core-root-of-trust",
+        "signer": {
+            "authority": "k1s-core-root-of-trust",
+            "source": "k1s-core-controller",
+        },
+        "assurance": boot_assurance,
+        "install_paths": [
+            {
+                "path": "gateway",
+                "post_install": {
+                    "auto_boot": "enabled",
+                    "connect_target": "core",
+                    "usb_device_policy": "signed-only",
+                    "display_mode": "telemetry",
+                },
+            },
+            {
+                "path": "cell-node",
+                "post_install": {
+                    "auto_boot": "enabled",
+                    "connect_target": "gateway",
+                    "usb_device_policy": "limited",
+                    "display_mode": "connect-monitor-to-gateway",
+                },
+            },
+        ],
+    }
+
+
 def test_edge_link_runner_rejects_non_containerd_runtime(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("workerbee.edge_link.resolve_runtime", lambda _runtime: "docker")
     runner = K1sEdgeLinkRunner(project="demo", state_root=tmp_path, runtime="docker")
@@ -270,6 +311,7 @@ def test_edge_link_start_can_simulate_ai_max_edge_cell(
         "lan_scope": "workerbee-lan",
         "gateway_peer_ids": [],
     }
+    _assert_ai_max_installer_assurance(contract)
     assert contract["cells"] == [
         {
             "cell_index": 1,
@@ -396,6 +438,7 @@ def test_edge_link_start_can_simulate_ai_max_multi_cell_fabric(
         "lan_scope": "floor-a",
         "gateway_peer_ids": ["edge-node-1-gateway-2"],
     }
+    _assert_ai_max_installer_assurance(contract)
     assert contract["cell_node_ids"] == [
         "edge-node-1-cell-1",
         "edge-node-1-cell-2",
