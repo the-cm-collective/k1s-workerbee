@@ -76,6 +76,15 @@ AI_MAX_INSTALLER_GATEWAY_MODULE_REF = "nixos/modules/ai-max/installer/gateway.ni
 AI_MAX_INSTALLER_GATEWAY_CONFIG_REF = "nixos/configs/ai-max/gateway-installed-system.nix"
 AI_MAX_INSTALLER_CELL_NODE_MODULE_REF = "nixos/modules/ai-max/installer/cell-node.nix"
 AI_MAX_INSTALLER_CELL_NODE_CONFIG_REF = "nixos/configs/ai-max/cell-node-installed-system.nix"
+AI_MAX_GATEWAY_BOOT_MEASUREMENT_DIGEST = (
+    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+)
+AI_MAX_CELL_NODE_BOOT_MEASUREMENT_DIGEST = (
+    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+AI_MAX_GATEWAY_BOOT_NONCE = "k1s-stage9-nonce-gateway"
+AI_MAX_CELL_NODE_BOOT_NONCE = "k1s-stage9-nonce-cell-node"
+AI_MAX_BOOT_EVIDENCE_CREATED_AT = "2026-06-25T00:00:00Z"
 
 
 @dataclass(slots=True)
@@ -2015,6 +2024,7 @@ def _ai_max_installer_contract(boot_assurance: dict[str, Any]) -> dict[str, Any]
     artifact = _ai_max_installer_artifact_manifest()
     signature = _ai_max_installer_signature_envelope(artifact)
     role_scaffolds = _ai_max_installer_role_scaffolds(artifact)
+    boot_evidence = _ai_max_boot_evidence_records(artifact)
     return {
         "profile": AI_MAX_INSTALLER_PROFILE,
         "image": AI_MAX_INSTALLER_IMAGE,
@@ -2026,6 +2036,8 @@ def _ai_max_installer_contract(boot_assurance: dict[str, Any]) -> dict[str, Any]
         "artifact": artifact,
         "signature": signature,
         "role_scaffolds": role_scaffolds,
+        "boot_evidence": boot_evidence,
+        "tampered_boot_evidence_fixture": _ai_max_tampered_boot_evidence_fixture(artifact),
         "verification": _ai_max_installer_verification_status(artifact, signature, role_scaffolds),
         "assurance": dict(boot_assurance),
         "install_paths": [
@@ -2106,6 +2118,77 @@ def _ai_max_installer_role_scaffolds(artifact: dict[str, Any]) -> list[dict[str,
     ]
 
 
+def _ai_max_boot_evidence_records(artifact: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        _ai_max_boot_evidence_record(
+            node_id="gateway-1",
+            role="gateway",
+            artifact=artifact,
+            boot_measurement_digest=AI_MAX_GATEWAY_BOOT_MEASUREMENT_DIGEST,
+            nonce=AI_MAX_GATEWAY_BOOT_NONCE,
+            status="verified",
+            failure_reasons=[],
+        ),
+        _ai_max_boot_evidence_record(
+            node_id="cell-node-1",
+            role="cell-node",
+            artifact=artifact,
+            boot_measurement_digest=AI_MAX_CELL_NODE_BOOT_MEASUREMENT_DIGEST,
+            nonce=AI_MAX_CELL_NODE_BOOT_NONCE,
+            status="verified",
+            failure_reasons=[],
+        ),
+    ]
+
+
+def _ai_max_tampered_boot_evidence_fixture(artifact: dict[str, Any]) -> dict[str, Any]:
+    return _ai_max_boot_evidence_record(
+        node_id="gateway-1",
+        role="gateway",
+        artifact={
+            **artifact,
+            "artifact_digest": (
+                "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+            ),
+        },
+        boot_measurement_digest=AI_MAX_GATEWAY_BOOT_MEASUREMENT_DIGEST,
+        nonce="stale-nonce",
+        status="rejected",
+        failure_reasons=["artifact-digest-mismatch", "stale-nonce"],
+    )
+
+
+def _ai_max_boot_evidence_record(
+    *,
+    node_id: str,
+    role: str,
+    artifact: dict[str, Any],
+    boot_measurement_digest: str,
+    nonce: str,
+    status: str,
+    failure_reasons: list[str],
+) -> dict[str, Any]:
+    return {
+        "node_id": node_id,
+        "role": role,
+        "installer_profile": AI_MAX_INSTALLER_PROFILE,
+        "installer_image": AI_MAX_INSTALLER_IMAGE,
+        "artifact_digest": artifact["artifact_digest"],
+        "manifest_digest": artifact["manifest_digest"],
+        "boot_measurement_digest": boot_measurement_digest,
+        "signing_key_id": AI_MAX_INSTALLER_SIGNER,
+        "verifier_trust_root": AI_MAX_INSTALLER_SIGNER,
+        "nonce": nonce,
+        "created_at": AI_MAX_BOOT_EVIDENCE_CREATED_AT,
+        "verification": {
+            "status": status,
+            "verifier": "k1s-local-boot-evidence-verifier-v1",
+            "trust_root": AI_MAX_INSTALLER_SIGNER,
+            "failure_reasons": list(failure_reasons),
+        },
+    }
+
+
 def _ai_max_installer_verification_status(
     artifact: dict[str, Any],
     signature: dict[str, Any],
@@ -2122,6 +2205,8 @@ def _ai_max_installer_verification_status(
         "path_coverage": list(artifact["path_coverage"]),
         "role_scaffold_ready": True,
         "role_coverage": [str(item["role"]) for item in role_scaffolds],
+        "boot_evidence_ready": True,
+        "boot_evidence_roles": ["gateway", "cell-node"],
     }
 
 

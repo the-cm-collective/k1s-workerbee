@@ -114,6 +114,83 @@ def _assert_ai_max_installer_assurance(contract: dict[str, Any]) -> None:
                 },
             },
         ],
+        "boot_evidence": [
+            {
+                "node_id": "gateway-1",
+                "role": "gateway",
+                "installer_profile": "nixos-ai-max-edge-cell-installer-v1",
+                "installer_image": "nixos-ai-max-edge-cell-installer",
+                "artifact_digest": (
+                    "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                ),
+                "manifest_digest": (
+                    "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                ),
+                "boot_measurement_digest": (
+                    "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                ),
+                "signing_key_id": "k1s-core-root-of-trust",
+                "verifier_trust_root": "k1s-core-root-of-trust",
+                "nonce": "k1s-stage9-nonce-gateway",
+                "created_at": "2026-06-25T00:00:00Z",
+                "verification": {
+                    "status": "verified",
+                    "verifier": "k1s-local-boot-evidence-verifier-v1",
+                    "trust_root": "k1s-core-root-of-trust",
+                    "failure_reasons": [],
+                },
+            },
+            {
+                "node_id": "cell-node-1",
+                "role": "cell-node",
+                "installer_profile": "nixos-ai-max-edge-cell-installer-v1",
+                "installer_image": "nixos-ai-max-edge-cell-installer",
+                "artifact_digest": (
+                    "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+                ),
+                "manifest_digest": (
+                    "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                ),
+                "boot_measurement_digest": (
+                    "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                ),
+                "signing_key_id": "k1s-core-root-of-trust",
+                "verifier_trust_root": "k1s-core-root-of-trust",
+                "nonce": "k1s-stage9-nonce-cell-node",
+                "created_at": "2026-06-25T00:00:00Z",
+                "verification": {
+                    "status": "verified",
+                    "verifier": "k1s-local-boot-evidence-verifier-v1",
+                    "trust_root": "k1s-core-root-of-trust",
+                    "failure_reasons": [],
+                },
+            },
+        ],
+        "tampered_boot_evidence_fixture": {
+            "node_id": "gateway-1",
+            "role": "gateway",
+            "installer_profile": "nixos-ai-max-edge-cell-installer-v1",
+            "installer_image": "nixos-ai-max-edge-cell-installer",
+            "artifact_digest": (
+                "sha256:6666666666666666666666666666666666666666666666666666666666666666"
+            ),
+            "manifest_digest": (
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+            ),
+            "boot_measurement_digest": (
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            ),
+            "signing_key_id": "k1s-core-root-of-trust",
+            "verifier_trust_root": "k1s-core-root-of-trust",
+            "nonce": "stale-nonce",
+            "created_at": "2026-06-25T00:00:00Z",
+            "verification": {
+                "status": "rejected",
+                "verifier": "k1s-local-boot-evidence-verifier-v1",
+                "trust_root": "k1s-core-root-of-trust",
+                "failure_reasons": ["artifact-digest-mismatch", "stale-nonce"],
+            },
+        },
         "verification": {
             "status": "verified",
             "checked_by": "workerbee-local-simulator",
@@ -127,6 +204,8 @@ def _assert_ai_max_installer_assurance(contract: dict[str, Any]) -> None:
             "path_coverage": ["gateway", "cell-node"],
             "role_scaffold_ready": True,
             "role_coverage": ["gateway", "cell-node"],
+            "boot_evidence_ready": True,
+            "boot_evidence_roles": ["gateway", "cell-node"],
         },
         "assurance": boot_assurance,
         "install_paths": [
