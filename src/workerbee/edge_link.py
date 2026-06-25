@@ -1990,7 +1990,7 @@ def _edge_cell_contract(
     autonomy_state = _ai_max_autonomy_state_machine()
     disconnected_drill_report = _ai_max_disconnected_drill_report(autonomy_state)
     ha_lab_deployment_plan = _ai_max_ha_lab_deployment_plan(fabric_cell_count, lan_scope)
-    return {
+    contract = {
         "profile": AI_MAX_EDGE_CELL_PROFILE,
         "size": AI_MAX_EDGE_CELL_SIZE,
         "fabric_cell_count": fabric_cell_count,
@@ -2021,6 +2021,8 @@ def _edge_cell_contract(
         "cells": cells,
         "members": members,
     }
+    contract["readiness_evidence_bundle"] = _ai_max_readiness_evidence_bundle(contract)
+    return contract
 
 
 def _ai_max_boot_assurance_contract() -> dict[str, Any]:
@@ -2632,6 +2634,240 @@ def _ai_max_ha_recovery_drill_report(
             "no_live_mutation": True,
         },
     }
+
+
+def _ai_max_readiness_evidence_bundle(contract: dict[str, Any]) -> dict[str, Any]:
+    governance = dict(contract["governance_evidence"])
+    installer = dict(contract["installer"])
+    assurance = dict(contract["assurance_enforcement"])
+    autonomy = dict(contract["autonomy_state"])
+    disconnected = dict(contract["disconnected_drill_report"])
+    ha_plan = dict(contract["ha_lab_deployment_plan"])
+    ha_recovery = dict(contract["ha_recovery_drill_report"])
+    bundle = {
+        "bundle_id": "ai-max-nitda-readiness-evidence-stage16",
+        "name": "AI Max Nigerian-language translation readiness evidence bundle",
+        "version": "stage16-local-v1",
+        "mode": "local-deterministic-export",
+        "audience": ["review", "procurement", "discovery"],
+        "claims": {
+            "simulation_only": True,
+            "production_certification": False,
+            "legal_compliance_complete": False,
+            "live_cluster_mutation": False,
+            "nitda_approval_complete": False,
+        },
+        "architecture_summary": {
+            "profile": contract["profile"],
+            "cell_shape": "4-node-ai-max-edge-cell",
+            "gateway_count": 1,
+            "cell_node_count": AI_MAX_EDGE_CELL_NODE_COUNT,
+            "compute_node_count": len(contract["compute_node_ids"]),
+            "compute_policy": (
+                "all four nodes compute-eligible subject to gateway reservation "
+                "and assurance quarantine policy"
+            ),
+            "gateway_reserved_gpu_fraction_supported": True,
+            "assurance_policy": assurance["policy"],
+            "multi_cell_growth": {
+                "supported_fabric_cell_counts": sorted(SUPPORTED_AI_MAX_FABRIC_CELL_COUNTS),
+                "current_fabric_cell_count": contract["fabric_cell_count"],
+                "growth_note": "local simulation supports 1, 2, 4, or 8 four-node cells",
+            },
+            "gateway_node_id": contract["gateway_node_id"],
+            "cell_node_ids": list(contract["cell_node_ids"]),
+        },
+        "data_handling": {
+            "residency_posture": governance["dataset_card"]["data_residency"],
+            "classification_matrix": {
+                "dataset": governance["dataset_card"]["classification"],
+                "prompts": "customer-confidential-placeholder",
+                "logs": "operations-minimized",
+                "embeddings": "derived-sensitive-placeholder",
+                "telemetry": "aggregate-operations-only",
+            },
+            "prompt_handling": "edge-local processing intent; redact before support export",
+            "log_handling": "minimize prompts and model outputs in operational logs",
+            "embedding_handling": "keep embeddings resident with dataset unless approved",
+            "telemetry_minimization": True,
+            "cross_border_support_access_caution": True,
+            "source_ref": "edge_cell_contract.governance_evidence.dataset_card",
+        },
+        "installer_platform_assurance": {
+            "signed_installer_artifact_status": installer["verification"]["status"],
+            "artifact_ref": "edge_cell_contract.installer.artifact",
+            "signature_ref": "edge_cell_contract.installer.signature",
+            "role_manifest_status": installer["verification"]["role_scaffold_ready"],
+            "install_paths": list(installer["install_paths"]),
+            "boot_evidence_verifier": "k1s-local-boot-evidence-verifier-v1",
+            "boot_evidence_ref": "edge_cell_contract.installer.boot_evidence",
+            "quarantine_disable_state": {
+                "policy": assurance["policy"],
+                "status": assurance["status"],
+                "tampered_fixture_ref": (
+                    "edge_cell_contract.assurance_enforcement.tampered_quarantine_fixture"
+                ),
+            },
+            "alert_audit_evidence_ids": [
+                "installer.verification",
+                "installer.boot_evidence",
+                "assurance_enforcement.boot_evidence_status",
+                "assurance_enforcement.tampered_quarantine_fixture",
+            ],
+        },
+        "autonomy_readiness_drills": {
+            "states": [
+                "connected",
+                "core-link-unavailable",
+                "degraded-local-only",
+                "reconciling",
+                "reconciled",
+            ],
+            "autonomy_state_ref": "edge_cell_contract.autonomy_state",
+            "transition_trace": list(autonomy["sample_transition_trace"]),
+            "disconnected_drill": {
+                "ref": "edge_cell_contract.disconnected_drill_report",
+                "version": disconnected["version"],
+                "final_state": disconnected["final_state"],
+                "local_service_available": disconnected["local_service_available"],
+                "dry_run": disconnected["live_network_disruption"] is False,
+            },
+            "ha_lab_plan": {
+                "ref": "edge_cell_contract.ha_lab_deployment_plan",
+                "version": ha_plan["version"],
+                "target": dict(ha_plan["target"]),
+                "dry_run": ha_plan["safety"]["dry_run"],
+                "mutates_microk8s": ha_plan["safety"]["mutates_microk8s"],
+            },
+            "ha_recovery_drill": {
+                "ref": "edge_cell_contract.ha_recovery_drill_report",
+                "version": ha_recovery["version"],
+                "final_state": ha_recovery["reconciliation"]["final_state"],
+                "dry_run": ha_recovery["safety"]["dry_run"],
+                "mutates_microk8s": ha_recovery["safety"]["mutates_microk8s"],
+            },
+            "no_live_mutation": True,
+        },
+        "governance_evidence": {
+            "dataset_card_ref": "edge_cell_contract.governance_evidence.dataset_card",
+            "model_card_ref": "edge_cell_contract.governance_evidence.model_card",
+            "eval_report_ref": "edge_cell_contract.governance_evidence.eval_report",
+            "risk_assessment_ref": "edge_cell_contract.governance_evidence.risk_assessment",
+            "approval_record_ref": "edge_cell_contract.governance_evidence.approval_record",
+            "rollback_record_ref": "edge_cell_contract.governance_evidence.rollback_record",
+            "summary": dict(governance["summary"]),
+        },
+        "stage_evidence_groups": {
+            "stage7": {
+                "name": "installer artifact signing envelope",
+                "status": "simulated",
+                "ref": "edge_cell_contract.installer.artifact",
+            },
+            "stage8": {
+                "name": "gateway and cell-node role scaffold",
+                "status": "simulated",
+                "ref": "edge_cell_contract.installer.role_scaffolds",
+            },
+            "stage9": {
+                "name": "boot evidence verifier",
+                "status": "simulated",
+                "ref": "edge_cell_contract.installer.boot_evidence",
+            },
+            "stage10": {
+                "name": "assurance quarantine scheduling semantics",
+                "status": "simulated",
+                "ref": "edge_cell_contract.assurance_enforcement",
+            },
+            "stage11": {
+                "name": "edge autonomy state machine",
+                "status": "simulated",
+                "ref": "edge_cell_contract.autonomy_state",
+            },
+            "stage12": {
+                "name": "disconnected drill report",
+                "status": "simulated",
+                "ref": "edge_cell_contract.disconnected_drill_report",
+            },
+            "stage13": {
+                "name": "k1s-dev-a HA lab deployment plan",
+                "status": "dry-run-plan",
+                "ref": "edge_cell_contract.ha_lab_deployment_plan",
+            },
+            "stage14": {
+                "name": "HA failure recovery drill",
+                "status": "simulated",
+                "ref": "edge_cell_contract.ha_recovery_drill_report",
+            },
+            "stage15": {
+                "name": "AI governance evidence",
+                "status": "local-evidence-contract",
+                "ref": "edge_cell_contract.governance_evidence",
+            },
+        },
+        "operator_handover_checklist": [
+            "review architecture summary and node inventory",
+            "confirm Nigerian data residency and classification assumptions",
+            "review installer signing and boot assurance evidence",
+            "review disconnected and HA dry-run drill evidence",
+            "review governance evidence and approval placeholders",
+            "decide whether to schedule live k1s-dev-a deployment and HA drills",
+        ],
+        "readiness_gaps_next_actions": [
+            "complete legal and data protection review",
+            "replace local signing simulation with production key custody",
+            "capture real TPM and Secure Boot evidence",
+            "perform explicit live k1s-dev-a deployment after operator approval",
+            "run live disconnected and HA failure drills with captured probes",
+            "integrate external governance, audit, and approval workflow",
+            "obtain NITDA-oriented review before procurement or production claims",
+        ],
+    }
+    return validate_ai_max_readiness_evidence_bundle(bundle)
+
+
+def validate_ai_max_readiness_evidence_bundle(bundle: dict[str, Any]) -> dict[str, Any]:
+    required = {
+        "architecture_summary",
+        "data_handling",
+        "installer_platform_assurance",
+        "autonomy_readiness_drills",
+        "governance_evidence",
+        "stage_evidence_groups",
+        "operator_handover_checklist",
+        "readiness_gaps_next_actions",
+        "claims",
+    }
+    missing = sorted(required - set(bundle))
+    if missing:
+        raise WorkerBeeError(
+            code="AI_MAX_READINESS_BUNDLE_INCOMPLETE",
+            message="AI Max readiness evidence bundle is missing required sections",
+            details={"missing": missing},
+        )
+    expected_stages = {f"stage{stage}" for stage in range(7, 16)}
+    stages = set(dict(bundle.get("stage_evidence_groups") or {}))
+    missing_stages = sorted(expected_stages - stages)
+    if missing_stages:
+        raise WorkerBeeError(
+            code="AI_MAX_READINESS_BUNDLE_INCOMPLETE",
+            message="AI Max readiness evidence bundle is missing stage evidence groups",
+            details={"missing_stages": missing_stages},
+        )
+    claims = dict(bundle.get("claims") or {})
+    forbidden_truthy_claims = [
+        "production_certification",
+        "legal_compliance_complete",
+        "live_cluster_mutation",
+        "nitda_approval_complete",
+    ]
+    invalid_claims = [claim for claim in forbidden_truthy_claims if claims.get(claim) is not False]
+    if claims.get("simulation_only") is not True or invalid_claims:
+        raise WorkerBeeError(
+            code="AI_MAX_READINESS_BUNDLE_CLAIM_UNSAFE",
+            message="AI Max readiness evidence bundle must remain simulated and non-certified",
+            details={"invalid_claims": invalid_claims},
+        )
+    return bundle
 
 
 def _ai_max_installer_verification_status(

@@ -11,7 +11,11 @@ import pytest
 from workerbee.cli import _edge_link_kwargs, build_parser
 from workerbee.contract import WorkerBeeError
 from workerbee.daemon import WorkerBeeDaemon
-from workerbee.edge_link import K1sEdgeLinkInfo, K1sEdgeLinkRunner
+from workerbee.edge_link import (
+    K1sEdgeLinkInfo,
+    K1sEdgeLinkRunner,
+    validate_ai_max_readiness_evidence_bundle,
+)
 
 MASKED_VALUE = "***"
 
@@ -605,6 +609,230 @@ def _assert_ai_max_installer_assurance(contract: dict[str, Any]) -> None:
             "no_live_mutation": True,
         },
     }
+    bundle = contract["readiness_evidence_bundle"]
+    assert bundle["bundle_id"] == "ai-max-nitda-readiness-evidence-stage16"
+    assert bundle["version"] == "stage16-local-v1"
+    assert bundle["mode"] == "local-deterministic-export"
+    assert bundle["audience"] == ["review", "procurement", "discovery"]
+    assert bundle["claims"] == {
+        "simulation_only": True,
+        "production_certification": False,
+        "legal_compliance_complete": False,
+        "live_cluster_mutation": False,
+        "nitda_approval_complete": False,
+    }
+    assert bundle["architecture_summary"] == {
+        "profile": "ai-max-edge-cell-v1",
+        "cell_shape": "4-node-ai-max-edge-cell",
+        "gateway_count": 1,
+        "cell_node_count": 3,
+        "compute_node_count": len(contract["compute_node_ids"]),
+        "compute_policy": (
+            "all four nodes compute-eligible subject to gateway reservation "
+            "and assurance quarantine policy"
+        ),
+        "gateway_reserved_gpu_fraction_supported": True,
+        "assurance_policy": "exclude-quarantined-from-placement",
+        "multi_cell_growth": {
+            "supported_fabric_cell_counts": [1, 2, 4, 8],
+            "current_fabric_cell_count": contract["fabric_cell_count"],
+            "growth_note": "local simulation supports 1, 2, 4, or 8 four-node cells",
+        },
+        "gateway_node_id": contract["gateway_node_id"],
+        "cell_node_ids": contract["cell_node_ids"],
+    }
+    assert bundle["data_handling"] == {
+        "residency_posture": "NG-local-lab",
+        "classification_matrix": {
+            "dataset": "public-demo",
+            "prompts": "customer-confidential-placeholder",
+            "logs": "operations-minimized",
+            "embeddings": "derived-sensitive-placeholder",
+            "telemetry": "aggregate-operations-only",
+        },
+        "prompt_handling": "edge-local processing intent; redact before support export",
+        "log_handling": "minimize prompts and model outputs in operational logs",
+        "embedding_handling": "keep embeddings resident with dataset unless approved",
+        "telemetry_minimization": True,
+        "cross_border_support_access_caution": True,
+        "source_ref": "edge_cell_contract.governance_evidence.dataset_card",
+    }
+    assert bundle["installer_platform_assurance"] == {
+        "signed_installer_artifact_status": "verified",
+        "artifact_ref": "edge_cell_contract.installer.artifact",
+        "signature_ref": "edge_cell_contract.installer.signature",
+        "role_manifest_status": True,
+        "install_paths": contract["installer"]["install_paths"],
+        "boot_evidence_verifier": "k1s-local-boot-evidence-verifier-v1",
+        "boot_evidence_ref": "edge_cell_contract.installer.boot_evidence",
+        "quarantine_disable_state": {
+            "policy": "exclude-quarantined-from-placement",
+            "status": "healthy",
+            "tampered_fixture_ref": (
+                "edge_cell_contract.assurance_enforcement.tampered_quarantine_fixture"
+            ),
+        },
+        "alert_audit_evidence_ids": [
+            "installer.verification",
+            "installer.boot_evidence",
+            "assurance_enforcement.boot_evidence_status",
+            "assurance_enforcement.tampered_quarantine_fixture",
+        ],
+    }
+    assert bundle["autonomy_readiness_drills"] == {
+        "states": [
+            "connected",
+            "core-link-unavailable",
+            "degraded-local-only",
+            "reconciling",
+            "reconciled",
+        ],
+        "autonomy_state_ref": "edge_cell_contract.autonomy_state",
+        "transition_trace": contract["autonomy_state"]["sample_transition_trace"],
+        "disconnected_drill": {
+            "ref": "edge_cell_contract.disconnected_drill_report",
+            "version": "stage12-local-v1",
+            "final_state": "reconciled",
+            "local_service_available": True,
+            "dry_run": True,
+        },
+        "ha_lab_plan": {
+            "ref": "edge_cell_contract.ha_lab_deployment_plan",
+            "version": "stage13-local-v1",
+            "target": {
+                "release": "k1s-dev-a",
+                "namespace": "k1s-dev-a",
+                "runtime": "microk8s",
+            },
+            "dry_run": True,
+            "mutates_microk8s": False,
+        },
+        "ha_recovery_drill": {
+            "ref": "edge_cell_contract.ha_recovery_drill_report",
+            "version": "stage14-local-v1",
+            "final_state": "reconciled",
+            "dry_run": True,
+            "mutates_microk8s": False,
+        },
+        "no_live_mutation": True,
+    }
+    assert bundle["governance_evidence"] == {
+        "dataset_card_ref": "edge_cell_contract.governance_evidence.dataset_card",
+        "model_card_ref": "edge_cell_contract.governance_evidence.model_card",
+        "eval_report_ref": "edge_cell_contract.governance_evidence.eval_report",
+        "risk_assessment_ref": "edge_cell_contract.governance_evidence.risk_assessment",
+        "approval_record_ref": "edge_cell_contract.governance_evidence.approval_record",
+        "rollback_record_ref": "edge_cell_contract.governance_evidence.rollback_record",
+        "summary": contract["governance_evidence"]["summary"],
+    }
+    assert bundle["stage_evidence_groups"] == {
+        "stage7": {
+            "name": "installer artifact signing envelope",
+            "status": "simulated",
+            "ref": "edge_cell_contract.installer.artifact",
+        },
+        "stage8": {
+            "name": "gateway and cell-node role scaffold",
+            "status": "simulated",
+            "ref": "edge_cell_contract.installer.role_scaffolds",
+        },
+        "stage9": {
+            "name": "boot evidence verifier",
+            "status": "simulated",
+            "ref": "edge_cell_contract.installer.boot_evidence",
+        },
+        "stage10": {
+            "name": "assurance quarantine scheduling semantics",
+            "status": "simulated",
+            "ref": "edge_cell_contract.assurance_enforcement",
+        },
+        "stage11": {
+            "name": "edge autonomy state machine",
+            "status": "simulated",
+            "ref": "edge_cell_contract.autonomy_state",
+        },
+        "stage12": {
+            "name": "disconnected drill report",
+            "status": "simulated",
+            "ref": "edge_cell_contract.disconnected_drill_report",
+        },
+        "stage13": {
+            "name": "k1s-dev-a HA lab deployment plan",
+            "status": "dry-run-plan",
+            "ref": "edge_cell_contract.ha_lab_deployment_plan",
+        },
+        "stage14": {
+            "name": "HA failure recovery drill",
+            "status": "simulated",
+            "ref": "edge_cell_contract.ha_recovery_drill_report",
+        },
+        "stage15": {
+            "name": "AI governance evidence",
+            "status": "local-evidence-contract",
+            "ref": "edge_cell_contract.governance_evidence",
+        },
+    }
+    assert bundle["operator_handover_checklist"] == [
+        "review architecture summary and node inventory",
+        "confirm Nigerian data residency and classification assumptions",
+        "review installer signing and boot assurance evidence",
+        "review disconnected and HA dry-run drill evidence",
+        "review governance evidence and approval placeholders",
+        "decide whether to schedule live k1s-dev-a deployment and HA drills",
+    ]
+    assert bundle["readiness_gaps_next_actions"] == [
+        "complete legal and data protection review",
+        "replace local signing simulation with production key custody",
+        "capture real TPM and Secure Boot evidence",
+        "perform explicit live k1s-dev-a deployment after operator approval",
+        "run live disconnected and HA failure drills with captured probes",
+        "integrate external governance, audit, and approval workflow",
+        "obtain NITDA-oriented review before procurement or production claims",
+    ]
+
+
+def test_ai_max_readiness_bundle_validator_rejects_incomplete_or_unsafe_claims() -> None:
+    bundle = {
+        "architecture_summary": {},
+        "data_handling": {},
+        "installer_platform_assurance": {},
+        "autonomy_readiness_drills": {},
+        "governance_evidence": {},
+        "stage_evidence_groups": {
+            f"stage{stage}": {"ref": f"edge_cell_contract.stage{stage}"} for stage in range(7, 16)
+        },
+        "operator_handover_checklist": ["review"],
+        "readiness_gaps_next_actions": ["legal review"],
+        "claims": {
+            "simulation_only": True,
+            "production_certification": False,
+            "legal_compliance_complete": False,
+            "live_cluster_mutation": False,
+            "nitda_approval_complete": False,
+        },
+    }
+
+    assert validate_ai_max_readiness_evidence_bundle(bundle) is bundle
+
+    incomplete = dict(bundle)
+    incomplete.pop("data_handling")
+    with pytest.raises(WorkerBeeError) as exc:
+        validate_ai_max_readiness_evidence_bundle(incomplete)
+    assert exc.value.code == "AI_MAX_READINESS_BUNDLE_INCOMPLETE"
+    assert exc.value.details == {"missing": ["data_handling"]}
+
+    missing_stage = {**bundle, "stage_evidence_groups": dict(bundle["stage_evidence_groups"])}
+    missing_stage["stage_evidence_groups"].pop("stage12")
+    with pytest.raises(WorkerBeeError) as exc:
+        validate_ai_max_readiness_evidence_bundle(missing_stage)
+    assert exc.value.code == "AI_MAX_READINESS_BUNDLE_INCOMPLETE"
+    assert exc.value.details == {"missing_stages": ["stage12"]}
+
+    unsafe = {**bundle, "claims": {**bundle["claims"], "legal_compliance_complete": True}}
+    with pytest.raises(WorkerBeeError) as exc:
+        validate_ai_max_readiness_evidence_bundle(unsafe)
+    assert exc.value.code == "AI_MAX_READINESS_BUNDLE_CLAIM_UNSAFE"
+    assert exc.value.details == {"invalid_claims": ["legal_compliance_complete"]}
 
 
 def test_edge_link_runner_rejects_non_containerd_runtime(tmp_path: Path, monkeypatch) -> None:

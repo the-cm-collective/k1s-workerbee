@@ -248,6 +248,16 @@ The resulting WorkerBee state exposes an `edge_cell_contract` block with:
 - `ha_recovery_drill_report.continuity_evidence.local_service_available: true`
 - `ha_recovery_drill_report.reconciliation.final_state: reconciled`
 - `ha_recovery_drill_report.safety.mutates_microk8s: false`
+- `readiness_evidence_bundle.version: stage16-local-v1`
+- `readiness_evidence_bundle.claims.legal_compliance_complete: false`
+- `readiness_evidence_bundle.claims.live_cluster_mutation: false`
+- `readiness_evidence_bundle.stage_evidence_groups` covering Stage 7 through
+  Stage 15
+- `readiness_evidence_bundle.data_handling.cross_border_support_access_caution:
+  true`
+- `readiness_evidence_bundle.readiness_gaps_next_actions` for legal review,
+  production key custody, TPM/Secure Boot evidence, live drills, and NITDA
+  review
 - `boot_assurance.secure_image_validation: enabled`
 - `boot_assurance.boot_validation: measured-verified`
 - `boot_assurance.validation_failure_action: disable-quarantine`
@@ -315,6 +325,15 @@ flags. It does not inject live failures, stop controllers, mutate MicroK8s, or
 run runtime probes against a live lab. Future live HA drills must be explicit
 operator actions with their own failure injection, probe capture, recovery
 verification, and cleanup.
+
+The `readiness_evidence_bundle` block is the Stage 16 local export checkpoint.
+It summarizes the AI Max Nigerian-language translation edge-fabric architecture,
+data handling posture, installer/platform assurance, autonomy and HA drill
+evidence, Stage 15 governance evidence, operator handover checklist, and
+remaining readiness gaps. The bundle is intended for review, procurement, and
+discovery conversations. It is deterministic test metadata, not production
+certification, legal compliance completion, NITDA approval, live cluster
+mutation, or proof that live drills have been run.
 
 The simulation starts one gateway component, one gateway node-agent component,
 and three additional node-agent components. The legacy `node_id` and
