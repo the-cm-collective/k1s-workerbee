@@ -58,6 +58,20 @@ DEFAULT_EDGE_LAN_SCOPE = "workerbee-lan"
 AI_MAX_INSTALLER_PROFILE = "nixos-ai-max-edge-cell-installer-v1"
 AI_MAX_INSTALLER_IMAGE = "nixos-ai-max-edge-cell-installer"
 AI_MAX_INSTALLER_SIGNER = "k1s-core-root-of-trust"
+AI_MAX_INSTALLER_ARTIFACT_VERSION = "stage7-local"
+AI_MAX_INSTALLER_ARTIFACT_DIGEST = (
+    "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+)
+AI_MAX_INSTALLER_MANIFEST_DIGEST = (
+    "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+)
+AI_MAX_INSTALLER_SIGNATURE_ALGORITHM = "k1s-local-sim-ed25519-sha256"
+AI_MAX_INSTALLER_SIGNATURE = (
+    "k1s-sim-signature:3333333333333333333333333333333333333333333333333333333333333333"
+)
+AI_MAX_INSTALLER_PROVENANCE_BUILDER = "k1s-public-stage7-local-simulator"
+AI_MAX_INSTALLER_PROVENANCE_SOURCE_REVISION = "public-dev-stage7"
+AI_MAX_INSTALLER_PROVENANCE_CREATED_AT = "2026-06-25T00:00:00Z"
 
 
 @dataclass(slots=True)
@@ -1994,6 +2008,8 @@ def _ai_max_boot_assurance_contract() -> dict[str, Any]:
 
 
 def _ai_max_installer_contract(boot_assurance: dict[str, Any]) -> dict[str, Any]:
+    artifact = _ai_max_installer_artifact_manifest()
+    signature = _ai_max_installer_signature_envelope(artifact)
     return {
         "profile": AI_MAX_INSTALLER_PROFILE,
         "image": AI_MAX_INSTALLER_IMAGE,
@@ -2002,6 +2018,9 @@ def _ai_max_installer_contract(boot_assurance: dict[str, Any]) -> dict[str, Any]
             "authority": AI_MAX_INSTALLER_SIGNER,
             "source": "k1s-core-controller",
         },
+        "artifact": artifact,
+        "signature": signature,
+        "verification": _ai_max_installer_verification_status(artifact, signature),
         "assurance": dict(boot_assurance),
         "install_paths": [
             {
@@ -2023,6 +2042,47 @@ def _ai_max_installer_contract(boot_assurance: dict[str, Any]) -> dict[str, Any]
                 },
             },
         ],
+    }
+
+
+def _ai_max_installer_artifact_manifest() -> dict[str, Any]:
+    return {
+        "name": AI_MAX_INSTALLER_IMAGE,
+        "profile": AI_MAX_INSTALLER_PROFILE,
+        "image": AI_MAX_INSTALLER_IMAGE,
+        "version": AI_MAX_INSTALLER_ARTIFACT_VERSION,
+        "artifact_digest": AI_MAX_INSTALLER_ARTIFACT_DIGEST,
+        "manifest_digest": AI_MAX_INSTALLER_MANIFEST_DIGEST,
+        "path_coverage": ["gateway", "cell-node"],
+        "provenance": {
+            "builder": AI_MAX_INSTALLER_PROVENANCE_BUILDER,
+            "source_revision": AI_MAX_INSTALLER_PROVENANCE_SOURCE_REVISION,
+            "created_at": AI_MAX_INSTALLER_PROVENANCE_CREATED_AT,
+        },
+    }
+
+
+def _ai_max_installer_signature_envelope(artifact: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "algorithm": AI_MAX_INSTALLER_SIGNATURE_ALGORITHM,
+        "signing_key_id": AI_MAX_INSTALLER_SIGNER,
+        "signed_digest": artifact["manifest_digest"],
+        "signature": AI_MAX_INSTALLER_SIGNATURE,
+    }
+
+
+def _ai_max_installer_verification_status(
+    artifact: dict[str, Any], signature: dict[str, Any]
+) -> dict[str, Any]:
+    return {
+        "status": "verified",
+        "checked_by": "workerbee-local-simulator",
+        "root_of_trust": AI_MAX_INSTALLER_SIGNER,
+        "signature_algorithm": signature["algorithm"],
+        "signed_digest": signature["signed_digest"],
+        "profile_match": artifact["profile"] == AI_MAX_INSTALLER_PROFILE,
+        "image_match": artifact["image"] == AI_MAX_INSTALLER_IMAGE,
+        "path_coverage": list(artifact["path_coverage"]),
     }
 
 

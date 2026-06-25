@@ -56,6 +56,46 @@ def _assert_ai_max_installer_assurance(contract: dict[str, Any]) -> None:
             "authority": "k1s-core-root-of-trust",
             "source": "k1s-core-controller",
         },
+        "artifact": {
+            "name": "nixos-ai-max-edge-cell-installer",
+            "profile": "nixos-ai-max-edge-cell-installer-v1",
+            "image": "nixos-ai-max-edge-cell-installer",
+            "version": "stage7-local",
+            "artifact_digest": (
+                "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+            ),
+            "manifest_digest": (
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+            ),
+            "path_coverage": ["gateway", "cell-node"],
+            "provenance": {
+                "builder": "k1s-public-stage7-local-simulator",
+                "source_revision": "public-dev-stage7",
+                "created_at": "2026-06-25T00:00:00Z",
+            },
+        },
+        "signature": {
+            "algorithm": "k1s-local-sim-ed25519-sha256",
+            "signing_key_id": "k1s-core-root-of-trust",
+            "signed_digest": (
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+            ),
+            "signature": (
+                "k1s-sim-signature:3333333333333333333333333333333333333333333333333333333333333333"
+            ),
+        },
+        "verification": {
+            "status": "verified",
+            "checked_by": "workerbee-local-simulator",
+            "root_of_trust": "k1s-core-root-of-trust",
+            "signature_algorithm": "k1s-local-sim-ed25519-sha256",
+            "signed_digest": (
+                "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+            ),
+            "profile_match": True,
+            "image_match": True,
+            "path_coverage": ["gateway", "cell-node"],
+        },
         "assurance": boot_assurance,
         "install_paths": [
             {

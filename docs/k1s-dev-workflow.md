@@ -199,6 +199,11 @@ The resulting WorkerBee state exposes an `edge_cell_contract` block with:
 - `lan_scope: workerbee-lan`
 - `installer.profile: nixos-ai-max-edge-cell-installer-v1`
 - `installer.signed_by: k1s-core-root-of-trust`
+- `installer.artifact.artifact_digest: sha256:...`
+- `installer.artifact.manifest_digest: sha256:...`
+- `installer.signature.algorithm: k1s-local-sim-ed25519-sha256`
+- `installer.signature.signing_key_id: k1s-core-root-of-trust`
+- `installer.verification.status: verified`
 - `boot_assurance.secure_image_validation: enabled`
 - `boot_assurance.boot_validation: measured-verified`
 - `boot_assurance.validation_failure_action: disable-quarantine`
@@ -212,10 +217,12 @@ The resulting WorkerBee state exposes an `edge_cell_contract` block with:
 
 The `installer` block is a simulator scaffold for the single AI Max NixOS
 installer image. It records gateway and cell-node install paths, signed-image
-authority, auto-boot intent, role-specific connect targets, constrained USB
-device policy, and display mode. WorkerBee does not build or sign a real NixOS
-ISO, enforce TPM/Secure Boot, verify attestation, apply USB policy, or harden
-alert transport in this path.
+authority, a deterministic Stage 7 artifact manifest, a local signing-envelope
+signature, a simulated `verified` status, auto-boot intent, role-specific
+connect targets, constrained USB device policy, and display mode. WorkerBee
+does not build or sign a real NixOS ISO, manage production key custody, enforce
+TPM/Secure Boot, verify attestation, apply USB policy, or harden alert
+transport in this path.
 
 The simulation starts one gateway component, one gateway node-agent component,
 and three additional node-agent components. The legacy `node_id` and
