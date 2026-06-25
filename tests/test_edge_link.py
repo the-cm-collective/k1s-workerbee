@@ -84,6 +84,36 @@ def _assert_ai_max_installer_assurance(contract: dict[str, Any]) -> None:
                 "k1s-sim-signature:3333333333333333333333333333333333333333333333333333333333333333"
             ),
         },
+        "role_scaffolds": [
+            {
+                "role": "gateway",
+                "module_ref": "nixos/modules/ai-max/installer/gateway.nix",
+                "config_ref": "nixos/configs/ai-max/gateway-installed-system.nix",
+                "derived_from_manifest_digest": (
+                    "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                ),
+                "post_install": {
+                    "auto_boot": "enabled",
+                    "connect_target": "core",
+                    "usb_device_policy": "signed-only",
+                    "display_mode": "telemetry",
+                },
+            },
+            {
+                "role": "cell-node",
+                "module_ref": "nixos/modules/ai-max/installer/cell-node.nix",
+                "config_ref": "nixos/configs/ai-max/cell-node-installed-system.nix",
+                "derived_from_manifest_digest": (
+                    "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+                ),
+                "post_install": {
+                    "auto_boot": "enabled",
+                    "connect_target": "gateway",
+                    "usb_device_policy": "limited",
+                    "display_mode": "connect-monitor-to-gateway",
+                },
+            },
+        ],
         "verification": {
             "status": "verified",
             "checked_by": "workerbee-local-simulator",
@@ -95,6 +125,8 @@ def _assert_ai_max_installer_assurance(contract: dict[str, Any]) -> None:
             "profile_match": True,
             "image_match": True,
             "path_coverage": ["gateway", "cell-node"],
+            "role_scaffold_ready": True,
+            "role_coverage": ["gateway", "cell-node"],
         },
         "assurance": boot_assurance,
         "install_paths": [

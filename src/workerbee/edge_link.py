@@ -72,6 +72,10 @@ AI_MAX_INSTALLER_SIGNATURE = (
 AI_MAX_INSTALLER_PROVENANCE_BUILDER = "k1s-public-stage7-local-simulator"
 AI_MAX_INSTALLER_PROVENANCE_SOURCE_REVISION = "public-dev-stage7"
 AI_MAX_INSTALLER_PROVENANCE_CREATED_AT = "2026-06-25T00:00:00Z"
+AI_MAX_INSTALLER_GATEWAY_MODULE_REF = "nixos/modules/ai-max/installer/gateway.nix"
+AI_MAX_INSTALLER_GATEWAY_CONFIG_REF = "nixos/configs/ai-max/gateway-installed-system.nix"
+AI_MAX_INSTALLER_CELL_NODE_MODULE_REF = "nixos/modules/ai-max/installer/cell-node.nix"
+AI_MAX_INSTALLER_CELL_NODE_CONFIG_REF = "nixos/configs/ai-max/cell-node-installed-system.nix"
 
 
 @dataclass(slots=True)
@@ -2010,6 +2014,7 @@ def _ai_max_boot_assurance_contract() -> dict[str, Any]:
 def _ai_max_installer_contract(boot_assurance: dict[str, Any]) -> dict[str, Any]:
     artifact = _ai_max_installer_artifact_manifest()
     signature = _ai_max_installer_signature_envelope(artifact)
+    role_scaffolds = _ai_max_installer_role_scaffolds(artifact)
     return {
         "profile": AI_MAX_INSTALLER_PROFILE,
         "image": AI_MAX_INSTALLER_IMAGE,
@@ -2020,7 +2025,8 @@ def _ai_max_installer_contract(boot_assurance: dict[str, Any]) -> dict[str, Any]
         },
         "artifact": artifact,
         "signature": signature,
-        "verification": _ai_max_installer_verification_status(artifact, signature),
+        "role_scaffolds": role_scaffolds,
+        "verification": _ai_max_installer_verification_status(artifact, signature, role_scaffolds),
         "assurance": dict(boot_assurance),
         "install_paths": [
             {
@@ -2071,8 +2077,39 @@ def _ai_max_installer_signature_envelope(artifact: dict[str, Any]) -> dict[str, 
     }
 
 
+def _ai_max_installer_role_scaffolds(artifact: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "gateway",
+            "module_ref": AI_MAX_INSTALLER_GATEWAY_MODULE_REF,
+            "config_ref": AI_MAX_INSTALLER_GATEWAY_CONFIG_REF,
+            "derived_from_manifest_digest": artifact["manifest_digest"],
+            "post_install": {
+                "auto_boot": "enabled",
+                "connect_target": "core",
+                "usb_device_policy": "signed-only",
+                "display_mode": "telemetry",
+            },
+        },
+        {
+            "role": "cell-node",
+            "module_ref": AI_MAX_INSTALLER_CELL_NODE_MODULE_REF,
+            "config_ref": AI_MAX_INSTALLER_CELL_NODE_CONFIG_REF,
+            "derived_from_manifest_digest": artifact["manifest_digest"],
+            "post_install": {
+                "auto_boot": "enabled",
+                "connect_target": "gateway",
+                "usb_device_policy": "limited",
+                "display_mode": "connect-monitor-to-gateway",
+            },
+        },
+    ]
+
+
 def _ai_max_installer_verification_status(
-    artifact: dict[str, Any], signature: dict[str, Any]
+    artifact: dict[str, Any],
+    signature: dict[str, Any],
+    role_scaffolds: list[dict[str, Any]],
 ) -> dict[str, Any]:
     return {
         "status": "verified",
@@ -2083,6 +2120,8 @@ def _ai_max_installer_verification_status(
         "profile_match": artifact["profile"] == AI_MAX_INSTALLER_PROFILE,
         "image_match": artifact["image"] == AI_MAX_INSTALLER_IMAGE,
         "path_coverage": list(artifact["path_coverage"]),
+        "role_scaffold_ready": True,
+        "role_coverage": [str(item["role"]) for item in role_scaffolds],
     }
 
 
