@@ -226,6 +226,12 @@ The resulting WorkerBee state exposes an `edge_cell_contract` block with:
 - `disconnected_drill_report.live_core_mutation: false`
 - `disconnected_drill_report.live_network_disruption: false`
 - `disconnected_drill_report.final_state: reconciled`
+- `ha_lab_deployment_plan.version: stage13-local-v1`
+- `ha_lab_deployment_plan.target.release: k1s-dev-a`
+- `ha_lab_deployment_plan.target.namespace: k1s-dev-a`
+- `ha_lab_deployment_plan.profile.cell_node_count: 3`
+- `ha_lab_deployment_plan.safety.dry_run: true`
+- `ha_lab_deployment_plan.safety.mutates_microk8s: false`
 - `boot_assurance.secure_image_validation: enabled`
 - `boot_assurance.boot_validation: measured-verified`
 - `boot_assurance.validation_failure_action: disable-quarantine`
@@ -268,6 +274,14 @@ restore, reconciliation, and a final `reconciled` state. It explicitly records
 that no live core mutation or live network disruption occurred. Real outage
 injection, runtime endpoint probing, network disruption, and controller
 reconciliation against a live core remain later work.
+
+The `ha_lab_deployment_plan` block is the Stage 13 deployment-path dry run for
+the `k1s-dev-a` MicroK8s lab target. It records the default release/namespace,
+the edge-link profile with `cell_node_count=3`, optional fabric cell count,
+preflight checks, validation steps, and command snippets an operator can later
+run. This block is not a deploy action. It does not start WorkerBee, mutate
+MicroK8s, create namespaces, disrupt controllers, or run the disconnected drill;
+live use requires a separate operator action and confirmation.
 
 The simulation starts one gateway component, one gateway node-agent component,
 and three additional node-agent components. The legacy `node_id` and

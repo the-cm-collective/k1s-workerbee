@@ -403,6 +403,81 @@ def _assert_ai_max_installer_assurance(contract: dict[str, Any]) -> None:
             "no_live_disruption": True,
         },
     }
+    assert contract["ha_lab_deployment_plan"] == {
+        "plan_id": "ai-max-ha-lab-k1s-dev-a-stage13",
+        "name": "AI Max HA lab deployment path dry run",
+        "version": "stage13-local-v1",
+        "mode": "dry-run-plan-only",
+        "target": {
+            "release": "k1s-dev-a",
+            "namespace": "k1s-dev-a",
+            "runtime": "microk8s",
+        },
+        "profile": {
+            "path": "edge-link",
+            "cell_node_count": 3,
+            "fabric_cell_count": contract["fabric_cell_count"],
+            "lan_scope": contract["lan_scope"],
+        },
+        "preflight_checklist": [
+            {
+                "id": "core-controller-url",
+                "required": True,
+                "description": "Provide a reachable k1s core/controller URL in the bundle.",
+            },
+            {
+                "id": "agent-token-or-bundle",
+                "required": True,
+                "description": "Provide the edge agent token through a bundle or explicit input.",
+            },
+            {
+                "id": "namespace",
+                "required": True,
+                "description": "Confirm namespace k1s-dev-a exists before live use.",
+            },
+            {
+                "id": "dry-run-no-live-mutation",
+                "required": True,
+                "description": (
+                    "This plan is metadata only and must not mutate MicroK8s during tests."
+                ),
+            },
+        ],
+        "validation_steps": [
+            "manifest validation",
+            "edge-link start",
+            "edge-link validate",
+            "edge-link status",
+            "disconnected drill report review",
+            "cleanup stop",
+        ],
+        "commands": {
+            "start": (
+                "scripts/dev/wb-containerd --project wb014 edge-link start --k1s-root ../k1s "
+                "--from-microk8s --release k1s-dev-a --namespace k1s-dev-a --site-id "
+                "workerbee-edge --node-id workerbee-edge-node --cell-node-count 3 "
+                f"--fabric-cell-count {contract['fabric_cell_count']} --lan-scope "
+                f"{contract['lan_scope']}"
+            ),
+            "validate": (
+                "scripts/dev/wb-containerd --project wb014 edge-link validate --k1s-root ../k1s "
+                "--from-microk8s --release k1s-dev-a --namespace k1s-dev-a"
+            ),
+            "status": "scripts/dev/wb-containerd --project wb014 edge-link status",
+            "stop": "scripts/dev/wb-containerd --project wb014 edge-link stop",
+        },
+        "report_inputs": {
+            "disconnected_drill_report": "edge_cell_contract.disconnected_drill_report",
+            "assurance_enforcement": "edge_cell_contract.assurance_enforcement",
+            "autonomy_state": "edge_cell_contract.autonomy_state",
+        },
+        "safety": {
+            "dry_run": True,
+            "mutates_microk8s": False,
+            "starts_workerbee_project": False,
+            "requires_operator_confirmation_for_live_run": True,
+        },
+    }
 
 
 def test_edge_link_runner_rejects_non_containerd_runtime(tmp_path: Path, monkeypatch) -> None:

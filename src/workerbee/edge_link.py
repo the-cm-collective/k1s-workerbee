@@ -2010,6 +2010,7 @@ def _edge_cell_contract(
         "assurance_enforcement": _ai_max_assurance_enforcement_view(members, installer),
         "autonomy_state": autonomy_state,
         "disconnected_drill_report": _ai_max_disconnected_drill_report(autonomy_state),
+        "ha_lab_deployment_plan": _ai_max_ha_lab_deployment_plan(fabric_cell_count, lan_scope),
         "cells": cells,
         "members": members,
     }
@@ -2381,6 +2382,115 @@ def _ai_max_disconnected_drill_report(autonomy_state: dict[str, Any]) -> dict[st
             "restored_to_reconciling": trace[2]["to"] == "reconciling",
             "reconciled": autonomy_state["sample_final_state"] == "reconciled",
             "no_live_disruption": True,
+        },
+    }
+
+
+def _ai_max_ha_lab_deployment_plan(fabric_cell_count: int, lan_scope: str) -> dict[str, Any]:
+    base = [
+        "scripts/dev/wb-containerd",
+        "--project",
+        "wb014",
+        "edge-link",
+    ]
+    start_args = [
+        "start",
+        "--k1s-root",
+        "../k1s",
+        "--from-microk8s",
+        "--release",
+        DEFAULT_MICROK8S_RELEASE,
+        "--namespace",
+        DEFAULT_MICROK8S_NAMESPACE,
+        "--site-id",
+        DEFAULT_EDGE_SITE_ID,
+        "--node-id",
+        DEFAULT_EDGE_NODE_ID,
+        "--cell-node-count",
+        str(AI_MAX_EDGE_CELL_NODE_COUNT),
+        "--fabric-cell-count",
+        str(fabric_cell_count),
+        "--lan-scope",
+        lan_scope,
+    ]
+    validate_args = [
+        "validate",
+        "--k1s-root",
+        "../k1s",
+        "--from-microk8s",
+        "--release",
+        DEFAULT_MICROK8S_RELEASE,
+        "--namespace",
+        DEFAULT_MICROK8S_NAMESPACE,
+    ]
+    status_args = ["status"]
+    stop_args = ["stop"]
+    return {
+        "plan_id": "ai-max-ha-lab-k1s-dev-a-stage13",
+        "name": "AI Max HA lab deployment path dry run",
+        "version": "stage13-local-v1",
+        "mode": "dry-run-plan-only",
+        "target": {
+            "release": DEFAULT_MICROK8S_RELEASE,
+            "namespace": DEFAULT_MICROK8S_NAMESPACE,
+            "runtime": "microk8s",
+        },
+        "profile": {
+            "path": "edge-link",
+            "cell_node_count": AI_MAX_EDGE_CELL_NODE_COUNT,
+            "fabric_cell_count": fabric_cell_count,
+            "lan_scope": lan_scope,
+        },
+        "preflight_checklist": [
+            {
+                "id": "core-controller-url",
+                "required": True,
+                "description": "Provide a reachable k1s core/controller URL in the bundle.",
+            },
+            {
+                "id": "agent-token-or-bundle",
+                "required": True,
+                "description": "Provide the edge agent token through a bundle or explicit input.",
+            },
+            {
+                "id": "namespace",
+                "required": True,
+                "description": (
+                    f"Confirm namespace {DEFAULT_MICROK8S_NAMESPACE} exists before live use."
+                ),
+            },
+            {
+                "id": "dry-run-no-live-mutation",
+                "required": True,
+                "description": (
+                    "This plan is metadata only and must not mutate MicroK8s during tests."
+                ),
+            },
+        ],
+        "validation_steps": [
+            "manifest validation",
+            "edge-link start",
+            "edge-link validate",
+            "edge-link status",
+            "disconnected drill report review",
+            "cleanup stop",
+        ],
+        "commands": {
+            "start": " ".join(base + start_args),
+            "validate": " ".join(base + validate_args),
+            "status": " ".join(base + status_args),
+            "stop": " ".join(base + stop_args),
+        },
+        "report_inputs": {
+            "disconnected_drill_report": "edge_cell_contract.disconnected_drill_report",
+            "assurance_enforcement": "edge_cell_contract.assurance_enforcement",
+            "autonomy_state": "edge_cell_contract.autonomy_state",
+        },
+        "safety": {
+            "dry_run": True,
+            "mutates_microk8s": False,
+            "starts_workerbee_project": False,
+            "requires_operator_confirmation_for_live_run": True,
         },
     }
 
