@@ -1987,6 +1987,7 @@ def _edge_cell_contract(
     gateway_peer_ids = [cell["gateway_node_id"] for cell in cells[1:]]
     boot_assurance = _ai_max_boot_assurance_contract()
     installer = _ai_max_installer_contract(boot_assurance)
+    autonomy_state = _ai_max_autonomy_state_machine()
     return {
         "profile": AI_MAX_EDGE_CELL_PROFILE,
         "size": AI_MAX_EDGE_CELL_SIZE,
@@ -2007,7 +2008,8 @@ def _edge_cell_contract(
         "installer": installer,
         "boot_assurance": boot_assurance,
         "assurance_enforcement": _ai_max_assurance_enforcement_view(members, installer),
-        "autonomy_state": _ai_max_autonomy_state_machine(),
+        "autonomy_state": autonomy_state,
+        "disconnected_drill_report": _ai_max_disconnected_drill_report(autonomy_state),
         "cells": cells,
         "members": members,
     }
@@ -2330,6 +2332,56 @@ def _ai_max_autonomy_state_machine() -> dict[str, Any]:
         "supported_transitions": supported_transitions,
         "sample_transition_trace": sample_trace,
         "sample_final_state": "reconciled",
+    }
+
+
+def _ai_max_disconnected_drill_report(autonomy_state: dict[str, Any]) -> dict[str, Any]:
+    trace = list(autonomy_state["sample_transition_trace"])
+    cache = dict(autonomy_state["cache"])
+    local_endpoint = str(cache["service_endpoints"]["gateway-api"])
+    return {
+        "drill_id": "ai-max-disconnected-local-drill-stage12",
+        "name": "AI Max disconnected autonomy local simulation",
+        "version": "stage12-local-v1",
+        "mode": "simulation-only",
+        "live_core_mutation": False,
+        "live_network_disruption": False,
+        "starting_state": autonomy_state["current_state"],
+        "core_outage_event": "core-link-lost",
+        "degraded_state": "degraded-local-only",
+        "local_service_available": True,
+        "local_probe": {
+            "kind": "simulated-http",
+            "endpoint": local_endpoint,
+            "expected_status": 200,
+            "observed_status": 200,
+            "ok": True,
+            "source": "gateway-cache",
+        },
+        "core_restore_event": "core-link-restored",
+        "reconciliation": {
+            "from": "reconciling",
+            "to": "reconciled",
+            "event": "reconcile-completed",
+            "ok": True,
+            "evidence_marker": "stage12-reconcile-marker",
+        },
+        "transition_trace": trace,
+        "final_state": autonomy_state["sample_final_state"],
+        "cache_summary": {
+            "ready": cache["ready"],
+            "approved_workload_ref": cache["approved_workload_ref"],
+            "model_artifact_ref": cache["model_artifact_ref"],
+            "last_core_sync": cache["last_core_sync"],
+        },
+        "assertions": {
+            "started_connected": autonomy_state["current_state"] == "connected",
+            "degraded_local_only": trace[1]["to"] == "degraded-local-only",
+            "local_service_continuity": bool(autonomy_state["local_service_continuity"]),
+            "restored_to_reconciling": trace[2]["to"] == "reconciling",
+            "reconciled": autonomy_state["sample_final_state"] == "reconciled",
+            "no_live_disruption": True,
+        },
     }
 
 

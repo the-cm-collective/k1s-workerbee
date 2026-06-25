@@ -221,6 +221,11 @@ The resulting WorkerBee state exposes an `edge_cell_contract` block with:
 - `autonomy_state.supported_transitions` for core-link loss, degraded local
   service continuity, restore, and reconcile completion/failure
 - `autonomy_state.sample_transition_trace` ending at `reconciled`
+- `disconnected_drill_report.version: stage12-local-v1`
+- `disconnected_drill_report.local_service_available: true`
+- `disconnected_drill_report.live_core_mutation: false`
+- `disconnected_drill_report.live_network_disruption: false`
+- `disconnected_drill_report.final_state: reconciled`
 - `boot_assurance.secure_image_validation: enabled`
 - `boot_assurance.boot_validation: measured-verified`
 - `boot_assurance.validation_failure_action: disable-quarantine`
@@ -255,6 +260,14 @@ starts connected with a ready gateway cache, shows the supported transition
 table, and includes a sample trace through core-link loss, degraded local-only
 service continuity, restore, reconcile, and final `reconciled` state. WorkerBee
 does not run the actual outage/probe drill in this path; that remains Stage 12.
+
+The `disconnected_drill_report` block is the Stage 12 local drill simulation.
+It reuses the Stage 11 autonomy trace to report a simulated core outage,
+degraded local-only continuity, a deterministic local gateway probe, core
+restore, reconciliation, and a final `reconciled` state. It explicitly records
+that no live core mutation or live network disruption occurred. Real outage
+injection, runtime endpoint probing, network disruption, and controller
+reconciliation against a live core remain later work.
 
 The simulation starts one gateway component, one gateway node-agent component,
 and three additional node-agent components. The legacy `node_id` and

@@ -359,6 +359,50 @@ def _assert_ai_max_installer_assurance(contract: dict[str, Any]) -> None:
         ],
         "sample_final_state": "reconciled",
     }
+    assert contract["disconnected_drill_report"] == {
+        "drill_id": "ai-max-disconnected-local-drill-stage12",
+        "name": "AI Max disconnected autonomy local simulation",
+        "version": "stage12-local-v1",
+        "mode": "simulation-only",
+        "live_core_mutation": False,
+        "live_network_disruption": False,
+        "starting_state": "connected",
+        "core_outage_event": "core-link-lost",
+        "degraded_state": "degraded-local-only",
+        "local_service_available": True,
+        "local_probe": {
+            "kind": "simulated-http",
+            "endpoint": "http://gateway.local:18080",
+            "expected_status": 200,
+            "observed_status": 200,
+            "ok": True,
+            "source": "gateway-cache",
+        },
+        "core_restore_event": "core-link-restored",
+        "reconciliation": {
+            "from": "reconciling",
+            "to": "reconciled",
+            "event": "reconcile-completed",
+            "ok": True,
+            "evidence_marker": "stage12-reconcile-marker",
+        },
+        "transition_trace": contract["autonomy_state"]["sample_transition_trace"],
+        "final_state": "reconciled",
+        "cache_summary": {
+            "ready": True,
+            "approved_workload_ref": "inferencecell/default/ai-max-edge-cell",
+            "model_artifact_ref": "models/llama:stage11-local",
+            "last_core_sync": "core-sync-stage11",
+        },
+        "assertions": {
+            "started_connected": True,
+            "degraded_local_only": True,
+            "local_service_continuity": True,
+            "restored_to_reconciling": True,
+            "reconciled": True,
+            "no_live_disruption": True,
+        },
+    }
 
 
 def test_edge_link_runner_rejects_non_containerd_runtime(tmp_path: Path, monkeypatch) -> None:
