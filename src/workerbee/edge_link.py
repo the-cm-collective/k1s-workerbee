@@ -52,6 +52,9 @@ DEFAULT_K1S_PYTHON_IMAGE = "docker.io/library/python:3.12-slim"
 DEFAULT_EDGE_LOCAL_ADDR = "127.0.0.1:18081"
 AI_MAX_EDGE_CELL_PROFILE = "ai-max-edge-cell-v1"
 AI_MAX_EDGE_CELL_NODE_COUNT = 3
+AI_MAX_EDGE_CELL_SIZE = 4
+SUPPORTED_AI_MAX_FABRIC_CELL_COUNTS = {1, 2, 4, 8}
+DEFAULT_EDGE_LAN_SCOPE = "workerbee-lan"
 
 
 @dataclass(slots=True)
@@ -96,6 +99,8 @@ class K1sEdgeLinkInfo:
     edge_local_addr: str = DEFAULT_EDGE_LOCAL_ADDR
     agent_host_port: int | None = None
     cell_node_count: int = 0
+    fabric_cell_count: int = 1
+    lan_scope: str = DEFAULT_EDGE_LAN_SCOPE
     edge_cell_contract: dict[str, Any] = field(default_factory=dict)
     gateway_image: str = ""
     node_image: str = ""
@@ -156,11 +161,16 @@ class K1sEdgeLinkRunner:
         advertise_host: str | None = None,
         edge_local_addr: str | None = None,
         cell_node_count: int = 0,
+        fabric_cell_count: int = 1,
+        lan_scope: str = DEFAULT_EDGE_LAN_SCOPE,
         timeout: float = 180.0,
         build_images: bool = True,
     ) -> dict[str, Any]:
         self._require_containerd()
         cell_nodes = _normalize_cell_node_count(cell_node_count)
+        fabric_cells = _normalize_fabric_cell_count(fabric_cell_count)
+        normalized_lan_scope = _normalize_lan_scope(lan_scope)
+        _validate_edge_cell_fabric_shape(cell_nodes, fabric_cells)
         bootstrap = self._resolve_bootstrap(
             from_microk8s=from_microk8s,
             release=release,
@@ -190,6 +200,8 @@ class K1sEdgeLinkRunner:
             and info.node_id == node
             and info.edge_local_addr == edge_local
             and info.cell_node_count == cell_nodes
+            and info.fabric_cell_count == fabric_cells
+            and info.lan_scope == normalized_lan_scope
             and info.rathole_server_addrs == rathole_addrs
             and self._all_components_running(info)
         ):
@@ -222,6 +234,7 @@ class K1sEdgeLinkRunner:
                 ),
             )
         agent_endpoint = f"http://{host}:{agent_port}"
+        extra_agent_count = (fabric_cells * AI_MAX_EDGE_CELL_SIZE - 1) if cell_nodes else 0
         cell_agent_ports = [
             choose_port(
                 19109 + idx,
@@ -230,7 +243,7 @@ class K1sEdgeLinkRunner:
                 host="0.0.0.0",  # noqa: S104 - external core must reach simulated node agents.
                 reserved=ports,
             )
-            for idx in range(1, cell_nodes + 1)
+            for idx in range(1, extra_agent_count + 1)
         ]
         edge_cell_contract = _edge_cell_contract(
             gateway_node_id=node,
@@ -238,6 +251,8 @@ class K1sEdgeLinkRunner:
             advertise_host=host,
             gateway_agent_port=agent_port,
             cell_agent_ports=cell_agent_ports,
+            fabric_cell_count=fabric_cells,
+            lan_scope=normalized_lan_scope,
         )
         gpu = self._detect_nvidia()
         components = [
@@ -283,10 +298,10 @@ class K1sEdgeLinkRunner:
                     host_port=int(item["agent_host_port"]),
                     gpu=gpu,
                     component=str(item["component"]),
-                    role_label="cell-node",
+                    role_label=str(item["role"]),
                 )
                 for item in edge_cell_contract.get("members") or []
-                if item.get("role") == "cell-node"
+                if item.get("component") != "node"
             ],
         ]
         info = K1sEdgeLinkInfo(
@@ -316,6 +331,8 @@ class K1sEdgeLinkRunner:
             edge_local_addr=edge_local,
             agent_host_port=agent_port,
             cell_node_count=cell_nodes,
+            fabric_cell_count=fabric_cells,
+            lan_scope=normalized_lan_scope,
             edge_cell_contract=edge_cell_contract,
             gateway_image=self.gateway_image,
             node_image=self.node_image,
@@ -1788,6 +1805,51 @@ def _normalize_cell_node_count(value: int) -> int:
     )
 
 
+def _normalize_fabric_cell_count(value: int) -> int:
+    count = 1 if value is None else int(value)
+    if count in SUPPORTED_AI_MAX_FABRIC_CELL_COUNTS:
+        return count
+    raise WorkerBeeError(
+        code="K1S_EDGE_FABRIC_UNSUPPORTED_CELL_COUNT",
+        message="k1s edge-cell fabric simulation supports 1, 2, 4, or 8 cells",
+        details={
+            "fabric_cell_count": count,
+            "supported_fabric_cell_counts": sorted(SUPPORTED_AI_MAX_FABRIC_CELL_COUNTS),
+            "edge_cell_size": AI_MAX_EDGE_CELL_SIZE,
+            "profile": AI_MAX_EDGE_CELL_PROFILE,
+        },
+        remediation="Pass --fabric-cell-count with one of 1, 2, 4, or 8.",
+    )
+
+
+def _normalize_lan_scope(value: str | None) -> str:
+    scope = DEFAULT_EDGE_LAN_SCOPE if value is None else str(value).strip()
+    if scope:
+        return scope
+    raise WorkerBeeError(
+        code="K1S_EDGE_FABRIC_LAN_SCOPE_REQUIRED",
+        message="k1s edge-cell fabric simulation requires a non-empty LAN scope",
+        details={"lan_scope": value, "profile": AI_MAX_EDGE_CELL_PROFILE},
+        remediation="Pass --lan-scope with a stable local discovery scope.",
+    )
+
+
+def _validate_edge_cell_fabric_shape(cell_node_count: int, fabric_cell_count: int) -> None:
+    if fabric_cell_count == 1 or cell_node_count == AI_MAX_EDGE_CELL_NODE_COUNT:
+        return
+    raise WorkerBeeError(
+        code="K1S_EDGE_FABRIC_REQUIRES_EDGE_CELL",
+        message="multi-cell fabric simulation requires the AI Max four-node edge-cell shape",
+        details={
+            "cell_node_count": cell_node_count,
+            "required_cell_node_count": AI_MAX_EDGE_CELL_NODE_COUNT,
+            "fabric_cell_count": fabric_cell_count,
+            "profile": AI_MAX_EDGE_CELL_PROFILE,
+        },
+        remediation="Pass --cell-node-count 3 together with --fabric-cell-count for fabric tests.",
+    )
+
+
 def _edge_cell_contract(
     *,
     gateway_node_id: str,
@@ -1795,51 +1857,122 @@ def _edge_cell_contract(
     advertise_host: str,
     gateway_agent_port: int,
     cell_agent_ports: list[int],
+    fabric_cell_count: int,
+    lan_scope: str,
 ) -> dict[str, Any]:
     if not cell_agent_ports:
         return {}
-    cell_node_ids = [f"{gateway_node_id}-cell-{idx}" for idx in range(1, len(cell_agent_ports) + 1)]
-    members: list[dict[str, Any]] = [
-        {
-            "node_id": gateway_node_id,
-            "role": "gateway",
+    expected_agent_ports = fabric_cell_count * AI_MAX_EDGE_CELL_SIZE - 1
+    if len(cell_agent_ports) != expected_agent_ports:
+        raise WorkerBeeError(
+            code="K1S_EDGE_FABRIC_PORT_ALLOCATION_MISMATCH",
+            message="k1s edge-cell fabric simulation did not allocate the expected node ports",
+            details={
+                "allocated_agent_ports": len(cell_agent_ports),
+                "expected_agent_ports": expected_agent_ports,
+                "fabric_cell_count": fabric_cell_count,
+                "profile": AI_MAX_EDGE_CELL_PROFILE,
+            },
+        )
+
+    members: list[dict[str, Any]] = []
+    cells: list[dict[str, Any]] = []
+    all_cell_node_ids: list[str] = []
+    port_iter = iter(cell_agent_ports)
+
+    def member(
+        *,
+        node_id: str,
+        role: str,
+        component: str,
+        port: int,
+        cell_index: int,
+    ) -> dict[str, Any]:
+        return {
+            "node_id": node_id,
+            "role": role,
             "compute_eligible": True,
-            "component": "node",
-            "agent_host_port": int(gateway_agent_port),
-            "agent_endpoint": f"http://{advertise_host}:{int(gateway_agent_port)}",
+            "component": component,
+            "agent_host_port": int(port),
+            "agent_endpoint": f"http://{advertise_host}:{int(port)}",
+            "cell_index": cell_index,
             "labels": {
-                "role": "gateway",
+                "role": role,
                 "compute_eligible": "true",
                 "site_id": site_id,
+                "lan_scope": lan_scope,
+                "cell_index": str(cell_index),
             },
         }
-    ]
-    for idx, (node_id, port) in enumerate(
-        zip(cell_node_ids, cell_agent_ports, strict=True),
-        start=1,
-    ):
-        members.append(
+
+    for cell_index in range(1, fabric_cell_count + 1):
+        cell_gateway_node_id = (
+            gateway_node_id if cell_index == 1 else f"{gateway_node_id}-gateway-{cell_index}"
+        )
+        gateway_component = "node" if cell_index == 1 else f"cell-{cell_index}-gateway"
+        gateway_port = gateway_agent_port if cell_index == 1 else next(port_iter)
+        cell_members = [
+            member(
+                node_id=cell_gateway_node_id,
+                role="gateway",
+                component=gateway_component,
+                port=gateway_port,
+                cell_index=cell_index,
+            )
+        ]
+        cell_node_ids: list[str] = []
+        for node_index in range(1, AI_MAX_EDGE_CELL_NODE_COUNT + 1):
+            cell_node_id = (
+                f"{gateway_node_id}-cell-{node_index}"
+                if cell_index == 1
+                else f"{cell_gateway_node_id}-cell-{node_index}"
+            )
+            component = (
+                f"cell-node-{node_index}"
+                if cell_index == 1
+                else f"cell-{cell_index}-node-{node_index}"
+            )
+            cell_node_ids.append(cell_node_id)
+            all_cell_node_ids.append(cell_node_id)
+            cell_members.append(
+                member(
+                    node_id=cell_node_id,
+                    role="cell-node",
+                    component=component,
+                    port=next(port_iter),
+                    cell_index=cell_index,
+                )
+            )
+        members.extend(cell_members)
+        cells.append(
             {
-                "node_id": node_id,
-                "role": "cell-node",
-                "compute_eligible": True,
-                "component": f"cell-node-{idx}",
-                "agent_host_port": int(port),
-                "agent_endpoint": f"http://{advertise_host}:{int(port)}",
-                "labels": {
-                    "role": "cell-node",
-                    "compute_eligible": "true",
-                    "site_id": site_id,
-                },
+                "cell_index": cell_index,
+                "gateway_node_id": cell_gateway_node_id,
+                "cell_node_ids": cell_node_ids,
+                "compute_node_ids": [item["node_id"] for item in cell_members],
             }
         )
+
     compute_node_ids = [member["node_id"] for member in members]
+    gateway_peer_ids = [cell["gateway_node_id"] for cell in cells[1:]]
     return {
         "profile": AI_MAX_EDGE_CELL_PROFILE,
-        "size": len(compute_node_ids),
+        "size": AI_MAX_EDGE_CELL_SIZE,
+        "fabric_cell_count": fabric_cell_count,
+        "fabric_size": len(compute_node_ids),
+        "lan_scope": lan_scope,
         "gateway_node_id": gateway_node_id,
-        "cell_node_ids": cell_node_ids,
+        "gateway_peer_ids": gateway_peer_ids,
+        "cell_node_ids": cells[0]["cell_node_ids"],
+        "all_cell_node_ids": all_cell_node_ids,
         "compute_node_ids": compute_node_ids,
+        "gateway_discovery": {
+            "mode": "lan-local",
+            "fabric_cell_count": fabric_cell_count,
+            "lan_scope": lan_scope,
+            "gateway_peer_ids": gateway_peer_ids,
+        },
+        "cells": cells,
         "members": members,
     }
 

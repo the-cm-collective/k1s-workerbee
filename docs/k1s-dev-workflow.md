@@ -193,6 +193,10 @@ The resulting WorkerBee state exposes an `edge_cell_contract` block with:
 
 - `profile: ai-max-edge-cell-v1`
 - `size: 4`
+- `fabric_cell_count: 1`
+- `fabric_size: 4`
+- `gateway_discovery.mode: lan-local`
+- `lan_scope: workerbee-lan`
 - `gateway_node_id: workerbee-edge-node`
 - three deterministic cell node IDs:
   `workerbee-edge-node-cell-1` through `workerbee-edge-node-cell-3`
@@ -204,6 +208,28 @@ The simulation starts one gateway component, one gateway node-agent component,
 and three additional node-agent components. The legacy `node_id` and
 `agent_endpoint` fields still refer to the gateway compute node so existing
 edge-link consumers continue to work.
+
+To simulate a local LAN fabric without requiring a real LAN, keep the same
+four-node cell shape and add a supported fabric size:
+
+```bash
+scripts/dev/wb-containerd --project wb014 edge-link start \
+  --k1s-root ../k1s \
+  --from-microk8s \
+  --release k1s-dev-a \
+  --namespace k1s-dev-a \
+  --site-id workerbee-edge \
+  --node-id workerbee-edge-node \
+  --cell-node-count 3 \
+  --fabric-cell-count 4 \
+  --lan-scope floor-a
+```
+
+`--fabric-cell-count` accepts `1`, `2`, `4`, or `8`. WorkerBee records
+deterministic peer gateway IDs, per-cell node IDs, `gateway_peer_ids`, and
+`compute_node_ids` across the simulated fabric. The simulator metadata is a
+contract fixture for k1s discovery and scheduling tests; it does not perform
+real LAN discovery or mutate an external cluster by itself.
 
 Stop and optionally purge the short-lived link when the test is complete:
 

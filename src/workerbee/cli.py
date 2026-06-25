@@ -74,6 +74,17 @@ def _add_edge_link_arguments(parser: argparse.ArgumentParser) -> None:
         help="Opt into AI Max edge-cell simulation with exactly 3 additional cell nodes",
     )
     parser.add_argument(
+        "--fabric-cell-count",
+        type=int,
+        default=1,
+        help="Simulate 1, 2, 4, or 8 AI Max edge cells on the same local LAN scope",
+    )
+    parser.add_argument(
+        "--lan-scope",
+        default="workerbee-lan",
+        help="Stable simulated LAN discovery scope for edge-cell fabric metadata",
+    )
+    parser.add_argument(
         "--bundle",
         dest="bundle_path",
         type=Path,
@@ -115,6 +126,8 @@ def _edge_link_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "site_id": getattr(args, "site_id", "workerbee-edge"),
         "node_id": getattr(args, "node_id", "workerbee-edge-node"),
         "cell_node_count": int(getattr(args, "cell_node_count", 0) or 0),
+        "fabric_cell_count": int(getattr(args, "fabric_cell_count", 1) or 1),
+        "lan_scope": getattr(args, "lan_scope", "workerbee-lan"),
         "bundle_path": getattr(args, "bundle_path", None),
         "controller_url": getattr(args, "controller_url", None),
         "agent_token": getattr(args, "agent_token", None),

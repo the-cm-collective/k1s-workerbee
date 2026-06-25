@@ -151,6 +151,8 @@ def test_edge_link_start_writes_masked_state_and_container_commands(
     assert edge["bootstrap"]["nats_leaf_url"] == MASKED_VALUE
     assert edge["bootstrap"]["suggested_edge_env"]["K1S_NATS_LEAF_URL"] == MASKED_VALUE
     assert edge["cell_node_count"] == 0
+    assert edge["fabric_cell_count"] == 1
+    assert edge["lan_scope"] == "workerbee-lan"
     assert edge["edge_cell_contract"] == {}
     assert edge["agent_endpoint"] == "http://192.168.29.111:19109"
     assert edge["edge_local_addr"] == "192.168.29.111:8081"
@@ -242,76 +244,56 @@ def test_edge_link_start_can_simulate_ai_max_edge_cell(
     assert edge["node_id"] == "edge-node-1"
     assert edge["agent_endpoint"] == "http://192.168.29.111:19109"
     assert edge["cell_node_count"] == 3
-    assert edge["edge_cell_contract"] == {
-        "profile": "ai-max-edge-cell-v1",
-        "size": 4,
-        "gateway_node_id": "edge-node-1",
-        "cell_node_ids": [
-            "edge-node-1-cell-1",
-            "edge-node-1-cell-2",
-            "edge-node-1-cell-3",
-        ],
-        "compute_node_ids": [
-            "edge-node-1",
-            "edge-node-1-cell-1",
-            "edge-node-1-cell-2",
-            "edge-node-1-cell-3",
-        ],
-        "members": [
-            {
-                "node_id": "edge-node-1",
-                "role": "gateway",
-                "compute_eligible": True,
-                "component": "node",
-                "agent_host_port": 19109,
-                "agent_endpoint": "http://192.168.29.111:19109",
-                "labels": {
-                    "role": "gateway",
-                    "compute_eligible": "true",
-                    "site_id": "workerbee-edge",
-                },
-            },
-            {
-                "node_id": "edge-node-1-cell-1",
-                "role": "cell-node",
-                "compute_eligible": True,
-                "component": "cell-node-1",
-                "agent_host_port": 19110,
-                "agent_endpoint": "http://192.168.29.111:19110",
-                "labels": {
-                    "role": "cell-node",
-                    "compute_eligible": "true",
-                    "site_id": "workerbee-edge",
-                },
-            },
-            {
-                "node_id": "edge-node-1-cell-2",
-                "role": "cell-node",
-                "compute_eligible": True,
-                "component": "cell-node-2",
-                "agent_host_port": 19111,
-                "agent_endpoint": "http://192.168.29.111:19111",
-                "labels": {
-                    "role": "cell-node",
-                    "compute_eligible": "true",
-                    "site_id": "workerbee-edge",
-                },
-            },
-            {
-                "node_id": "edge-node-1-cell-3",
-                "role": "cell-node",
-                "compute_eligible": True,
-                "component": "cell-node-3",
-                "agent_host_port": 19112,
-                "agent_endpoint": "http://192.168.29.111:19112",
-                "labels": {
-                    "role": "cell-node",
-                    "compute_eligible": "true",
-                    "site_id": "workerbee-edge",
-                },
-            },
-        ],
+    assert edge["fabric_cell_count"] == 1
+    assert edge["lan_scope"] == "workerbee-lan"
+    contract = edge["edge_cell_contract"]
+    assert contract["profile"] == "ai-max-edge-cell-v1"
+    assert contract["size"] == 4
+    assert contract["fabric_cell_count"] == 1
+    assert contract["fabric_size"] == 4
+    assert contract["gateway_node_id"] == "edge-node-1"
+    assert contract["gateway_peer_ids"] == []
+    assert contract["cell_node_ids"] == [
+        "edge-node-1-cell-1",
+        "edge-node-1-cell-2",
+        "edge-node-1-cell-3",
+    ]
+    assert contract["compute_node_ids"] == [
+        "edge-node-1",
+        "edge-node-1-cell-1",
+        "edge-node-1-cell-2",
+        "edge-node-1-cell-3",
+    ]
+    assert contract["gateway_discovery"] == {
+        "mode": "lan-local",
+        "fabric_cell_count": 1,
+        "lan_scope": "workerbee-lan",
+        "gateway_peer_ids": [],
     }
+    assert contract["cells"] == [
+        {
+            "cell_index": 1,
+            "gateway_node_id": "edge-node-1",
+            "cell_node_ids": [
+                "edge-node-1-cell-1",
+                "edge-node-1-cell-2",
+                "edge-node-1-cell-3",
+            ],
+            "compute_node_ids": [
+                "edge-node-1",
+                "edge-node-1-cell-1",
+                "edge-node-1-cell-2",
+                "edge-node-1-cell-3",
+            ],
+        }
+    ]
+    assert [member["role"] for member in contract["members"]] == [
+        "gateway",
+        "cell-node",
+        "cell-node",
+        "cell-node",
+    ]
+    assert all(member["compute_eligible"] is True for member in contract["members"])
 
     run_commands = [cmd for cmd in commands if "run" in cmd]
     component_names = [cmd[cmd.index("--name") + 1] for cmd in run_commands]
@@ -343,6 +325,159 @@ def test_edge_link_start_can_simulate_ai_max_edge_cell(
         assert any("AE_NODE_LABELS=role=cell-node,compute_eligible=true" in item for item in cmd)
 
 
+def test_edge_link_start_can_simulate_ai_max_multi_cell_fabric(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("workerbee.edge_link.resolve_runtime", lambda _runtime: "containerd")
+    monkeypatch.setattr(K1sEdgeLinkRunner, "_infer_advertise_host", lambda _self: "192.168.29.111")
+    monkeypatch.setattr(K1sEdgeLinkRunner, "_wait_ready", lambda *_args, **_kwargs: {"ok": True})
+    monkeypatch.setattr(
+        "workerbee.edge_link.choose_port",
+        lambda preferred, **_kwargs: int(preferred),
+    )
+    monkeypatch.setattr(K1sEdgeLinkRunner, "_detect_nvidia", lambda _self: {"present": False})
+
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):  # noqa: ANN001
+        commands.append([str(part) for part in cmd])
+        if "network" in cmd and "inspect" in cmd:
+            return subprocess.CompletedProcess(cmd, 1, "", "missing")
+        if "run" in cmd:
+            name = cmd[cmd.index("--name") + 1]
+            return subprocess.CompletedProcess(cmd, 0, f"{name}-id\n", "")
+        if "ps" in cmd:
+            name_filters = [
+                str(cmd[index + 1]).removeprefix("name=")
+                for index, value in enumerate(cmd[:-1])
+                if value == "--filter" and str(cmd[index + 1]).startswith("name=")
+            ]
+            return subprocess.CompletedProcess(cmd, 0, "\n".join(name_filters), "")
+        return subprocess.CompletedProcess(cmd, 0, "ok\n", "")
+
+    monkeypatch.setattr("workerbee.edge_link.subprocess.run", fake_run)
+
+    k1s_root = tmp_path / "k1s"
+    (k1s_root / "ops" / "dev").mkdir(parents=True)
+    (k1s_root / "ops" / "images").mkdir(parents=True)
+
+    runner = K1sEdgeLinkRunner(
+        project="Edge Demo",
+        state_root=tmp_path,
+        runtime="containerd",
+        k1s_root=k1s_root,
+    )
+    result = runner.start(
+        bundle=_bundle(),
+        node_id="edge-node-1",
+        cell_node_count=3,
+        fabric_cell_count=2,
+        lan_scope="floor-a",
+        timeout=0.01,
+        build_images=False,
+    )
+
+    assert result["ok"] is True
+    edge = result["edge_link"]
+    assert edge["cell_node_count"] == 3
+    assert edge["fabric_cell_count"] == 2
+    assert edge["lan_scope"] == "floor-a"
+    contract = edge["edge_cell_contract"]
+    assert contract["profile"] == "ai-max-edge-cell-v1"
+    assert contract["size"] == 4
+    assert contract["fabric_cell_count"] == 2
+    assert contract["fabric_size"] == 8
+    assert contract["gateway_node_id"] == "edge-node-1"
+    assert contract["gateway_peer_ids"] == ["edge-node-1-gateway-2"]
+    assert contract["gateway_discovery"] == {
+        "mode": "lan-local",
+        "fabric_cell_count": 2,
+        "lan_scope": "floor-a",
+        "gateway_peer_ids": ["edge-node-1-gateway-2"],
+    }
+    assert contract["cell_node_ids"] == [
+        "edge-node-1-cell-1",
+        "edge-node-1-cell-2",
+        "edge-node-1-cell-3",
+    ]
+    assert contract["all_cell_node_ids"] == [
+        "edge-node-1-cell-1",
+        "edge-node-1-cell-2",
+        "edge-node-1-cell-3",
+        "edge-node-1-gateway-2-cell-1",
+        "edge-node-1-gateway-2-cell-2",
+        "edge-node-1-gateway-2-cell-3",
+    ]
+    assert contract["compute_node_ids"] == [
+        "edge-node-1",
+        "edge-node-1-cell-1",
+        "edge-node-1-cell-2",
+        "edge-node-1-cell-3",
+        "edge-node-1-gateway-2",
+        "edge-node-1-gateway-2-cell-1",
+        "edge-node-1-gateway-2-cell-2",
+        "edge-node-1-gateway-2-cell-3",
+    ]
+    assert len(contract["cells"]) == 2
+    assert contract["cells"][1] == {
+        "cell_index": 2,
+        "gateway_node_id": "edge-node-1-gateway-2",
+        "cell_node_ids": [
+            "edge-node-1-gateway-2-cell-1",
+            "edge-node-1-gateway-2-cell-2",
+            "edge-node-1-gateway-2-cell-3",
+        ],
+        "compute_node_ids": [
+            "edge-node-1-gateway-2",
+            "edge-node-1-gateway-2-cell-1",
+            "edge-node-1-gateway-2-cell-2",
+            "edge-node-1-gateway-2-cell-3",
+        ],
+    }
+    roles = [member["role"] for member in contract["members"]]
+    assert roles.count("gateway") == 2
+    assert roles.count("cell-node") == 6
+    assert all(member["compute_eligible"] is True for member in contract["members"])
+    assert [member["agent_host_port"] for member in contract["members"]] == [
+        19109,
+        19110,
+        19111,
+        19112,
+        19113,
+        19114,
+        19115,
+        19116,
+    ]
+
+    run_commands = [cmd for cmd in commands if "run" in cmd]
+    component_names = [cmd[cmd.index("--name") + 1] for cmd in run_commands]
+    assert [name.rsplit("k1s-edge-link-", 1)[-1] for name in component_names] == [
+        "edge-nats",
+        "rathole",
+        "gateway",
+        "node",
+        "cell-node-1",
+        "cell-node-2",
+        "cell-node-3",
+        "cell-2-gateway",
+        "cell-2-node-1",
+        "cell-2-node-2",
+        "cell-2-node-3",
+    ]
+    node_commands = [
+        cmd
+        for cmd in run_commands
+        if cmd[cmd.index("--name") + 1].rsplit("k1s-edge-link-", 1)[-1]
+        not in {"edge-nats", "rathole", "gateway"}
+    ]
+    assert any(
+        "AE_NODE_LABELS=role=gateway,compute_eligible=true" in item for item in node_commands[4]
+    )
+    for cmd in node_commands[1:4] + node_commands[5:]:
+        assert any("AE_NODE_LABELS=role=cell-node,compute_eligible=true" in item for item in cmd)
+
+
 def test_edge_link_rejects_unsupported_cell_node_count(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr("workerbee.edge_link.resolve_runtime", lambda _runtime: "containerd")
     runner = K1sEdgeLinkRunner(project="demo", state_root=tmp_path, runtime="containerd")
@@ -357,6 +492,64 @@ def test_edge_link_rejects_unsupported_cell_node_count(tmp_path: Path, monkeypat
 
     assert exc.value.code == "K1S_EDGE_CELL_UNSUPPORTED_SIZE"
     assert exc.value.details["supported_cell_node_counts"] == [0, 3]
+
+
+@pytest.mark.parametrize("fabric_cell_count", [0, -1, 3])
+def test_edge_link_rejects_unsupported_fabric_cell_count(
+    tmp_path: Path,
+    monkeypatch,
+    fabric_cell_count: int,
+) -> None:
+    monkeypatch.setattr("workerbee.edge_link.resolve_runtime", lambda _runtime: "containerd")
+    runner = K1sEdgeLinkRunner(project="demo", state_root=tmp_path, runtime="containerd")
+
+    with pytest.raises(WorkerBeeError) as exc:
+        runner.start(
+            bundle=_bundle(),
+            advertise_host="192.168.29.111",
+            cell_node_count=3,
+            fabric_cell_count=fabric_cell_count,
+            build_images=False,
+        )
+
+    assert exc.value.code == "K1S_EDGE_FABRIC_UNSUPPORTED_CELL_COUNT"
+    assert exc.value.details["supported_fabric_cell_counts"] == [1, 2, 4, 8]
+
+
+def test_edge_link_rejects_multi_cell_fabric_without_edge_cell(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr("workerbee.edge_link.resolve_runtime", lambda _runtime: "containerd")
+    runner = K1sEdgeLinkRunner(project="demo", state_root=tmp_path, runtime="containerd")
+
+    with pytest.raises(WorkerBeeError) as exc:
+        runner.start(
+            bundle=_bundle(),
+            advertise_host="192.168.29.111",
+            fabric_cell_count=2,
+            build_images=False,
+        )
+
+    assert exc.value.code == "K1S_EDGE_FABRIC_REQUIRES_EDGE_CELL"
+    assert exc.value.details["required_cell_node_count"] == 3
+
+
+def test_edge_link_rejects_blank_lan_scope(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr("workerbee.edge_link.resolve_runtime", lambda _runtime: "containerd")
+    runner = K1sEdgeLinkRunner(project="demo", state_root=tmp_path, runtime="containerd")
+
+    with pytest.raises(WorkerBeeError) as exc:
+        runner.start(
+            bundle=_bundle(),
+            advertise_host="192.168.29.111",
+            cell_node_count=3,
+            fabric_cell_count=2,
+            lan_scope=" ",
+            build_images=False,
+        )
+
+    assert exc.value.code == "K1S_EDGE_FABRIC_LAN_SCOPE_REQUIRED"
 
 
 def test_edge_link_node_check_requires_fresh_heartbeat(tmp_path: Path, monkeypatch) -> None:
@@ -423,6 +616,8 @@ def test_daemon_profile_start_delegates_edge_link(tmp_path: Path, monkeypatch) -
         timeout=12,
         build_images=False,
         cell_node_count=3,
+        fabric_cell_count=2,
+        lan_scope="floor-a",
     )
 
     assert result["ok"] is True
@@ -431,10 +626,25 @@ def test_daemon_profile_start_delegates_edge_link(tmp_path: Path, monkeypatch) -
     assert calls[0]["timeout"] == 12
     assert calls[0]["build_images"] is False
     assert calls[0]["cell_node_count"] == 3
+    assert calls[0]["fabric_cell_count"] == 2
+    assert calls[0]["lan_scope"] == "floor-a"
 
 
-def test_cli_edge_link_kwargs_include_cell_node_count() -> None:
+def test_cli_edge_link_kwargs_include_edge_cell_fabric_options() -> None:
     parser = build_parser()
-    args = parser.parse_args(["edge-link", "start", "--cell-node-count", "3"])
+    args = parser.parse_args(
+        [
+            "edge-link",
+            "start",
+            "--cell-node-count",
+            "3",
+            "--fabric-cell-count",
+            "2",
+            "--lan-scope",
+            "floor-a",
+        ]
+    )
 
     assert _edge_link_kwargs(args)["cell_node_count"] == 3
+    assert _edge_link_kwargs(args)["fabric_cell_count"] == 2
+    assert _edge_link_kwargs(args)["lan_scope"] == "floor-a"
