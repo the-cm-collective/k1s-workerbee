@@ -22,6 +22,7 @@ from workerbee.contract import WorkerBeeError
 WORKERBEE_LABEL = "workerbee.managed=true"
 CONTAINERD_RUNTIME = "containerd"
 CONTAINERD_RESERVED_NAMESPACES = frozenset({"ae", "k8s.io", "moby", "default"})
+CONTAINERD_NAMESPACE_MAX_LENGTH = 76
 CONTAINERD_REQUIRED_CNI_PLUGINS = ("bridge", "host-local", "loopback", "portmap")
 PODMAN_COMPATIBLE_CNI_VERSION = "0.4.0"
 MICROK8S_ROOT = Path("/var/snap/microk8s")
@@ -693,7 +694,21 @@ def containerd_namespace(
     state_hash = _state_hash(state_root)
     if system or not project:
         return f"workerbee-{state_hash}-system"
-    return f"workerbee-{state_hash}-{project_slug_for_runtime(project)}"
+    prefix = f"workerbee-{state_hash}-"
+    name = f"{prefix}{project_slug_for_runtime(project)}"
+    return _bounded_containerd_namespace(name, prefix=prefix)
+
+
+def _bounded_containerd_namespace(name: str, *, prefix: str) -> str:
+    """Keep WorkerBee containerd namespaces within nerdctl's identifier limit."""
+    if len(name) <= CONTAINERD_NAMESPACE_MAX_LENGTH:
+        return name
+    digest = hashlib.blake2s(name.encode("utf-8"), digest_size=6).hexdigest()
+    suffix = f"-{digest}"
+    readable = name[len(prefix) :] if name.startswith(prefix) else name
+    budget = CONTAINERD_NAMESPACE_MAX_LENGTH - len(prefix) - len(suffix)
+    shortened = readable[: max(budget, 1)].rstrip("-")
+    return f"{prefix}{shortened}{suffix}"
 
 
 def containerd_network_name(state_root: Path, project: str) -> str:

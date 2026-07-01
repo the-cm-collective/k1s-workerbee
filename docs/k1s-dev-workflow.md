@@ -66,8 +66,11 @@ scripts/dev/wb-containerd mcp-status
 ```
 
 For nested k1s profile work, use a short explicit stable project and k1s root.
-Keep the project around 12 characters or fewer, such as `wb014` or `k1sdev`,
-so generated profile DNS names and container labels stay valid:
+Short names such as `wb014` or `k1sdev` keep generated profile DNS names and
+container labels easier to read. WorkerBee bounds direct-containerd namespaces
+with a stable readable prefix plus digest when a long project name would exceed
+the runtime identifier limit, so the same project keeps the same runtime
+namespace across restarts without using a too-long nerdctl namespace:
 
 ```bash
 scripts/dev/wb-containerd --project wb014 profile start \

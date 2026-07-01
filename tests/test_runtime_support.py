@@ -9,6 +9,7 @@ import pytest
 
 from workerbee.contract import WorkerBeeError
 from workerbee.runtime_support import (
+    CONTAINERD_NAMESPACE_MAX_LENGTH,
     PODMAN_COMPATIBLE_CNI_VERSION,
     build_image_with_runtime,
     cleanup_runtime,
@@ -68,6 +69,31 @@ def test_containerd_runtime_scopes_project_namespace_and_data_root(tmp_path: Pat
     assert containerd_network_name(tmp_path, "My App") == f"workerbee-{state_hash}-my-app"
     assert containerd_network_subnet(tmp_path, "My App").startswith("10.")
     assert containerd_network_subnet(tmp_path, "My App").endswith(".0/24")
+
+
+def test_containerd_namespace_bounds_long_project_names(tmp_path: Path) -> None:
+    project = "k1s-workerbee-private-cloud-saas-private-mirror-bd7f538c73"
+    state_hash = _state_hash(tmp_path)
+
+    namespace = containerd_namespace(tmp_path, project)
+
+    assert len(namespace) <= CONTAINERD_NAMESPACE_MAX_LENGTH
+    assert namespace.startswith(f"workerbee-{state_hash}-k1s-workerbee-private")
+    assert namespace == containerd_namespace(tmp_path, project)
+    assert namespace != f"workerbee-{state_hash}-{project}"
+
+
+def test_containerd_namespace_keeps_long_project_names_collision_resistant(
+    tmp_path: Path,
+) -> None:
+    base = "k1s-workerbee-private-cloud-saas-private-mirror-bd7f538c73"
+
+    first = containerd_namespace(tmp_path, base)
+    second = containerd_namespace(tmp_path, f"{base}-variant")
+
+    assert first != second
+    assert len(first) <= CONTAINERD_NAMESPACE_MAX_LENGTH
+    assert len(second) <= CONTAINERD_NAMESPACE_MAX_LENGTH
 
 
 def test_containerd_default_bridge_rewrites_stale_nerdctl0_config(tmp_path: Path) -> None:
