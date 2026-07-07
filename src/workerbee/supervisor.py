@@ -1399,6 +1399,7 @@ https://{api_host} {{
                 "AE_APISHIM_DB": str(self.state_dir / "apishim.db"),
                 "AE_APISHIM_SERVER": info.apishim_url,
                 "AE_APISHIM_PUBLIC_BASE": self._public_apishim_base(info),
+                "AE_APISHIM_INSECURE": "1",
                 "AE_APISHIM_TLS_CERT": str(self.state_dir / "apishim.crt"),
                 "AE_APISHIM_TLS_KEY": str(self.state_dir / "apishim.key"),
                 "AE_APISHIM_CA_BUNDLE": str(self.state_dir / "apishim.ca.crt"),
