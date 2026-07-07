@@ -1061,7 +1061,7 @@ class K1sProfileRunner:
 
     def _profile_apishim_public_base(self, apishim_port: int) -> str:
         if self.ingress:
-            return self.ingress.url(self.ingress.host("k1s"), "/").rstrip("/")
+            return self.ingress.url(self.ingress.host("k1s-api"), "/").rstrip("/")
         return f"http://127.0.0.1:{int(apishim_port)}"
 
     def _run_component(

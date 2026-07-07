@@ -1433,6 +1433,13 @@ https://{api_host} {{
                 }
             )
         if self.ingress:
+            workload_host_alias = str(
+                (self.ingress.dns or {}).get("answer")
+                or self.ingress.bind_host
+                or ""
+            ).strip()
+            if workload_host_alias in {"", "0.0.0.0", "::"}:
+                workload_host_alias = ""
             env.update(
                 {
                     "AE_CADDY_SITES": str(self.ingress.sites_dir),
@@ -1443,6 +1450,8 @@ https://{api_host} {{
                     "AE_CADDY_RELOAD_TIMEOUT": "10",
                 }
             )
+            if workload_host_alias:
+                env["AE_WORKLOAD_INGRESS_HOST_ALIAS"] = workload_host_alias
         if info.runtime == "podman":
             env["AE_PODMAN_NETWORK"] = info.network
         elif info.runtime == "docker":
@@ -1455,7 +1464,7 @@ https://{api_host} {{
                 controller_port=info.controller_port,
                 apishim_port=info.apishim_port,
             )
-            public = urls.get("controller") or urls.get("dashboard") or urls.get("api")
+            public = urls.get("apishim") or urls.get("api") or urls.get("controller")
             if public:
                 return public.rstrip("/")
         return info.apishim_url.rstrip("/")
