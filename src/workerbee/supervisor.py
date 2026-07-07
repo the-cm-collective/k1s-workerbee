@@ -1396,6 +1396,8 @@ https://{api_host} {{
                 "AE_APISHIM_ENABLE": "1",
                 "AE_APISHIM_TOKEN": info.apishim_token,
                 "AE_APISHIM_READ_TOKEN": info.read_token,
+                "AE_APISHIM_RBAC": "1",
+                "AE_APISHIM_RBAC_EVAL": "1",
                 "AE_APISHIM_DB": str(self.state_dir / "apishim.db"),
                 "AE_APISHIM_SERVER": info.apishim_url,
                 "AE_APISHIM_PUBLIC_BASE": self._public_apishim_base(info),

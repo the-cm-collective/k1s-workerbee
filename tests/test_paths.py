@@ -249,6 +249,8 @@ def test_supervisor_stack_ingress_publishes_dashboard_and_apishim(
     )
     assert env["AE_CADDY_PREFER_HOST_PORT_UPSTREAMS"] == "1"
     assert env["AE_APISHIM_PUBLIC_BASE"] == "https://k1s-api.demo.workerbee.localhost:19443"
+    assert env["AE_APISHIM_RBAC"] == "1"
+    assert env["AE_APISHIM_RBAC_EVAL"] == "1"
     assert env["AE_WORKLOAD_INGRESS_HOST_ALIAS"] == "127.0.0.1"
     assert sup._stack_requires_ingress_restart(refreshed) is False  # noqa: SLF001
 

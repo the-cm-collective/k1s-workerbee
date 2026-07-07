@@ -406,8 +406,20 @@ def test_profile_controller_dashboard_uses_public_apishim_ingress(
         for component in result["profile"]["components"]
         if component["role"] == "apishim"
     )
+    apishim_cmd = next(
+        cmd
+        for cmd in commands
+        if "run" in cmd and cmd[cmd.index("--name") + 1].endswith("-apishim")
+    )
+    apishim_env = {
+        apishim_cmd[index + 1].split("=", 1)[0]: apishim_cmd[index + 1].split("=", 1)[1]
+        for index, value in enumerate(apishim_cmd[:-1])
+        if value == "-e"
+    }
     assert env["AE_APISHIM_SERVER"] == f"http://{apishim['name']}:8445"
     assert env["AE_APISHIM_PUBLIC_BASE"] == "https://k1s-api.demo.workerbee.localhost:19443"
+    assert apishim_env["AE_APISHIM_RBAC"] == "1"
+    assert apishim_env["AE_APISHIM_RBAC_EVAL"] == "1"
     assert env["AE_DASHBOARD_BOOTSTRAP_TOKEN"] == env["AE_API_ADMIN_TOKEN"]
     assert env["AE_CADDY_PREFER_HOST_PORT_UPSTREAMS"] == "1"
 

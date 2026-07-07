@@ -958,6 +958,8 @@ class K1sProfileRunner:
                 "AE_APISHIM_ALLOW_ANON": "1",
                 "AE_APISHIM_TOKEN": token,
                 "AE_APISHIM_READ_TOKEN": token,
+                "AE_APISHIM_RBAC": "1",
+                "AE_APISHIM_RBAC_EVAL": "1",
                 "AE_APISHIM_DB": str(self._profile_dir(descriptor.name) / "state" / "apishim.db"),
                 "AE_APISHIM_RUNTIME": CONTAINERD_RUNTIME,
             }
