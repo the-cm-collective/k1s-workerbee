@@ -35,7 +35,13 @@ NATIVE_K1S = "native-k1s"
 KUBERNETES = "kubernetes"
 K8S_WORKLOAD_KINDS = {"Deployment", "StatefulSet", "DaemonSet", "Job"}
 K8S_NETWORK_KINDS = {"Service", "Ingress"}
-K8S_SUPPORTED_KINDS = K8S_WORKLOAD_KINDS | K8S_NETWORK_KINDS
+K8S_NAMESPACED_RBAC_KINDS = {"ServiceAccount", "Role", "RoleBinding"}
+K8S_SUPPORTED_KINDS = K8S_WORKLOAD_KINDS | K8S_NETWORK_KINDS | K8S_NAMESPACED_RBAC_KINDS
+K8S_RBAC_API_VERSIONS = {
+    "ServiceAccount": "v1",
+    "Role": "rbac.authorization.k8s.io/v1",
+    "RoleBinding": "rbac.authorization.k8s.io/v1",
+}
 CADDY_SITE_LABEL_RE = re.compile(r"^\s*([^#\s{][^{]*)\{")
 
 
@@ -2017,22 +2023,80 @@ def _validate_k8s_documents(path: Path, docs: list[dict[str, Any]]) -> list[dict
                 "code": "K8S_UNSUPPORTED_KIND",
                 "path": str(path),
                 "message": (
-                    "WorkerBee v0.1 Kubernetes apply supports exactly one "
-                    "Deployment/StatefulSet/DaemonSet/Job plus optional Service/Ingress"
+                    "WorkerBee v0.1 Kubernetes apply supports at most one "
+                    "Deployment/StatefulSet/DaemonSet/Job plus optional "
+                    "Service/Ingress/ServiceAccount/Role/RoleBinding"
                 ),
                 "kinds": unsupported,
             }
         )
+    for doc in docs:
+        kind = _kind(doc)
+        if kind not in K8S_NAMESPACED_RBAC_KINDS:
+            continue
+        expected_api = K8S_RBAC_API_VERSIONS[kind]
+        if _api_version(doc) != expected_api:
+            findings.append(
+                {
+                    "level": "error",
+                    "code": "K8S_RBAC_API_VERSION_UNSUPPORTED",
+                    "path": str(path),
+                    "kind": kind,
+                    "apiVersion": _api_version(doc),
+                    "expected_apiVersion": expected_api,
+                    "message": (
+                        f"{kind} must use apiVersion {expected_api} for WorkerBee "
+                        "practical Kubernetes apply."
+                    ),
+                }
+            )
+        metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+        namespace = str(metadata.get("namespace") or "").strip()
+        if not namespace:
+            findings.append(
+                {
+                    "level": "error",
+                    "code": "K8S_RBAC_NAMESPACE_REQUIRED",
+                    "path": str(path),
+                    "kind": kind,
+                    "name": str(metadata.get("name") or "<unnamed>"),
+                    "message": (
+                        "WorkerBee only supports namespace-scoped Kubernetes RBAC here; "
+                        f"{kind} must set metadata.namespace."
+                    ),
+                }
+            )
+        if kind != "RoleBinding":
+            continue
+        role_ref = doc.get("roleRef") if isinstance(doc.get("roleRef"), dict) else {}
+        role_ref_kind = str(role_ref.get("kind") or "")
+        if role_ref_kind != "Role":
+            findings.append(
+                {
+                    "level": "error",
+                    "code": "K8S_ROLEBINDING_ROLE_REF_UNSUPPORTED",
+                    "path": str(path),
+                    "kind": kind,
+                    "name": str(metadata.get("name") or "<unnamed>"),
+                    "roleRef_kind": role_ref_kind or "<missing>",
+                    "message": (
+                        "WorkerBee only supports RoleBinding resources that bind a "
+                        "namespace-scoped Role."
+                    ),
+                }
+            )
     workloads = [doc for doc in docs if _kind(doc) in K8S_WORKLOAD_KINDS]
-    if len(workloads) != 1:
+    rbac_only = bool(docs) and all(_kind(doc) in K8S_NAMESPACED_RBAC_KINDS for doc in docs)
+    if len(workloads) > 1 or (not workloads and not rbac_only):
         findings.append(
             {
                 "level": "error",
                 "code": "K8S_ONE_WORKLOAD_REQUIRED",
                 "path": str(path),
                 "message": (
-                    "Kubernetes input must keep one workload and its matching Service/Ingress "
-                    "documents in the same file"
+                    "Kubernetes input must keep one workload and its matching "
+                    "Service/Ingress/RBAC documents in the same file, or contain only "
+                    "namespace-scoped ServiceAccount/Role/RoleBinding resources"
                 ),
                 "workload_count": len(workloads),
             }

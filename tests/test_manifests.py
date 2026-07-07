@@ -367,6 +367,164 @@ spec:
     assert result["manifest_details"][0]["supported_export_formats"] == ["k8s", "helm"]
 
 
+def test_validate_kubernetes_stage_accepts_namespaced_rbac_bundle(tmp_path: Path) -> None:
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    (manifests / "rbac.yaml").write_text(
+        """apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: canary-runner
+  namespace: canary
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: canary-deployer
+  namespace: canary
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: canary-deployer
+  namespace: canary
+subjects:
+  - kind: ServiceAccount
+    name: canary-runner
+    namespace: canary
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: canary-deployer
+""",
+        encoding="utf-8",
+    )
+
+    result = validate_stage(stage)
+
+    assert result["ok"] is True
+    assert result["input_kinds"] == ["kubernetes"]
+    assert result["workloads"] == []
+    assert result["required_controller_scopes"] == []
+
+
+def test_validate_kubernetes_stage_rejects_cluster_rbac_kinds(tmp_path: Path) -> None:
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    (manifests / "cluster-rbac.yaml").write_text(
+        """apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: canary-admin
+rules:
+  - apiGroups: ["*"]
+    resources: ["*"]
+    verbs: ["*"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: canary-admin
+subjects:
+  - kind: ServiceAccount
+    name: canary-runner
+    namespace: canary
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: canary-admin
+""",
+        encoding="utf-8",
+    )
+
+    result = validate_stage(stage)
+    unsupported = [
+        finding for finding in result["findings"] if finding["code"] == "K8S_UNSUPPORTED_KIND"
+    ]
+
+    assert result["ok"] is False
+    assert unsupported
+    assert unsupported[0]["kinds"] == ["ClusterRole", "ClusterRoleBinding"]
+
+
+def test_validate_kubernetes_stage_rejects_rbac_without_namespace(tmp_path: Path) -> None:
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    (manifests / "rbac.yaml").write_text(
+        """apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: canary-deployer
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: canary-deployer
+subjects:
+  - kind: ServiceAccount
+    name: canary-runner
+    namespace: canary
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: canary-deployer
+""",
+        encoding="utf-8",
+    )
+
+    result = validate_stage(stage)
+    missing_namespace = [
+        finding
+        for finding in result["findings"]
+        if finding["code"] == "K8S_RBAC_NAMESPACE_REQUIRED"
+    ]
+
+    assert result["ok"] is False
+    assert [finding["kind"] for finding in missing_namespace] == ["Role", "RoleBinding"]
+
+
+def test_validate_kubernetes_stage_rejects_rolebinding_to_clusterrole(tmp_path: Path) -> None:
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    (manifests / "rbac.yaml").write_text(
+        """apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: canary-viewer
+  namespace: canary
+subjects:
+  - kind: ServiceAccount
+    name: canary-runner
+    namespace: canary
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: view
+""",
+        encoding="utf-8",
+    )
+
+    result = validate_stage(stage)
+
+    assert result["ok"] is False
+    assert any(
+        finding["code"] == "K8S_ROLEBINDING_ROLE_REF_UNSUPPORTED"
+        for finding in result["findings"]
+    )
+
+
 def test_validate_kubernetes_stage_rejects_multi_container_and_init_container(
     tmp_path: Path,
 ) -> None:
@@ -476,13 +634,45 @@ def test_local_deploy_uses_k8s_apply_flag(tmp_path: Path, monkeypatch) -> None:
     manifests.mkdir(parents=True)
     manifest = manifests / "web.yaml"
     manifest.write_text(
-        """apiVersion: apps/v1
+        """apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: web-runner
+  namespace: demo
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: web-runner
+  namespace: demo
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: web-runner
+  namespace: demo
+subjects:
+  - kind: ServiceAccount
+    name: web-runner
+    namespace: demo
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: web-runner
+---
+apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: web
+  namespace: demo
 spec:
   template:
     spec:
+      serviceAccountName: web-runner
       containers:
         - name: web
           image: nginx:latest
