@@ -256,7 +256,9 @@ class GlobalIngress:
         self.global_dir.mkdir(parents=True, exist_ok=True)
         self.projects_dir.mkdir(parents=True, exist_ok=True)
         self.caddy_data.mkdir(parents=True, exist_ok=True)
-        self._write_caddyfile(projects or [])
+        active_projects = projects or []
+        self._reconcile_project_caddy_sites(active_projects)
+        self._write_caddyfile(active_projects)
         self._ensure_caddy_container()
         self._wait_ready()
         self._export_ca_bundle()
@@ -268,8 +270,10 @@ class GlobalIngress:
         return self.persist_info()
 
     def sync_projects(self, projects: list[str]) -> dict[str, Any]:
+        reconciliation = self._reconcile_project_caddy_sites(projects)
         self._write_caddyfile(projects)
         result = self.reload()
+        result["route_reconciliation"] = reconciliation
         if result.get("ok"):
             self.persist_info()
             result["ingress_metadata_repaired"] = True
@@ -317,7 +321,9 @@ class GlobalIngress:
         self.global_dir.mkdir(parents=True, exist_ok=True)
         self.projects_dir.mkdir(parents=True, exist_ok=True)
         self.caddy_data.mkdir(parents=True, exist_ok=True)
-        self._write_caddyfile(projects or [])
+        active_projects = projects or []
+        self._reconcile_project_caddy_sites(active_projects)
+        self._write_caddyfile(active_projects)
         self._ensure_caddy_container()
         self._wait_ready()
         self._export_ca_bundle()
@@ -508,6 +514,25 @@ https://{self.dashboard_host} {{
 """,
             encoding="utf-8",
         )
+
+    def _reconcile_project_caddy_sites(self, projects: list[str]) -> dict[str, Any]:
+        project_results = []
+        ok = True
+        for project in sorted(set(projects)):
+            sites_dir = self.projects_dir / project / "caddy"
+            result = _reconcile_duplicate_caddy_hosts(sites_dir)
+            project_results.append({"project": project, **result})
+            ok = ok and bool(result.get("ok"))
+        return {
+            "ok": ok,
+            "projects": project_results,
+            "quarantined_count": sum(
+                int(item.get("quarantined_count") or 0) for item in project_results
+            ),
+            "unresolved_count": sum(
+                int(item.get("unresolved_count") or 0) for item in project_results
+            ),
+        }
 
     def _ensure_caddy_container(self) -> None:
         if self._container_running():
@@ -727,6 +752,139 @@ def _wait_for_tcp(host: str, port: int, *, timeout_seconds: float) -> None:
             last_error = exc
             time.sleep(0.2)
     raise TimeoutError(f"{host}:{port} did not accept TCP connections: {last_error}")
+
+
+def _reconcile_duplicate_caddy_hosts(sites_dir: Path) -> dict[str, Any]:
+    if not sites_dir.is_dir():
+        return {
+            "ok": True,
+            "sites_dir": str(sites_dir),
+            "exists": False,
+            "duplicate_hosts": [],
+            "quarantined": [],
+            "quarantined_count": 0,
+            "unresolved": [],
+            "unresolved_count": 0,
+        }
+    by_host: dict[str, list[Path]] = {}
+    read_errors: list[dict[str, str]] = []
+    for path in sorted(sites_dir.glob("*.caddy")):
+        try:
+            hosts = _project_caddy_site_hosts(path)
+        except OSError as exc:
+            read_errors.append({"path": str(path), "error": str(exc)})
+            continue
+        for host in hosts:
+            by_host.setdefault(host, []).append(path)
+    duplicate_hosts = sorted(host for host, paths in by_host.items() if len(paths) > 1)
+    quarantined: list[dict[str, str]] = []
+    unresolved: list[dict[str, Any]] = []
+    for host in duplicate_hosts:
+        paths = by_host[host]
+        keep = _preferred_caddy_site(paths)
+        unsafe = [path for path in paths if path != keep and not _generated_project_caddy_site(path)]
+        if unsafe:
+            unresolved.append(
+                {
+                    "host": host,
+                    "kept": str(keep),
+                    "reason": "non-generated duplicate site requires operator review",
+                    "files": [str(path) for path in paths],
+                }
+            )
+            continue
+        for path in paths:
+            if path == keep:
+                continue
+            target = _project_caddy_quarantine_path(sites_dir, path)
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                path.replace(target)
+                quarantined.append({"host": host, "from": str(path), "to": str(target)})
+            except OSError as exc:
+                unresolved.append(
+                    {
+                        "host": host,
+                        "kept": str(keep),
+                        "reason": "failed to quarantine duplicate generated site",
+                        "file": str(path),
+                        "error": str(exc),
+                    }
+                )
+    return {
+        "ok": not unresolved and not read_errors,
+        "sites_dir": str(sites_dir),
+        "exists": True,
+        "duplicate_hosts": duplicate_hosts,
+        "quarantined": quarantined,
+        "quarantined_count": len(quarantined),
+        "unresolved": unresolved,
+        "unresolved_count": len(unresolved),
+        "read_errors": read_errors,
+    }
+
+
+def _project_caddy_site_hosts(path: Path) -> set[str]:
+    hosts: set[str] = set()
+    brace_depth = 0
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("#") and brace_depth == 0 and "{" in stripped:
+            label = stripped.split("{", 1)[0]
+            for part in label.split(","):
+                host = _normalize_caddy_site_label(part)
+                if host:
+                    hosts.add(host)
+        brace_depth += line.count("{") - line.count("}")
+        brace_depth = max(brace_depth, 0)
+    return hosts
+
+
+def _normalize_caddy_site_label(label: str) -> str:
+    normalized = str(label or "").strip()
+    if "://" in normalized:
+        normalized = normalized.split("://", 1)[1]
+    if normalized.count(":") == 1:
+        normalized = normalized.rsplit(":", 1)[0]
+    return normalized.strip().lower().rstrip(".")
+
+
+def _preferred_caddy_site(paths: list[Path]) -> Path:
+    return sorted(paths, key=lambda path: (_safe_stat_mtime_ns(path), path.name))[-1]
+
+
+def _safe_stat_mtime_ns(path: Path) -> int:
+    try:
+        return int(path.stat().st_mtime_ns)
+    except OSError:
+        return 0
+
+
+def _generated_project_caddy_site(path: Path) -> bool:
+    if path.name in {"k1s-stack.caddy", "k1s-profile.caddy", "profile-workload.caddy"}:
+        return True
+    if "--" in path.stem:
+        return True
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return "Generated by WorkerBee" in text or (
+        "Ensure upstream HSTS does not stick during dev" in text and "reverse_proxy " in text
+    )
+
+
+def _project_caddy_quarantine_path(sites_dir: Path, source: Path) -> Path:
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    target = sites_dir / ".workerbee-route-quarantine" / stamp / source.name
+    if not target.exists():
+        return target
+    suffix = 1
+    while True:
+        candidate = target.with_name(f"{target.stem}-{suffix}{target.suffix}")
+        if not candidate.exists():
+            return candidate
+        suffix += 1
 
 
 def load_global_ingress_info(state_root: Path) -> dict[str, Any] | None:

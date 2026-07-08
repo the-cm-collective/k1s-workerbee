@@ -2625,6 +2625,129 @@ def test_global_ingress_sync_projects_repairs_missing_metadata(
     assert metadata["caddy_container"] == ingress.container
 
 
+def test_global_ingress_sync_quarantines_stale_duplicate_generated_route(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    ingress.global_dir.mkdir(parents=True)
+    sites = tmp_path / "projects" / "demo" / "caddy"
+    sites.mkdir(parents=True)
+    stale = sites / "openstack-lite-dashboard-proof--workerbee-k1s-mcp-dev.caddy"
+    current = sites / "openstack-lite-mcp-dev--workerbee-k1s-mcp-dev.caddy"
+    stale.write_text(
+        """https://openstack-lite-mcp.demo.workerbee.localhost {
+    log {
+        output stdout
+        format console
+    }
+    # Ensure upstream HSTS does not stick during dev
+    header -Strict-Transport-Security
+    tls internal
+    reverse_proxy 10.202.156.122:8080
+}
+""",
+        encoding="utf-8",
+    )
+    current.write_text(
+        """https://openstack-lite-mcp.demo.workerbee.localhost {
+    log {
+        output stdout
+        format console
+    }
+    # Ensure upstream HSTS does not stick during dev
+    header -Strict-Transport-Security
+    tls internal
+    reverse_proxy 10.202.156.123:8080
+}
+""",
+        encoding="utf-8",
+    )
+    stale.touch()
+    current.touch()
+    monkeypatch.setattr(
+        "workerbee.ingress.time.strftime",
+        lambda *_args, **_kwargs: "20260708T220000Z",
+    )
+    monkeypatch.setattr(ingress, "_container_running", lambda: True)
+    monkeypatch.setattr(
+        "workerbee.ingress.subprocess.run",
+        lambda _cmd, **_kwargs: SimpleNamespace(returncode=0, stdout=""),
+    )
+
+    result = ingress.sync_projects(["demo"])
+
+    reconciliation = result["route_reconciliation"]
+    project = reconciliation["projects"][0]
+    quarantine = (
+        sites
+        / ".workerbee-route-quarantine"
+        / "20260708T220000Z"
+        / "openstack-lite-dashboard-proof--workerbee-k1s-mcp-dev.caddy"
+    )
+    assert result["ok"] is True
+    assert reconciliation["ok"] is True
+    assert reconciliation["quarantined_count"] == 1
+    assert project["duplicate_hosts"] == ["openstack-lite-mcp.demo.workerbee.localhost"]
+    assert project["unresolved_count"] == 0
+    assert not stale.exists()
+    assert current.is_file()
+    assert quarantine.is_file()
+    assert "10.202.156.122:8080" in quarantine.read_text(encoding="utf-8")
+    assert "10.202.156.123:8080" in current.read_text(encoding="utf-8")
+
+
+def test_global_ingress_sync_reports_manual_duplicate_without_quarantine(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    ingress.global_dir.mkdir(parents=True)
+    sites = tmp_path / "projects" / "demo" / "caddy"
+    sites.mkdir(parents=True)
+    manual = sites / "manual.caddy"
+    current = sites / "openstack-lite-mcp-dev--workerbee-k1s-mcp-dev.caddy"
+    manual.write_text(
+        """https://openstack-lite-mcp.demo.workerbee.localhost {
+    reverse_proxy 10.202.156.122:8080
+}
+""",
+        encoding="utf-8",
+    )
+    current.write_text(
+        """https://openstack-lite-mcp.demo.workerbee.localhost {
+    # Ensure upstream HSTS does not stick during dev
+    reverse_proxy 10.202.156.123:8080
+}
+""",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(ingress, "_container_running", lambda: True)
+    monkeypatch.setattr(
+        "workerbee.ingress.subprocess.run",
+        lambda _cmd, **_kwargs: SimpleNamespace(returncode=0, stdout=""),
+    )
+
+    result = ingress.sync_projects(["demo"])
+
+    project = result["route_reconciliation"]["projects"][0]
+    assert result["route_reconciliation"]["ok"] is False
+    assert project["quarantined_count"] == 0
+    assert project["unresolved_count"] == 1
+    assert manual.is_file()
+    assert current.is_file()
+
+
 def test_daemon_global_dashboard_repairs_missing_live_ingress_metadata(
     tmp_path: Path,
     monkeypatch,
