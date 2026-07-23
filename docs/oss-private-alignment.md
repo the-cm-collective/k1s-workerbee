@@ -77,6 +77,8 @@ Private-only surfaces remain private unless deliberately re-scoped:
 - k1s OSS Hive surface: `Expose edge gateway schedulability in Hive`
 - WorkerBee OSS export/runtime hardening:
   `Backport generic bundle export hardening`
+- WorkerBee direct-containerd runtime alignment:
+  `Align containerd service alias refresh`
 
 ## Validation Expectations
 
