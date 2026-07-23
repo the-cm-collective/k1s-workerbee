@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import subprocess
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -21,7 +23,12 @@ except Exception:  # pragma: no cover - exercised when PyYAML is not installed
 from workerbee import __version__
 from workerbee.contract import WorkerBeeError
 from workerbee.ports import port_is_free
-from workerbee.runtime_support import CONTAINERD_RUNTIME, containerd_network_subnet
+from workerbee.runtime_support import (
+    CONTAINERD_RUNTIME,
+    containerd_network_subnet,
+    resolve_runtime,
+    runtime_command_args,
+)
 from workerbee.secrets import file_is_sops_encrypted, plaintext_secrets_allowed
 from workerbee.supervisor import WorkerBeeSupervisor, project_slug
 
@@ -256,6 +263,11 @@ def deploy_local_stage(
     enforce_stage_secret_policy(stage_dir, validation=validation, cwd=supervisor.cwd)
     results = []
     native_manifests: list[Path] = []
+    deferred_native_consumers = _containerd_alias_consumer_manifest_paths(
+        supervisor=supervisor,
+        validation=validation,
+        namespace=namespace,
+    )
     for detail in validation["manifest_details"]:
         manifest = Path(str(detail["path"]))
         if detail["input_kind"] == KUBERNETES:
@@ -264,6 +276,20 @@ def deploy_local_stage(
             )
         else:
             native_manifests.append(manifest)
+            if manifest.expanduser().resolve() in deferred_native_consumers:
+                results.append(
+                    {
+                        "ok": True,
+                        "deferred": True,
+                        "reason": (
+                            "direct-containerd service alias refresh applies consumer "
+                            "after provider readiness"
+                        ),
+                        "manifest": str(manifest),
+                        "namespace": namespace,
+                    }
+                )
+                continue
             results.append(
                 supervisor.deploy_manifest(manifest, namespace=namespace, timeout=timeout)
             )
@@ -302,7 +328,8 @@ def deploy_local_stage(
         wait=True,
         prune=prune,
     )
-    app_status["ingress_urls"] = _result_ingress_urls(results)
+    alias_apply = alias_refresh.get("apply") if isinstance(alias_refresh.get("apply"), list) else []
+    app_status["ingress_urls"] = _result_ingress_urls([*results, *alias_apply])
     apply_ok = all(item.get("ok") is not False for item in results if isinstance(item, dict))
     return {
         "ok": bool(apply_ok and not app_status.get("degraded_workloads")),
@@ -313,6 +340,40 @@ def deploy_local_stage(
         "app_status": app_status,
         "prune": {"enabled": bool(prune), "deleted": app_status.get("deleted_orphans", [])},
     }
+
+
+def _containerd_alias_consumer_manifest_paths(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    validation: dict[str, Any],
+    namespace: str | None,
+) -> set[Path]:
+    if _supervisor_runtime(supervisor) != CONTAINERD_RUNTIME:
+        return set()
+    native_manifests = [
+        Path(str(detail.get("path") or "")).expanduser().resolve()
+        for detail in validation.get("manifest_details", [])
+        if isinstance(detail, dict) and detail.get("input_kind") == NATIVE_K1S
+    ]
+    service_workloads = _native_referenced_service_workloads(validation, namespace=namespace)
+    if not service_workloads:
+        return set()
+    return {
+        path.expanduser().resolve()
+        for path in _native_service_alias_consumer_manifests(
+            validation,
+            native_manifests=native_manifests,
+            service_workloads=service_workloads,
+            namespace=namespace,
+        )
+    }
+
+
+def _supervisor_runtime(supervisor: WorkerBeeSupervisor) -> str | None:
+    info = supervisor.load_stack()
+    if info is not None:
+        return str(getattr(info, "runtime", "") or "")
+    return resolve_runtime(str(getattr(supervisor, "runtime_requested", "auto") or "auto"))
 
 
 def validation_workloads(
@@ -582,7 +643,7 @@ def _refresh_containerd_service_aliases(
         supervisor=supervisor,
         info=info,
         workloads=service_workloads,
-        timeout_seconds=max(3.0, min(20.0, float(timeout) * 0.25)),
+        timeout_seconds=max(10.0, min(60.0, float(timeout) * 0.5)),
     )
     if not wait["ready"]:
         return {
@@ -597,10 +658,44 @@ def _refresh_containerd_service_aliases(
             "reapplied": 0,
             "apply": [],
         }
-    reapplies = [
-        supervisor.deploy_manifest(manifest, namespace=namespace, timeout=timeout)
-        for manifest in native_manifests
-    ]
+    if referenced_workloads:
+        reapply_manifests = _native_service_alias_consumer_manifests(
+            validation,
+            native_manifests=native_manifests,
+            service_workloads=referenced_workloads,
+            namespace=namespace,
+        )
+        host_aliases = (
+            _containerd_service_host_aliases(
+                supervisor=supervisor,
+                service_workloads=referenced_workloads,
+            )
+            if reapply_manifests
+            else []
+        )
+    else:
+        reapply_manifests = list(native_manifests)
+        host_aliases = []
+    token = _service_alias_refresh_token(service_workloads)
+    supervisor.state_dir.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="workerbee-alias-refresh-",
+        dir=supervisor.state_dir,
+    ) as tmp_name:
+        tmp_dir = Path(tmp_name)
+        forced_manifests = [
+            _force_service_alias_refresh_manifest(
+                manifest,
+                token=token,
+                tmp_dir=tmp_dir,
+                host_aliases=host_aliases,
+            )
+            for manifest in reapply_manifests
+        ]
+        reapplies = [
+            supervisor.deploy_manifest(manifest, namespace=namespace, timeout=timeout)
+            for manifest in forced_manifests
+        ]
     return {
         "ok": True,
         "enabled": True,
@@ -610,6 +705,8 @@ def _refresh_containerd_service_aliases(
         "ready": wait["ready"],
         "waited_seconds": wait["waited_seconds"],
         "reapplied": len(reapplies),
+        "reapply_manifests": [str(path) for path in reapply_manifests],
+        "host_aliases": host_aliases,
         "apply": reapplies,
     }
 
@@ -739,6 +836,323 @@ def _native_service_workloads(
             ns = str(namespace or metadata.get("namespace") or "default")
             workloads.append({"namespace": ns, "name": name})
     return workloads
+
+
+def _native_service_alias_consumer_manifests(
+    validation: dict[str, Any],
+    *,
+    native_manifests: list[Path],
+    service_workloads: list[dict[str, str]],
+    namespace: str | None,
+) -> list[Path]:
+    provider_keys = {
+        (str(item.get("namespace") or "default"), str(item.get("name") or ""))
+        for item in service_workloads
+        if item.get("name")
+    }
+    if not provider_keys:
+        return []
+    native_paths = {path.expanduser().resolve() for path in native_manifests}
+    consumers: list[Path] = []
+    seen: set[Path] = set()
+    for detail in validation.get("manifest_details", []):
+        if not isinstance(detail, dict) or detail.get("input_kind") != NATIVE_K1S:
+            continue
+        path = Path(str(detail.get("path") or "")).expanduser().resolve()
+        if path not in native_paths or path in seen or not path.is_file():
+            continue
+        docs = _load_yaml_documents(path.read_text(encoding="utf-8"))
+        if any(
+            isinstance(doc, dict)
+            and _api_version(doc) == "ae.dev/v1alpha1"
+            and _native_doc_references_service_keys(
+                doc,
+                provider_keys=provider_keys,
+                namespace=namespace,
+            )
+            for doc in docs
+        ):
+            seen.add(path)
+            consumers.append(path)
+    return consumers
+
+
+def _native_doc_references_service_keys(
+    doc: dict[str, Any],
+    *,
+    provider_keys: set[tuple[str, str]],
+    namespace: str | None,
+) -> bool:
+    metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+    current = (
+        str(namespace or metadata.get("namespace") or "default"),
+        str(metadata.get("name") or ""),
+    )
+    references = _native_manifest_reference_hosts(doc)
+    return any(
+        (service_ns, service_name) != current
+        and _service_reference_matches(references, service_ns, service_name)
+        for service_ns, service_name in provider_keys
+    )
+
+
+def _service_alias_refresh_token(service_workloads: list[dict[str, str]]) -> str:
+    payload = json.dumps(service_workloads, sort_keys=True, separators=(",", ":"))
+    raw = f"{payload}:{time.time_ns()}".encode()
+    return blake2s(raw, digest_size=8).hexdigest()
+
+
+def _containerd_service_host_aliases(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    service_workloads: list[dict[str, str]],
+) -> list[dict[str, Any]]:
+    aliases: list[dict[str, Any]] = []
+    for workload in service_workloads:
+        namespace = str(workload.get("namespace") or "default")
+        name = str(workload.get("name") or "")
+        if not name:
+            continue
+        ip = _containerd_service_workload_ip(
+            supervisor=supervisor,
+            namespace=namespace,
+            name=name,
+        )
+        if not ip:
+            continue
+        aliases.append(
+            {
+                "ip": ip,
+                "hostnames": _service_alias_hostnames(namespace=namespace, name=name),
+            }
+        )
+    return aliases
+
+
+def _containerd_service_workload_ip(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    namespace: str,
+    name: str,
+) -> str | None:
+    state_root = supervisor.state_dir.parent.parent
+    app_key = f"{namespace}--{name}"
+    ps_cmd = runtime_command_args(
+        CONTAINERD_RUNTIME,
+        state_root=state_root,
+        project=supervisor.project,
+        args=["ps", "--format", "json", "--filter", f"label=ae.app={app_key}"],
+    )
+    try:
+        ps = subprocess.run(
+            ps_cmd,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        return None
+    if ps.returncode != 0:
+        return None
+    for container_id in _containerd_ps_container_ids(ps.stdout):
+        ip = _containerd_inspect_ip(
+            supervisor=supervisor,
+            container_id=container_id,
+        )
+        if ip:
+            return ip
+    return None
+
+
+def _containerd_ps_container_ids(output: str) -> list[str]:
+    candidates: list[tuple[tuple[int, str, int], str]] = []
+    order = 0
+    for line in str(output or "").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        try:
+            record = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        records = record if isinstance(record, list) else [record]
+        for item in records:
+            if not isinstance(item, dict):
+                continue
+            status = str(item.get("Status") or item.get("State") or "").lower()
+            if status and "up" not in status and "running" not in status:
+                continue
+            container_id = str(item.get("ID") or item.get("Id") or "").strip()
+            if container_id:
+                candidates.append((_containerd_ps_container_sort_key(item, order), container_id))
+                order += 1
+    candidates.sort(key=lambda candidate: candidate[0], reverse=True)
+    return [container_id for _sort_key, container_id in candidates]
+
+
+def _containerd_ps_container_sort_key(item: dict[str, Any], order: int) -> tuple[int, str, int]:
+    revision = _parse_int(_containerd_ps_label(item, "ae.revision"))
+    created_at = str(item.get("CreatedAt") or item.get("Created") or "")
+    return (revision or 0, created_at, -order)
+
+
+def _containerd_ps_label(item: dict[str, Any], key: str) -> str | None:
+    labels = item.get("Labels")
+    if isinstance(labels, dict):
+        value = labels.get(key)
+        return str(value) if value is not None else None
+    if not isinstance(labels, str):
+        return None
+    prefix = f"{key}="
+    for chunk in labels.split(","):
+        if chunk.startswith(prefix):
+            return chunk[len(prefix) :]
+    return None
+
+
+def _parse_int(value: Any) -> int | None:
+    try:
+        return int(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _containerd_inspect_ip(
+    *,
+    supervisor: WorkerBeeSupervisor,
+    container_id: str,
+) -> str | None:
+    state_root = supervisor.state_dir.parent.parent
+    inspect_cmd = runtime_command_args(
+        CONTAINERD_RUNTIME,
+        state_root=state_root,
+        project=supervisor.project,
+        args=["inspect", container_id],
+    )
+    try:
+        proc = subprocess.run(
+            inspect_cmd,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except Exception:
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError:
+        return None
+    records = payload if isinstance(payload, list) else [payload]
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        network_settings = record.get("NetworkSettings")
+        if not isinstance(network_settings, dict):
+            continue
+        ip = str(network_settings.get("IPAddress") or "").strip()
+        if ip:
+            return ip
+        networks = network_settings.get("Networks")
+        if isinstance(networks, dict):
+            for network in networks.values():
+                if not isinstance(network, dict):
+                    continue
+                ip = str(network.get("IPAddress") or "").strip()
+                if ip:
+                    return ip
+    return None
+
+
+def _service_alias_hostnames(*, namespace: str, name: str) -> list[str]:
+    return [
+        name,
+        f"{name}.{namespace}",
+        f"{name}.{namespace}.svc",
+        f"{name}.{namespace}.svc.cluster.local",
+    ]
+
+
+def _force_service_alias_refresh_manifest(
+    manifest: Path,
+    *,
+    token: str,
+    tmp_dir: Path,
+    host_aliases: list[dict[str, Any]] | None = None,
+) -> Path:
+    if yaml is None:
+        return manifest
+    docs = [
+        doc
+        for doc in yaml.safe_load_all(manifest.read_text(encoding="utf-8"))
+        if isinstance(doc, dict)
+    ]
+    if not docs:
+        return manifest
+    for doc in docs:
+        if _api_version(doc) != "ae.dev/v1alpha1":
+            continue
+        spec = doc.setdefault("spec", {})
+        if not isinstance(spec, dict):
+            continue
+        env = spec.setdefault("env", [])
+        if not isinstance(env, list):
+            env = []
+            spec["env"] = env
+        env[:] = [
+            item
+            for item in env
+            if not (
+                isinstance(item, dict)
+                and item.get("name") == "WORKERBEE_K1S_SERVICE_ALIAS_REFRESH"
+            )
+        ]
+        env.append({"name": "WORKERBEE_K1S_SERVICE_ALIAS_REFRESH", "value": token})
+        _merge_host_aliases(spec, host_aliases or [])
+    forced = tmp_dir / manifest.name
+    forced.write_text(yaml.safe_dump_all(docs, sort_keys=False), encoding="utf-8")
+    return forced
+
+
+def _merge_host_aliases(spec: dict[str, Any], host_aliases: list[dict[str, Any]]) -> None:
+    if not host_aliases:
+        return
+    existing = spec.setdefault("hostAliases", [])
+    if not isinstance(existing, list):
+        existing = []
+        spec["hostAliases"] = existing
+    by_ip: dict[str, dict[str, Any]] = {}
+    for item in existing:
+        if isinstance(item, dict) and item.get("ip"):
+            by_ip[str(item["ip"])] = item
+    for alias in host_aliases:
+        ip = str(alias.get("ip") or "").strip()
+        if not ip:
+            continue
+        hostnames = [
+            str(hostname).strip()
+            for hostname in alias.get("hostnames", [])
+            if str(hostname).strip()
+        ]
+        if not hostnames:
+            continue
+        target = by_ip.get(ip)
+        if target is None:
+            target = {"ip": ip, "hostnames": []}
+            existing.append(target)
+            by_ip[ip] = target
+        current = target.setdefault("hostnames", [])
+        if not isinstance(current, list):
+            current = []
+            target["hostnames"] = current
+        seen = {str(hostname) for hostname in current}
+        for hostname in hostnames:
+            if hostname not in seen:
+                current.append(hostname)
+                seen.add(hostname)
 
 
 def _native_manifest_reference_hosts(doc: dict[str, Any]) -> set[str]:

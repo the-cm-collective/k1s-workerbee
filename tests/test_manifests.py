@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from types import MethodType, SimpleNamespace
 from typing import Any
@@ -1004,6 +1005,7 @@ spec:
         read_token="-".join(["token", "for", "test"]),
     )
     calls: list[str] = []
+    deployed_text: list[str] = []
 
     def fake_load_stack(_self) -> object:
         return stack
@@ -1017,6 +1019,7 @@ spec:
     ) -> dict[str, Any]:
         _ = (namespace, timeout)
         calls.append(path.name)
+        deployed_text.append(path.read_text(encoding="utf-8"))
         return {"ok": True, "manifest": str(path)}
 
     def fake_run_ae(
@@ -1034,14 +1037,56 @@ spec:
             )
         }
 
+    def fake_subprocess_run(cmd: list[str], **_kwargs: Any) -> SimpleNamespace:
+        if "ps" in cmd:
+            return SimpleNamespace(
+                returncode=0,
+                stdout=(
+                    json.dumps(
+                        {
+                            "ID": "old-minio-container",
+                            "Status": "Up",
+                            "CreatedAt": "2026-05-15T22:40:00Z",
+                            "Labels": "ae.revision=1,ae.app=rawform--minio",
+                        }
+                    )
+                    + "\n"
+                    + json.dumps(
+                        {
+                            "ID": "minio-container",
+                            "Status": "Up",
+                            "CreatedAt": "2026-05-15T22:41:00Z",
+                            "Labels": "ae.revision=2,ae.app=rawform--minio",
+                        }
+                    )
+                    + "\n"
+                ),
+                stderr="",
+            )
+        if "inspect" in cmd:
+            ip = "10.42.0.9" if cmd[-1] == "minio-container" else "10.42.0.4"
+            return SimpleNamespace(
+                returncode=0,
+                stdout=json.dumps([{"NetworkSettings": {"IPAddress": ip}}]),
+                stderr="",
+            )
+        return SimpleNamespace(returncode=1, stdout="", stderr="unexpected command")
+
     sup.load_stack = MethodType(fake_load_stack, sup)  # type: ignore[method-assign]
     sup.deploy_manifest = MethodType(fake_deploy, sup)  # type: ignore[method-assign]
     sup.run_ae = MethodType(fake_run_ae, sup)  # type: ignore[method-assign]
+    monkeypatch.setattr("workerbee.manifests.subprocess.run", fake_subprocess_run)
 
     result = deploy_local_stage(supervisor=sup, stage_dir=stage, namespace=None, timeout=60)
 
     assert result["ok"] is True
-    assert calls == ["api.k1s.yaml", "minio.k1s.yaml", "api.k1s.yaml", "minio.k1s.yaml"]
+    assert calls == ["minio.k1s.yaml", "api.k1s.yaml"]
+    assert result["apply"][0]["deferred"] is True
+    assert result["apply"][0]["manifest"].endswith("api.k1s.yaml")
+    assert "WORKERBEE_K1S_SERVICE_ALIAS_REFRESH" in deployed_text[-1]
+    assert "hostAliases:" in deployed_text[-1]
+    assert "ip: 10.42.0.9" in deployed_text[-1]
+    assert "- minio.rawform.svc.cluster.local" in deployed_text[-1]
     assert result["alias_refresh"]["enabled"] is True
     assert result["alias_refresh"]["ready"] is True
     assert result["alias_refresh"]["service_workloads"] == [
@@ -1051,7 +1096,18 @@ spec:
         {"namespace": "rawform", "name": "api"},
         {"namespace": "rawform", "name": "minio"},
     ]
-    assert result["alias_refresh"]["reapplied"] == 2
+    assert result["alias_refresh"]["reapplied"] == 1
+    assert result["alias_refresh"]["host_aliases"] == [
+        {
+            "ip": "10.42.0.9",
+            "hostnames": [
+                "minio",
+                "minio.rawform",
+                "minio.rawform.svc",
+                "minio.rawform.svc.cluster.local",
+            ],
+        }
+    ]
 
 
 def test_local_containerd_native_deploy_refreshes_published_services_without_references(
@@ -1229,7 +1285,7 @@ spec:
         assert alias_refresh["reapplied"] == 0
     else:
         raise AssertionError("expected WorkerBeeError")
-    assert calls == ["api.k1s.yaml", "minio.k1s.yaml"]
+    assert calls == ["minio.k1s.yaml"]
 
 
 def test_profile_deploy_uses_internal_profile_connection(tmp_path: Path, monkeypatch) -> None:
