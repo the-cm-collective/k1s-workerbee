@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "k1s-workerbee"
-version = "0.1.6.dev2"
+version = "0.1.6.dev3"
 description = "Local MCP workbench for k1s-powered cloud-native agent testing"
 readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "Apache-2.0"}
 authors = [{name = "k1s contributors"}]
 dependencies = [
-    "k1s-workerbee-runtime==0.1.6.dev2",
+    "k1s-workerbee-runtime==0.1.6.dev3",
     "mcp>=1.8",
 ]
 

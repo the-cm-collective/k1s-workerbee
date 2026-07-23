@@ -3,6 +3,29 @@
 All notable WorkerBee changes are documented here. Earlier entries are best
 effort summaries reconstructed from release notes and git history.
 
+## v0.1.6.dev3 - 2026-07-23
+
+- Added AI Max edge-cell simulation coverage for multi-cell fabric behavior,
+  installer artifact signing, installer assurance, boot evidence, quarantine,
+  autonomy state, disconnected operation, HA recovery, governance evidence, and
+  readiness bundle export.
+- Added OpenStack Lite public-safe contracts for route parity, dashboard
+  fixtures, disabled routes, redacted refresh, dossier reporting, and target
+  import dry-run validation.
+- Added the OSS/private alignment ledger and backported generic bundle export
+  hardening needed by public WorkerBee users.
+- Improved edge-link and direct-containerd behavior around the corrected
+  4-node AI Max cell model, service alias refresh, provider readiness, and
+  stale endpoint avoidance.
+- Improved API shim route preference, loopback CLI calls, namespaced RBAC
+  validation, containerd namespace boundaries, and native manifest export
+  security intent preservation.
+- Fixed duplicate ingress route reconciliation, API shim RBAC role evaluation,
+  local image warning coverage for loopback registry references, and direct
+  containerd alias refresh for referenced providers.
+- Published as a development-channel candidate pinned to
+  `k1s-workerbee-runtime==0.1.6.dev3`.
+
 ## v0.1.6.dev2 - 2026-06-19
 
 - Added the AI fabric lab validation package with native k1s stages, model
