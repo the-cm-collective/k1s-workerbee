@@ -420,6 +420,11 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_export.add_argument("--stage", type=Path, required=True)
     bundle_export.add_argument("--format", choices=["k1s", "k8s", "helm"], default="k1s")
     bundle_export.add_argument("-n", "--namespace", default=None)
+    bundle_export.add_argument(
+        "--storage-class-name",
+        default=None,
+        help="StorageClass name to pass through when exporting native k1s storage to k8s/Helm",
+    )
     security = sub.add_parser("security", help="Run advisory security assessments")
     security_sub = security.add_subparsers(dest="security_cmd", required=True)
     security_assess = security_sub.add_parser(
@@ -1039,6 +1044,7 @@ def main(argv: list[str] | None = None) -> int:
                     stage_dir=resolve_stage_dir(sup, args.stage),
                     fmt=args.format,
                     namespace=args.namespace,
+                    storage_class_name=args.storage_class_name,
                 ),
                 json_out=args.json,
             )

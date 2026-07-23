@@ -10,6 +10,7 @@ from workerbee.manifests import (
     deploy_profile_stage,
     deploy_remote_k1s_stage,
     export_bundle,
+    is_workerbee_local_image,
     prepare_stage,
     resolve_stage_dir,
     validate_stage,
@@ -323,7 +324,109 @@ spec:
 
     export_bundle(supervisor=sup, stage_dir=stage, fmt="k8s")
 
-    assert calls == [["export-k8s", "-f", str(manifest.resolve()), "--emit-configs", "--validate"]]
+    assert calls == [
+        [
+            "export-k8s",
+            "-f",
+            str(manifest.resolve()),
+            "--emit-configs",
+            "--emit-storage",
+            "--validate",
+        ]
+    ]
+
+
+def test_k8s_export_passes_storage_class_and_preserves_non_root_security(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sup = _supervisor(tmp_path, monkeypatch)
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    manifest = manifests / "web.k1s.yaml"
+    manifest.write_text(
+        """apiVersion: ae.dev/v1alpha1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  image: workerbee-web:dev
+  replicas: 1
+  ports:
+    - name: http
+      containerPort: 8080
+  storage:
+    - name: data
+      mountPath: /data
+      retention: Delete
+  security:
+    runAsUser: 1000
+""",
+        encoding="utf-8",
+    )
+    calls: list[list[str]] = []
+
+    def fake_run(
+        _self,
+        args: list[str],
+        *,
+        timeout: int = 60,
+        env_overrides: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        _ = (timeout, env_overrides)
+        calls.append(args)
+        return {
+            "stdout": """apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  template:
+    spec:
+      containers:
+        - name: web
+          image: workerbee-web:dev
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: web-data
+""",
+        }
+
+    sup.run_ae_cli = MethodType(fake_run, sup)  # type: ignore[method-assign]
+
+    result = export_bundle(
+        supervisor=sup,
+        stage_dir=stage,
+        fmt="k8s",
+        storage_class_name="fast-local",
+    )
+
+    assert calls == [
+        [
+            "export-k8s",
+            "-f",
+            str(manifest.resolve()),
+            "--emit-configs",
+            "--emit-storage",
+            "--validate",
+            "--storage-class-name",
+            "fast-local",
+        ]
+    ]
+    output = Path(result["output_dir"]) / "web.k8s.yaml"
+    text = output.read_text(encoding="utf-8")
+    assert "runAsNonRoot: true" in text
+    assert "kind: PersistentVolumeClaim" in text
+
+
+def test_workerbee_local_image_detection_covers_loopback_refs() -> None:
+    assert is_workerbee_local_image("workerbee-demo-api:dev") is True
+    assert is_workerbee_local_image("localhost:5000/demo/api:dev") is True
+    assert is_workerbee_local_image("127.0.0.1:5000/demo/api:dev") is True
+    assert is_workerbee_local_image("registry.example.com/demo/api:dev") is False
 
 
 def test_validate_kubernetes_stage_accepts_one_workload_bundle(tmp_path: Path) -> None:

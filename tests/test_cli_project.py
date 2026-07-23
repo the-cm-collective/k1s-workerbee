@@ -761,6 +761,26 @@ def test_containerd_privilege_status_command_parses_global_policy(tmp_path: Path
     assert args.containerd_privilege == "unprivileged"
 
 
+def test_bundle_export_parses_storage_class_name(tmp_path: Path) -> None:
+    args = build_parser().parse_args(
+        [
+            "bundle",
+            "export",
+            "--stage",
+            str(tmp_path / "stage"),
+            "--format",
+            "k8s",
+            "--storage-class-name",
+            "fast-local",
+        ]
+    )
+
+    assert args.cmd == "bundle"
+    assert args.bundle_cmd == "export"
+    assert args.format == "k8s"
+    assert args.storage_class_name == "fast-local"
+
+
 def test_profile_start_parses_direct_containerd_shape(tmp_path: Path) -> None:
     args = build_parser().parse_args(
         [

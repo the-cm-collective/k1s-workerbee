@@ -156,7 +156,7 @@ def validate_stage(stage_dir: Path, *, cwd: Path | None = None) -> dict[str, Any
             )
             for image in images:
                 images_seen.append(image)
-                if not image.startswith("workerbee-"):
+                if not is_workerbee_local_image(image):
                     continue
                 findings.append(
                     {
@@ -184,6 +184,20 @@ def validate_stage(stage_dir: Path, *, cwd: Path | None = None) -> dict[str, Any
         "findings": findings,
         "required_controller_scopes": sorted(set(scopes)),
     }
+
+
+def is_workerbee_local_image(image: str) -> bool:
+    ref = str(image or "").strip().lower()
+    if not ref:
+        return False
+    return (
+        ref.startswith("workerbee-")
+        or ref.startswith("localhost/")
+        or ref.startswith("localhost:")
+        or ref.startswith("127.")
+        or ref.startswith("0.0.0.0:")
+        or ref.startswith("[::1]")
+    )
 
 
 def resolve_stage_dir(supervisor: WorkerBeeSupervisor, stage: Path | str) -> Path:
@@ -1306,6 +1320,7 @@ def export_bundle(
     stage_dir: Path,
     fmt: str = "k1s",
     namespace: str | None = None,
+    storage_class_name: str | None = None,
 ) -> dict[str, Any]:
     fmt = fmt.lower()
     validation = validate_stage(stage_dir, cwd=supervisor.cwd)
@@ -1346,11 +1361,23 @@ def export_bundle(
         _write_json(out_dir / "bundle.json", _export_metadata(fmt, validation))
         _write_export_readme(out_dir, fmt=fmt)
     elif fmt == "k8s":
-        _export_k8s(supervisor, validation["manifest_details"], out_dir, namespace=namespace)
+        _export_k8s(
+            supervisor,
+            validation["manifest_details"],
+            out_dir,
+            namespace=namespace,
+            storage_class_name=storage_class_name,
+        )
         _write_json(out_dir / "bundle.json", _export_metadata(fmt, validation))
         _write_export_readme(out_dir, fmt=fmt)
     elif fmt == "helm":
-        _export_helm(supervisor, validation["manifest_details"], out_dir, namespace=namespace)
+        _export_helm(
+            supervisor,
+            validation["manifest_details"],
+            out_dir,
+            namespace=namespace,
+            storage_class_name=storage_class_name,
+        )
     else:
         raise ValueError("format must be one of: k1s, k8s, helm")
     _write_json(out_dir / "images.json", {"images": validation.get("images", [])})
@@ -1741,6 +1768,7 @@ def _export_k8s(
     out_dir: Path,
     *,
     namespace: str | None,
+    storage_class_name: str | None,
 ) -> None:
     for detail in manifests:
         manifest = str(detail["path"])
@@ -1749,11 +1777,101 @@ def _export_k8s(
         if detail["input_kind"] == KUBERNETES:
             shutil.copy2(manifest, target)
             continue
-        args = ["export-k8s", "-f", manifest, "--emit-configs", "--validate"]
-        if namespace:
-            args.extend(["--namespace", namespace])
+        args = _native_export_k8s_args(
+            manifest,
+            namespace=namespace,
+            storage_class_name=storage_class_name,
+        )
         result = supervisor.run_ae_cli(args, timeout=90)
-        target.write_text(result["stdout"], encoding="utf-8")
+        body = _preserve_native_non_root_security(
+            result["stdout"],
+            native_docs=_load_yaml_documents(Path(manifest).read_text(encoding="utf-8")),
+        )
+        target.write_text(body, encoding="utf-8")
+
+
+def _native_export_k8s_args(
+    manifest: str,
+    *,
+    namespace: str | None = None,
+    storage_class_name: str | None = None,
+) -> list[str]:
+    args = [
+        "export-k8s",
+        "-f",
+        manifest,
+        "--emit-configs",
+        "--emit-storage",
+        "--validate",
+    ]
+    if namespace:
+        args.extend(["--namespace", namespace])
+    if storage_class_name:
+        args.extend(["--storage-class-name", storage_class_name])
+    return args
+
+
+def _preserve_native_non_root_security(
+    exported_yaml: str,
+    *,
+    native_docs: list[dict[str, Any]],
+) -> str:
+    non_root_by_workload = _native_non_root_security_by_workload(native_docs)
+    if not non_root_by_workload:
+        return exported_yaml
+    exported_docs = _load_yaml_documents(exported_yaml)
+    changed = False
+    for doc in exported_docs:
+        if not isinstance(doc, dict) or _kind(doc) not in K8S_WORKLOAD_KINDS:
+            continue
+        metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+        name = str(metadata.get("name") or "")
+        if non_root_by_workload.get(name) is not True:
+            continue
+        spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
+        template = spec.get("template") if isinstance(spec.get("template"), dict) else {}
+        pod_spec = template.get("spec") if isinstance(template.get("spec"), dict) else {}
+        for key in ("initContainers", "containers", "ephemeralContainers"):
+            containers = pod_spec.get(key)
+            if not isinstance(containers, list):
+                continue
+            for container in containers:
+                if not isinstance(container, dict):
+                    continue
+                security_context = container.setdefault("securityContext", {})
+                if not isinstance(security_context, dict):
+                    continue
+                if "runAsNonRoot" not in security_context:
+                    security_context["runAsNonRoot"] = True
+                    changed = True
+    if not changed:
+        return exported_yaml
+    return "\n---\n".join(_dump_yaml(doc).rstrip() for doc in exported_docs) + "\n"
+
+
+def _native_non_root_security_by_workload(
+    native_docs: list[dict[str, Any]],
+) -> dict[str, bool]:
+    result: dict[str, bool] = {}
+    for doc in native_docs:
+        if not isinstance(doc, dict) or _api_version(doc) != "ae.dev/v1alpha1":
+            continue
+        metadata = doc.get("metadata") if isinstance(doc.get("metadata"), dict) else {}
+        spec = doc.get("spec") if isinstance(doc.get("spec"), dict) else {}
+        security = spec.get("security") if isinstance(spec.get("security"), dict) else {}
+        name = str(metadata.get("name") or "")
+        if not name:
+            continue
+        run_as_user = security.get("runAsUser")
+        if run_as_user is None:
+            run_as_user = security.get("run_as_user")
+        if run_as_user is None:
+            continue
+        try:
+            result[name] = int(run_as_user) != 0
+        except (TypeError, ValueError):
+            continue
+    return result
 
 
 def _export_helm(
@@ -1762,6 +1880,7 @@ def _export_helm(
     out_dir: Path,
     *,
     namespace: str | None,
+    storage_class_name: str | None,
 ) -> None:
     chart_name = out_dir.parent.parent.name
     templates_dir = out_dir / "templates"
@@ -1805,7 +1924,10 @@ appVersion: "0.1.0"
             body = Path(manifest).read_text(encoding="utf-8")
         else:
             result = supervisor.run_ae_cli(
-                ["export-k8s", "-f", manifest, "--emit-configs", "--validate"],
+                _native_export_k8s_args(
+                    manifest,
+                    storage_class_name=storage_class_name,
+                ),
                 timeout=90,
             )
             body = result["stdout"]
@@ -2212,8 +2334,7 @@ def _low_risk_command_override(*, image: str, command: list[str]) -> bool:
     if not command:
         return False
     executable = Path(command[0]).name.lower()
-    local_image = image.startswith(("localhost/", "localhost:", "workerbee-"))
-    return local_image and executable in {"python", "python3"}
+    return is_workerbee_local_image(image) and executable in {"python", "python3"}
 
 
 def _command_entrypoint_risk(*, image: str, command: list[str]) -> str:

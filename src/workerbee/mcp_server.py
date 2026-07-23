@@ -957,6 +957,7 @@ def serve_mcp(
         format: str = "k1s",  # noqa: A002 - MCP-facing field name
         namespace: str | None = None,
         project: str = "default",
+        storage_class_name: str | None = None,
     ) -> dict[str, Any]:
         """Export staged artifacts as k1s, Kubernetes YAML, or Helm skeleton."""
         return protect(
@@ -969,6 +970,7 @@ def serve_mcp(
                     stage_dir=resolve_stage_dir(supervisor, stage),
                     fmt=format,
                     namespace=namespace,
+                    storage_class_name=storage_class_name,
                 ),
             ),
         )
