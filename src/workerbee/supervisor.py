@@ -1440,7 +1440,7 @@ https://{api_host} {{
                 or self.ingress.bind_host
                 or ""
             ).strip()
-            if workload_host_alias in {"", "0.0.0.0", "::"}:
+            if workload_host_alias in {"", "0.0.0.0", "::"}:  # noqa: S104
                 workload_host_alias = ""
             env.update(
                 {

@@ -782,7 +782,11 @@ def _reconcile_duplicate_caddy_hosts(sites_dir: Path) -> dict[str, Any]:
     for host in duplicate_hosts:
         paths = by_host[host]
         keep = _preferred_caddy_site(paths)
-        unsafe = [path for path in paths if path != keep and not _generated_project_caddy_site(path)]
+        unsafe = [
+            path
+            for path in paths
+            if path != keep and not _generated_project_caddy_site(path)
+        ]
         if unsafe:
             unresolved.append(
                 {
