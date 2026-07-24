@@ -1,0 +1,86 @@
+{
+  "api_version": "workerbee.mcp-resource-contract/v1",
+  "kind": "WorkerBeeMCPResourceContract",
+  "metadata": {
+    "name": "workerbee-read-only-resource-contracts",
+    "description": "Read-only MCP resource contracts with bounded mutation tool references."
+  },
+  "spec": {
+    "mutation_model": "Resources expose read-only project context. Mutations remain behind explicit, bounded WorkerBee tools with project/target scope.",
+    "resources": [
+      {
+        "name": "projects",
+        "uri": "workerbee://projects/v1",
+        "read_only": true,
+        "describes": "known project identities, cwd, branch, mode, and dashboard links",
+        "mutation_tool_refs": [
+          "workerbee_v1_project_start",
+          "workerbee_v1_project_stop",
+          "workerbee_v1_project_mode_set",
+          "workerbee_v1_project_reset"
+        ]
+      },
+      {
+        "name": "status",
+        "uri": "workerbee://projects/{project}/status/v1",
+        "read_only": true,
+        "describes": "project stack, workload, ingress, runbook, and mode status",
+        "mutation_tool_refs": ["workerbee_v1_project_start", "workerbee_v1_manifest_deploy_local"]
+      },
+      {
+        "name": "routes",
+        "uri": "workerbee://projects/{project}/routes/v1",
+        "read_only": true,
+        "describes": "WorkerBee-managed dashboard, API, docs, and workload ingress routes",
+        "mutation_tool_refs": [
+          "workerbee_v1_manifest_deploy_local",
+          "workerbee_v1_ingress_ca_regenerate"
+        ]
+      },
+      {
+        "name": "security",
+        "uri": "workerbee://projects/{project}/security/v1",
+        "read_only": true,
+        "describes": "secret policy state, advisory security findings, and hardening metadata",
+        "mutation_tool_refs": [
+          "workerbee_v1_security_assess",
+          "workerbee_v1_security_review_project"
+        ]
+      },
+      {
+        "name": "trace",
+        "uri": "workerbee://projects/{project}/trace/v1",
+        "read_only": true,
+        "describes": "per-project operation timeline and evidence references",
+        "mutation_tool_refs": [
+          "workerbee_v1_session_start",
+          "workerbee_v1_image_build",
+          "workerbee_v1_manifest_deploy_local",
+          "workerbee_v1_bundle_export"
+        ]
+      },
+      {
+        "name": "profiles",
+        "uri": "workerbee://profiles/v1",
+        "read_only": true,
+        "describes": "built-in k1s profile shapes and runtime requirements",
+        "mutation_tool_refs": [
+          "workerbee_v1_profile_start",
+          "workerbee_v1_profile_stop",
+          "workerbee_v1_profile_workload_validate"
+        ]
+      },
+      {
+        "name": "targets",
+        "uri": "workerbee://targets/v1",
+        "read_only": true,
+        "describes": "target manager mutation boundaries for local, remote, OpenStack-compatible k1s, and export lanes",
+        "mutation_tool_refs": [
+          "workerbee_v1_manifest_deploy_local",
+          "workerbee_v1_manifest_deploy_remote_k1s",
+          "workerbee_v1_bundle_export"
+        ]
+      }
+    ]
+  }
+}

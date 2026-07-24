@@ -1,0 +1,156 @@
+{
+  "api_version": "workerbee.application-profile/v1",
+  "kind": "WorkerBeeApplicationProfile",
+  "metadata": {
+    "name": "generic-web-worker",
+    "description": "Generic API, worker, and store profile used by WorkerBee contract tests.",
+    "labels": {
+      "workerbee.dev/profile": "generic",
+      "workerbee.dev/wbrr-stage": "WBRR-01"
+    }
+  },
+  "spec": {
+    "services": [
+      {
+        "name": "api",
+        "role": "http-api",
+        "image": "registry.example.invalid/workerbee-api:dev",
+        "ports": [
+          {
+            "name": "http",
+            "container_port": 8080,
+            "protocol": "http",
+            "ingress": true
+          }
+        ],
+        "protocols": ["http"],
+        "dependencies": [
+          {
+            "service": "store",
+            "required": true,
+            "reason": "request metadata persistence"
+          },
+          {
+            "service": "worker",
+            "required": false,
+            "reason": "async job execution"
+          }
+        ],
+        "secrets": [
+          {
+            "name": "api-config",
+            "keys": ["DATABASE_URL"],
+            "required": true,
+            "delivery": "secretRef"
+          }
+        ],
+        "probes": [
+          {
+            "name": "api-health",
+            "type": "http",
+            "path": "/healthz",
+            "expected_status": 200,
+            "timeout_seconds": 5
+          }
+        ],
+        "gpu_hints": {
+          "required": false,
+          "profiles": []
+        }
+      },
+      {
+        "name": "worker",
+        "role": "background-worker",
+        "image": "registry.example.invalid/workerbee-worker:dev",
+        "ports": [
+          {
+            "name": "metrics",
+            "container_port": 9090,
+            "protocol": "http",
+            "ingress": false
+          }
+        ],
+        "protocols": ["http"],
+        "dependencies": [
+          {
+            "service": "store",
+            "required": true,
+            "reason": "queue and job state"
+          }
+        ],
+        "secrets": [
+          {
+            "name": "worker-config",
+            "keys": ["QUEUE_URL"],
+            "required": true,
+            "delivery": "secretRef"
+          }
+        ],
+        "probes": [
+          {
+            "name": "worker-metrics",
+            "type": "http",
+            "path": "/metrics",
+            "expected_status": 200,
+            "timeout_seconds": 5
+          }
+        ],
+        "gpu_hints": {
+          "required": false,
+          "profiles": []
+        }
+      },
+      {
+        "name": "store",
+        "role": "state-store",
+        "image": "registry.example.invalid/workerbee-store:dev",
+        "ports": [
+          {
+            "name": "postgres",
+            "container_port": 5432,
+            "protocol": "tcp",
+            "ingress": false
+          }
+        ],
+        "protocols": ["tcp"],
+        "dependencies": [],
+        "secrets": [
+          {
+            "name": "store-config",
+            "keys": ["POSTGRES_PASSWORD"],
+            "required": true,
+            "delivery": "secretRef"
+          }
+        ],
+        "probes": [
+          {
+            "name": "store-tcp",
+            "type": "tcp",
+            "port": "postgres",
+            "timeout_seconds": 5
+          }
+        ],
+        "gpu_hints": {
+          "required": false,
+          "profiles": []
+        }
+      }
+    ],
+    "probes": [
+      {
+        "name": "api-route",
+        "type": "http",
+        "service": "api",
+        "path": "/healthz",
+        "expected_status": 200
+      }
+    ],
+    "export": {
+      "formats": ["k1s", "k8s", "helm"],
+      "include_secret_values": false,
+      "secret_strategy": "references-only",
+      "storage_class_name": null,
+      "promotion_ready": true
+    }
+  }
+}

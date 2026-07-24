@@ -1,0 +1,57 @@
+{
+  "api_version": "workerbee.complementary-proof/v1",
+  "kind": "WorkerBeeComplementaryProof",
+  "metadata": {
+    "name": "workerbee-complementary-architecture-proof",
+    "description": "Static proof summary for WBRR-07.",
+    "labels": {
+      "workerbee.dev/wbrr-stage": "WBRR-07"
+    }
+  },
+  "spec": {
+    "raw_secret_values_retained": false,
+    "panels": [
+      {
+        "name": "target_manager",
+        "status": "contract-ready",
+        "summary": "Target records define local-dev, local-validation, remote-k1s, openstack-k1s-env, and export-only mutation boundaries.",
+        "source_refs": ["target-manager.json"]
+      },
+      {
+        "name": "profile_topology",
+        "status": "contract-ready",
+        "summary": "Application profiles describe services, ports, protocols, dependencies, secret references, probes, GPU hints, and export behavior.",
+        "source_refs": ["application-profile.json", "generic-ai-runtime-profile.json"]
+      },
+      {
+        "name": "operation_trace",
+        "status": "contract-ready",
+        "summary": "Operation trace covers session, build, manifest, validation, deploy, route, probe, security, export, and promotion events.",
+        "source_refs": ["operation-trace.json"]
+      },
+      {
+        "name": "probe_results",
+        "status": "contract-ready",
+        "summary": "Probe pack covers WebSocket, callback, queue, long-running, model, GPU, and auth-negative probe categories.",
+        "source_refs": ["runtime-probe-pack.json"]
+      },
+      {
+        "name": "security_findings",
+        "status": "advisory-clean-fixture",
+        "summary": "The proof surface records redacted evidence and reserves security review output for advisory findings without blocking export by default.",
+        "source_refs": ["mcp-resource-contracts.json", "runtime-probe-pack.json"]
+      },
+      {
+        "name": "export_promotion_state",
+        "status": "contract-ready",
+        "summary": "Export-only target and profile export fields show k1s, Kubernetes, and Helm handoff state plus promotion readiness metadata.",
+        "source_refs": ["application-profile.json", "target-manager.json", "operation-trace.json"]
+      }
+    ],
+    "non_claims": [
+      "This proof surface does not deploy workloads.",
+      "This proof surface does not mutate Kubernetes, k1s, OpenStack, host trust, router, DNS, or firewall state.",
+      "This proof surface does not retain raw secret values."
+    ]
+  }
+}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import signal
 import sys
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from workerbee.agent import runbook_markdown
+from workerbee.complementary_architecture import mcp_resource_contract
 from workerbee.containerd_helper import (
     containerd_privilege_env,
     ensure_containerd_privilege,
@@ -1065,6 +1067,19 @@ def serve_mcp(
     )
     def workerbee_runbook_resource() -> str:
         return runbook_markdown()
+
+    @mcp.resource(
+        "workerbee://contracts/wbrr/resources/v1",
+        name="workerbee-wbrr-resource-contracts-v1",
+        title="WorkerBee WBRR Read-Only Resource Contracts",
+        description=(
+            "Static WBRR contract for read-only WorkerBee MCP resources and "
+            "their bounded mutation tool references."
+        ),
+        mime_type="application/json",
+    )
+    def workerbee_wbrr_resource_contracts() -> str:
+        return json.dumps(mcp_resource_contract(), indent=2, sort_keys=True)
 
     @mcp.prompt(
         name="workerbee_cloud_native_loop",

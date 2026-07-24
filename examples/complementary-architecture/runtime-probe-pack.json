@@ -1,0 +1,93 @@
+{
+  "api_version": "workerbee.runtime-probe-pack/v1",
+  "kind": "WorkerBeeRuntimeProbePack",
+  "metadata": {
+    "name": "generic-runtime-probes",
+    "description": "Runtime probe pack contract for WBRR-05.",
+    "labels": {
+      "workerbee.dev/wbrr-stage": "WBRR-05"
+    }
+  },
+  "spec": {
+    "probes": [
+      {
+        "name": "websocket-echo",
+        "type": "websocket",
+        "target": "route",
+        "mutation": false,
+        "timeout_seconds": 10,
+        "evidence": {
+          "fields": ["url", "status", "round_trip_ms", "message_match"],
+          "redacted": true
+        }
+      },
+      {
+        "name": "callback-delivery",
+        "type": "callback",
+        "target": "service",
+        "mutation": false,
+        "timeout_seconds": 15,
+        "evidence": {
+          "fields": ["callback_id", "status", "signature_check", "ledger_ref"],
+          "redacted": true
+        }
+      },
+      {
+        "name": "queue-depth",
+        "type": "queue",
+        "target": "service",
+        "mutation": false,
+        "timeout_seconds": 10,
+        "evidence": {
+          "fields": ["queue_name", "depth", "consumer_lag", "age_seconds"],
+          "redacted": true
+        }
+      },
+      {
+        "name": "long-running-job",
+        "type": "long-running",
+        "target": "job",
+        "mutation": false,
+        "timeout_seconds": 60,
+        "evidence": {
+          "fields": ["job_id", "started", "completed", "duration_seconds"],
+          "redacted": true
+        }
+      },
+      {
+        "name": "model-health",
+        "type": "model",
+        "target": "model-endpoint",
+        "mutation": false,
+        "timeout_seconds": 30,
+        "evidence": {
+          "fields": ["model_id", "ready", "latency_ms", "tokens_per_second"],
+          "redacted": true
+        }
+      },
+      {
+        "name": "gpu-availability",
+        "type": "gpu",
+        "target": "node",
+        "mutation": false,
+        "timeout_seconds": 15,
+        "evidence": {
+          "fields": ["node", "gpu_count", "driver_ready", "runtime_ready"],
+          "redacted": true
+        }
+      },
+      {
+        "name": "auth-negative",
+        "type": "auth-negative",
+        "target": "route",
+        "mutation": false,
+        "timeout_seconds": 10,
+        "denial_expectations": ["missing bearer denied", "wrong role denied", "bad signature denied"],
+        "evidence": {
+          "fields": ["scenario", "status", "www_authenticate", "audit_ref"],
+          "redacted": true
+        }
+      }
+    ]
+  }
+}

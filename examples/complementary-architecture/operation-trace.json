@@ -1,0 +1,126 @@
+{
+  "api_version": "workerbee.operation-trace/v1",
+  "kind": "WorkerBeeOperationTrace",
+  "metadata": {
+    "project": "demo-app",
+    "name": "demo-app-complementary-trace",
+    "description": "Per-project WorkerBee lifecycle timeline for WBRR-04.",
+    "labels": {
+      "workerbee.dev/wbrr-stage": "WBRR-04"
+    }
+  },
+  "spec": {
+    "timeline": [
+      {
+        "id": "evt-001-session-start",
+        "phase": "session",
+        "event": "session_start",
+        "status": "ok",
+        "timestamp": "2026-07-24T00:00:00Z",
+        "target": "local-dev",
+        "mutation": false,
+        "evidence_refs": ["workerbee://projects/demo-app/status/v1"],
+        "redaction": {"raw_secret_values_retained": false}
+      },
+      {
+        "id": "evt-002-image-build",
+        "phase": "build",
+        "event": "image_build",
+        "status": "ok",
+        "timestamp": "2026-07-24T00:01:00Z",
+        "target": "local-dev",
+        "mutation": true,
+        "evidence_refs": ["workerbee://projects/demo-app/trace/v1#build"],
+        "redaction": {"raw_secret_values_retained": false}
+      },
+      {
+        "id": "evt-003-manifest-prepare",
+        "phase": "manifest",
+        "event": "manifest_prepare",
+        "status": "ok",
+        "timestamp": "2026-07-24T00:02:00Z",
+        "target": "local-dev",
+        "mutation": true,
+        "evidence_refs": ["workerbee://projects/demo-app/trace/v1#manifest"],
+        "redaction": {"raw_secret_values_retained": false}
+      },
+      {
+        "id": "evt-004-validate",
+        "phase": "validation",
+        "event": "manifest_validate",
+        "status": "ok",
+        "timestamp": "2026-07-24T00:03:00Z",
+        "target": "local-dev",
+        "mutation": false,
+        "evidence_refs": ["workerbee://projects/demo-app/security/v1#manifest"],
+        "redaction": {"raw_secret_values_retained": false}
+      },
+      {
+        "id": "evt-005-deploy",
+        "phase": "deploy",
+        "event": "manifest_deploy_local",
+        "status": "ok",
+        "timestamp": "2026-07-24T00:04:00Z",
+        "target": "local-dev",
+        "mutation": true,
+        "evidence_refs": ["workerbee://projects/demo-app/status/v1#deployment"],
+        "redaction": {"raw_secret_values_retained": false}
+      },
+      {
+        "id": "evt-006-route",
+        "phase": "route",
+        "event": "ingress_route_sync",
+        "status": "ok",
+        "timestamp": "2026-07-24T00:05:00Z",
+        "target": "local-dev",
+        "mutation": true,
+        "evidence_refs": ["workerbee://projects/demo-app/routes/v1"],
+        "redaction": {"raw_secret_values_retained": false}
+      },
+      {
+        "id": "evt-007-probe",
+        "phase": "probe",
+        "event": "ingress_probe",
+        "status": "ok",
+        "timestamp": "2026-07-24T00:06:00Z",
+        "target": "local-dev",
+        "mutation": false,
+        "evidence_refs": ["workerbee://projects/demo-app/trace/v1#probe"],
+        "redaction": {"raw_secret_values_retained": false}
+      },
+      {
+        "id": "evt-008-security",
+        "phase": "security",
+        "event": "security_review",
+        "status": "ok",
+        "timestamp": "2026-07-24T00:07:00Z",
+        "target": "local-dev",
+        "mutation": false,
+        "evidence_refs": ["workerbee://projects/demo-app/security/v1"],
+        "redaction": {"raw_secret_values_retained": false}
+      },
+      {
+        "id": "evt-009-export",
+        "phase": "export",
+        "event": "bundle_export",
+        "status": "ok",
+        "timestamp": "2026-07-24T00:08:00Z",
+        "target": "export-only",
+        "mutation": false,
+        "evidence_refs": ["workerbee://projects/demo-app/trace/v1#export"],
+        "redaction": {"raw_secret_values_retained": false}
+      },
+      {
+        "id": "evt-010-promotion",
+        "phase": "promotion",
+        "event": "promotion_readiness_recorded",
+        "status": "ok",
+        "timestamp": "2026-07-24T00:09:00Z",
+        "target": "remote-k1s",
+        "mutation": false,
+        "evidence_refs": ["workerbee://targets/v1#remote-k1s"],
+        "redaction": {"raw_secret_values_retained": false}
+      }
+    ]
+  }
+}

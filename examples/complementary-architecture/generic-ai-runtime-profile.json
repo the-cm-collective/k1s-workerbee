@@ -1,0 +1,181 @@
+{
+  "api_version": "workerbee.application-profile/v1",
+  "kind": "WorkerBeeApplicationProfile",
+  "metadata": {
+    "name": "generic-ai-runtime",
+    "description": "Brand-neutral AI runtime sample profile for WorkerBee validation and export.",
+    "labels": {
+      "workerbee.dev/profile": "generic-ai-runtime",
+      "workerbee.dev/wbrr-stage": "WBRR-06"
+    }
+  },
+  "spec": {
+    "services": [
+      {
+        "name": "ai-router",
+        "role": "ai-router",
+        "image": "registry.example.invalid/workerbee-ai-router:dev",
+        "ports": [
+          {
+            "name": "http",
+            "container_port": 8080,
+            "protocol": "http",
+            "ingress": true
+          }
+        ],
+        "protocols": ["http", "websocket"],
+        "dependencies": [
+          {"service": "model-runtime", "required": true, "reason": "inference path"},
+          {"service": "vector-store", "required": true, "reason": "retrieval path"},
+          {"service": "work-queue", "required": false, "reason": "async evaluation jobs"}
+        ],
+        "secrets": [
+          {
+            "name": "ai-router-config",
+            "keys": ["MODEL_ENDPOINT", "VECTOR_STORE_URL"],
+            "required": true,
+            "delivery": "secretRef"
+          }
+        ],
+        "probes": [
+          {
+            "name": "router-health",
+            "type": "http",
+            "path": "/healthz",
+            "expected_status": 200,
+            "timeout_seconds": 5
+          },
+          {
+            "name": "router-websocket",
+            "type": "websocket",
+            "path": "/ws",
+            "timeout_seconds": 10
+          }
+        ],
+        "gpu_hints": {"required": false, "profiles": []}
+      },
+      {
+        "name": "model-runtime",
+        "role": "model-runtime",
+        "image": "registry.example.invalid/workerbee-generic-model:dev",
+        "ports": [
+          {
+            "name": "http",
+            "container_port": 8000,
+            "protocol": "http",
+            "ingress": false
+          }
+        ],
+        "protocols": ["http"],
+        "dependencies": [],
+        "secrets": [
+          {
+            "name": "model-runtime-config",
+            "keys": ["MODEL_ID"],
+            "required": false,
+            "delivery": "secretRef"
+          }
+        ],
+        "probes": [
+          {
+            "name": "model-ready",
+            "type": "model",
+            "path": "/v1/models",
+            "expected_status": 200,
+            "timeout_seconds": 30
+          },
+          {
+            "name": "gpu-ready",
+            "type": "gpu",
+            "timeout_seconds": 15
+          }
+        ],
+        "gpu_hints": {
+          "required": true,
+          "profiles": ["nvidia-cuda", "amd-rocm"],
+          "minimum_memory_gb": 16
+        }
+      },
+      {
+        "name": "vector-store",
+        "role": "vector-store",
+        "image": "registry.example.invalid/workerbee-vector-store:dev",
+        "ports": [
+          {
+            "name": "http",
+            "container_port": 6333,
+            "protocol": "http",
+            "ingress": false
+          }
+        ],
+        "protocols": ["http"],
+        "dependencies": [],
+        "secrets": [
+          {
+            "name": "vector-store-config",
+            "keys": ["COLLECTION_NAME"],
+            "required": false,
+            "delivery": "secretRef"
+          }
+        ],
+        "probes": [
+          {
+            "name": "vector-store-health",
+            "type": "http",
+            "path": "/healthz",
+            "expected_status": 200,
+            "timeout_seconds": 5
+          }
+        ],
+        "gpu_hints": {"required": false, "profiles": []}
+      },
+      {
+        "name": "work-queue",
+        "role": "queue",
+        "image": "registry.example.invalid/workerbee-queue:dev",
+        "ports": [
+          {
+            "name": "tcp",
+            "container_port": 6379,
+            "protocol": "tcp",
+            "ingress": false
+          }
+        ],
+        "protocols": ["tcp"],
+        "dependencies": [],
+        "secrets": [
+          {
+            "name": "queue-config",
+            "keys": ["QUEUE_NAMESPACE"],
+            "required": false,
+            "delivery": "secretRef"
+          }
+        ],
+        "probes": [
+          {
+            "name": "queue-depth",
+            "type": "queue",
+            "timeout_seconds": 10
+          }
+        ],
+        "gpu_hints": {"required": false, "profiles": []}
+      }
+    ],
+    "probes": [
+      {
+        "name": "chat-completion-smoke",
+        "type": "model",
+        "service": "model-runtime",
+        "path": "/v1/chat/completions",
+        "expected_status": 200
+      }
+    ],
+    "export": {
+      "formats": ["k1s", "k8s", "helm"],
+      "include_secret_values": false,
+      "secret_strategy": "references-only",
+      "storage_class_name": null,
+      "promotion_ready": false
+    }
+  }
+}

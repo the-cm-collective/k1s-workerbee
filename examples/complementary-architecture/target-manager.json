@@ -1,0 +1,113 @@
+{
+  "api_version": "workerbee.target-manager/v1",
+  "kind": "WorkerBeeTargetManager",
+  "metadata": {
+    "name": "workerbee-default-targets",
+    "description": "WorkerBee target mutation boundaries for local, remote, OpenStack-compatible k1s, and export-only lanes.",
+    "labels": {
+      "workerbee.dev/wbrr-stage": "WBRR-02"
+    }
+  },
+  "spec": {
+    "targets": [
+      {
+        "name": "local-dev",
+        "target_type": "workerbee-local-project",
+        "runtime_owner": "WorkerBee project daemon",
+        "mutation_boundary": "project-scoped local state, images, manifests, Caddy routes, and WorkerBee-owned runtime containers",
+        "allowed_mutations": [
+          "project mode",
+          "local image build",
+          "local manifest deploy",
+          "project Caddy route sync",
+          "project cleanup"
+        ],
+        "forbidden_mutations": [
+          "host firewall",
+          "router DNS",
+          "system package manager",
+          "non-WorkerBee containers"
+        ],
+        "requires_confirmation": false,
+        "evidence_surfaces": ["project status", "logs", "ingress probe", "security review"]
+      },
+      {
+        "name": "local-validation",
+        "target_type": "workerbee-local-profile",
+        "runtime_owner": "direct-containerd k1s profile",
+        "mutation_boundary": "WorkerBee state-hash namespaces and profile-owned containers only",
+        "allowed_mutations": [
+          "profile start",
+          "profile workload deploy",
+          "profile workload cleanup",
+          "profile stop"
+        ],
+        "forbidden_mutations": [
+          "reserved containerd namespaces",
+          "host k1s processes",
+          "global scheduler config",
+          "host firewall"
+        ],
+        "requires_confirmation": false,
+        "evidence_surfaces": ["profile status", "profile workload status", "logs", "ingress probe"]
+      },
+      {
+        "name": "remote-k1s",
+        "target_type": "remote-k1s-api",
+        "runtime_owner": "remote k1s controller",
+        "mutation_boundary": "explicit namespace/workload scope supplied by the caller",
+        "allowed_mutations": [
+          "namespaced app apply",
+          "namespaced app delete",
+          "namespace-scoped RBAC apply"
+        ],
+        "forbidden_mutations": [
+          "cluster-scoped webhook",
+          "cluster-scoped CRD",
+          "global scheduler config",
+          "node cordon",
+          "node taint"
+        ],
+        "requires_confirmation": true,
+        "evidence_surfaces": ["remote apply result", "readback status", "export digest"]
+      },
+      {
+        "name": "openstack-k1s-env",
+        "target_type": "openstack-compatible-k1s-environment",
+        "runtime_owner": "external k1s/OpenStack-compatible environment controller",
+        "mutation_boundary": "selected environment, namespace, and workload prefix only",
+        "allowed_mutations": [
+          "env-scoped enable",
+          "env-scoped reconcile",
+          "scoped canary placement",
+          "scoped rollback"
+        ],
+        "forbidden_mutations": [
+          "production-wide enforcement",
+          "cluster-scoped webhook",
+          "global scheduler config",
+          "router DNS",
+          "firewall"
+        ],
+        "requires_confirmation": true,
+        "evidence_surfaces": ["environment readback", "K1S readback", "MCP audit", "redacted ledger"]
+      },
+      {
+        "name": "export-only",
+        "target_type": "artifact-export",
+        "runtime_owner": "local filesystem",
+        "mutation_boundary": "repo or WorkerBee artifact directories only; no live target mutation",
+        "allowed_mutations": [],
+        "forbidden_mutations": [
+          "local deploy",
+          "remote apply",
+          "profile start",
+          "cluster-scoped webhook",
+          "runtime container mutation"
+        ],
+        "requires_confirmation": false,
+        "evidence_surfaces": ["bundle manifest", "images.json", "export digest", "secret policy report"]
+      }
+    ]
+  }
+}
