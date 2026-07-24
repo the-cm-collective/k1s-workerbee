@@ -3,6 +3,18 @@
 All notable WorkerBee changes are documented here. Earlier entries are best
 effort summaries reconstructed from release notes and git history.
 
+## v0.1.6 - 2026-07-24
+
+- Stable release of the v0.1.6 line aligned with k1s v0.1.6.
+- Promotes the v0.1.6.dev1 through v0.1.6.dev3 development channel into the
+  stable WorkerBee install path.
+- Includes external k1s edge-link start/status/validate/stop workflows,
+  direct-containerd profile hardening, per-project runbooks, AI fabric lab
+  validation, AI Max / Strix Halo edge-cell simulation, public-safe OpenStack
+  Lite contract fixtures, namespaced RBAC validation, and bundle export
+  hardening.
+- Published as a stable release pinned to `k1s-workerbee-runtime==0.1.6`.
+
 ## v0.1.6.dev3 - 2026-07-23
 
 - Added AI Max edge-cell simulation coverage for multi-cell fabric behavior,

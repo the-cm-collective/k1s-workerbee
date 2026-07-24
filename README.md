@@ -70,12 +70,14 @@ stable installs:
 curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/latest/download/install-workerbee.sh | sh
 ```
 
-Dev-channel candidates should use an explicit tag so the installer does not
-resolve back to the latest stable release:
+To pin this stable release directly, use the release tag:
 
 ```bash
-curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/download/v0.1.6.dev3/install-workerbee.sh | sh
+curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/download/v0.1.6/install-workerbee.sh | sh
 ```
+
+Dev-channel candidates should also use an explicit tag so the installer does
+not resolve back to the latest stable release.
 
 ### Install from downloaded release artifacts
 
@@ -745,8 +747,9 @@ export PATH="$HOME/.local/bin:$PATH"
 workerbee doctor
 ```
 
-For a dev-channel candidate, replace `/releases/latest/download/` with the
-explicit release tag path, such as `/releases/download/v0.1.6.dev3/`.
+To pin a specific release or dev-channel candidate, replace
+`/releases/latest/download/` with an explicit release tag path, such as
+`/releases/download/v0.1.6/`.
 
 The installer uses an active virtual environment when one is enabled. Without an
 active venv, it creates a standalone WorkerBee venv under
