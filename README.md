@@ -51,13 +51,30 @@ a bounded build-deploy-check-export workbench around that repo.
 - End-to-end profile workload validation with a realtime frontend/backend/db
   stack, dashboard/docs/API health checks, HTTPS ingress probes, WebSocket
   validation, logs/status, and exported handoff artifacts.
+- External k1s edge-link workflows for short-lived gateway/node validation
+  against an existing core, including start/status/validate/stop operations.
+- AI Max / Strix Halo edge-cell simulation for the corrected 4-node cell model:
+  one gateway plus three cell nodes, with optional multi-cell fabric metadata.
+- Public-safe OpenStack Lite contract fixtures for route parity, dashboard
+  fixtures, disabled routes, redacted refresh, dossier reporting, and target
+  import dry-run validation.
 
 ## Quickstart
 
 ### One-line install
 
+The `latest` URL tracks the latest stable GitHub Release. Use it for ordinary
+stable installs:
+
 ```bash
 curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/latest/download/install-workerbee.sh | sh
+```
+
+Dev-channel candidates should use an explicit tag so the installer does not
+resolve back to the latest stable release:
+
+```bash
+curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/download/v0.1.6.dev3/install-workerbee.sh | sh
 ```
 
 ### Install from downloaded release artifacts
@@ -106,6 +123,10 @@ assets:
 install-workerbee.sh
 workerbee-wheelhouse.tar.gz
 ```
+
+Release candidates should also publish `SHA256SUMS` beside those assets when
+checksums are available. Stable installs should continue to use `/latest/`;
+pre-release and dev-channel validation should use `/download/<tag>/`.
 
 The default installer URL resolves through GitHub's latest-release redirect:
 
@@ -223,6 +244,7 @@ to create the file.
 ### Source checkout smoke workflow
 
 ```bash
+scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse
 python -m pip install -e .[dev] --find-links dist/workerbee-wheelhouse
 workerbee doctor
 workerbee start
@@ -722,6 +744,9 @@ curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/latest/do
 export PATH="$HOME/.local/bin:$PATH"
 workerbee doctor
 ```
+
+For a dev-channel candidate, replace `/releases/latest/download/` with the
+explicit release tag path, such as `/releases/download/v0.1.6.dev3/`.
 
 The installer uses an active virtual environment when one is enabled. Without an
 active venv, it creates a standalone WorkerBee venv under
