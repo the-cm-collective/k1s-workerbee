@@ -436,6 +436,21 @@ available for clients that support a custom DNS resolver port. WorkerBee DNS
 only answers private/LAN clients for the selected WorkerBee domain; all other
 queries are forwarded to the configured host resolvers.
 
+The forwarder evaluates configured upstreams before returning a negative answer.
+If an earlier LAN/router resolver returns stale `NXDOMAIN` or an empty answer
+for a public preview name, WorkerBee still tries later upstreams and prefers a
+positive answer. If every upstream returns `NXDOMAIN`, the answer stays
+`NXDOMAIN`; if all upstreams fail or time out, WorkerBee returns `SERVFAIL`.
+`workerbee mcp status`, `workerbee ingress status --json`, and
+`workerbee_v1_ingress_status` include the redacted forwarding policy and
+upstream order without logging query names by default.
+
+For preview or lab environments that mix LAN-only WorkerBee names with public
+preview zones, put public resolvers first for public preview zones and use the
+LAN router only for LAN-only names until WorkerBee grows conditional forwarding.
+A router may cache stale negative public answers even after authoritative DNS is
+correct.
+
 With DNS forwarding enabled, a LAN device can normally install the CA from
 `http://ca.workerbee.home.arpa:19080/workerbee-ca.crt`, set its DNS server to
 the WorkerBee host IP, and browse project URLs such as

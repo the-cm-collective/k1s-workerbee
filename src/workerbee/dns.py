@@ -28,6 +28,7 @@ CLASS_IN = 1
 RCODE_OK = 0
 RCODE_FORMAT_ERROR = 1
 RCODE_SERVER_FAILURE = 2
+RCODE_NAME_ERROR = 3
 RCODE_REFUSED = 5
 
 
@@ -52,6 +53,12 @@ class DNSSettings:
             "port": self.port,
             "answer": self.answer,
             "upstreams": list(self.upstreams),
+            "forwarding_policy": {
+                "strategy": "try-all-prefer-positive",
+                "negative_fallback_order": ["noerror-empty", "nxdomain"],
+                "on_all_upstream_errors": "servfail",
+                "query_names_logged": False,
+            },
             "ttl": self.ttl,
         }
         if running is not None:
@@ -209,6 +216,12 @@ class _DNSQuery:
     qtype: int
     qclass: int
     question_end: int
+
+
+@dataclass(frozen=True, slots=True)
+class _DNSResponseSummary:
+    rcode: int
+    answer_count: int
 
 
 class _ThreadingUDPServer(socketserver.ThreadingMixIn, socketserver.UDPServer):
@@ -423,14 +436,56 @@ def _error_response(packet: bytes, rcode: int) -> bytes | None:
 
 
 def _forward_query(packet: bytes, upstreams: tuple[str, ...]) -> bytes:
+    first_empty: bytes | None = None
+    first_nxdomain: bytes | None = None
     for upstream in upstreams:
         host, port = _parse_upstream(upstream)
         try:
-            return _forward_udp(packet, host=host, port=port)
+            response = _forward_udp(packet, host=host, port=port)
         except OSError:
             continue
+        summary = _response_summary(packet, response)
+        if summary is None:
+            continue
+        if summary.rcode == RCODE_OK and summary.answer_count > 0:
+            return response
+        if summary.rcode == RCODE_OK:
+            if first_empty is None:
+                first_empty = response
+            continue
+        if summary.rcode == RCODE_NAME_ERROR:
+            if first_nxdomain is None:
+                first_nxdomain = response
+            continue
+    if first_empty is not None:
+        return first_empty
+    if first_nxdomain is not None:
+        return first_nxdomain
     response = _error_response(packet, RCODE_SERVER_FAILURE)
     return response or b""
+
+
+def _response_summary(query_packet: bytes, response: bytes) -> _DNSResponseSummary | None:
+    if len(response) < 12 or len(query_packet) < 2:
+        return None
+    query_ident = struct.unpack("!H", query_packet[:2])[0]
+    ident, flags, qdcount, ancount, _nscount, _arcount = struct.unpack(
+        "!HHHHHH",
+        response[:12],
+    )
+    if ident != query_ident or qdcount < 1:
+        return None
+    query = _parse_query(query_packet)
+    response_query = _parse_query(response)
+    if query is None or response_query is None:
+        return None
+    if (
+        response_query.qname != query.qname
+        or response_query.qtype != query.qtype
+        or response_query.qclass != query.qclass
+    ):
+        return None
+    return _DNSResponseSummary(rcode=flags & 0x000F, answer_count=ancount)
 
 
 def _forward_udp(packet: bytes, *, host: str, port: int) -> bytes:
