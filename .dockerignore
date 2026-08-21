@@ -1,0 +1,34 @@
+.git
+.env
+.env.*
+.venv
+__pycache__
+*.py[cod]
+
+# Local runtime state and generated artifacts.
+state
+artifacts
+runs
+temp
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
+
+# Credentials and host-specific configuration must never enter image context.
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+*kubeconfig*
+*.kubeconfig
+docker-auth*.json
+*.docker-auth*.json
+*.podman-auth*.json
+registry-auth*.json
+google-credentials*.json
+gcloud*
+credentials.json
+token.json
