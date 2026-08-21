@@ -396,6 +396,12 @@ def build_parser() -> argparse.ArgumentParser:
     manifest_local.add_argument("-n", "--namespace", default=None)
     manifest_local.add_argument("--timeout", type=int, default=180)
     manifest_local.add_argument(
+        "--readiness-timeout",
+        type=int,
+        default=None,
+        help="Seconds to wait for declared workloads to become ready after apply",
+    )
+    manifest_local.add_argument(
         "--prune",
         action="store_true",
         help="Delete workloads from the previous WorkerBee deployment that are absent now",
@@ -993,6 +999,7 @@ def main(argv: list[str] | None = None) -> int:
                             project=args.project,
                             namespace=args.namespace,
                             timeout=args.timeout,
+                            readiness_timeout=args.readiness_timeout,
                             k1s_root=args.k1s_root,
                             prune=args.prune,
                         )
@@ -1011,6 +1018,7 @@ def main(argv: list[str] | None = None) -> int:
                     project=args.project,
                     namespace=args.namespace,
                     timeout=args.timeout,
+                    readiness_timeout=args.readiness_timeout,
                     prune=args.prune,
                 )
                 if str(args.runtime).lower() == CONTAINERD_RUNTIME:

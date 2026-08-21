@@ -249,6 +249,7 @@ def deploy_local_stage(
     stage_dir: Path,
     namespace: str | None = None,
     timeout: int = 180,
+    readiness_timeout: int | None = None,
     previous_deployment: dict[str, Any] | None = None,
     prune: bool = False,
 ) -> dict[str, Any]:
@@ -325,6 +326,7 @@ def deploy_local_stage(
         previous_workloads=deployment_workloads(previous_deployment),
         namespace=namespace,
         timeout=timeout,
+        readiness_timeout=readiness_timeout,
         wait=True,
         prune=prune,
     )
@@ -412,6 +414,7 @@ def collect_app_status(
     previous_workloads: list[dict[str, Any]] | None = None,
     namespace: str | None = None,
     timeout: int = 180,
+    readiness_timeout: int | None = None,
     wait: bool = False,
     prune: bool = False,
 ) -> dict[str, Any]:
@@ -452,11 +455,16 @@ def collect_app_status(
             for workload in declared
         ]
     elif declared and wait and info is not None:
+        readiness_wait_seconds = (
+            max(1.0, float(readiness_timeout))
+            if readiness_timeout is not None
+            else max(1.0, min(30.0, float(timeout) * 0.25))
+        )
         wait_result = _wait_for_service_workloads(
             supervisor=supervisor,
             info=info,
             workloads=declared,
-            timeout_seconds=max(1.0, min(30.0, float(timeout) * 0.25)),
+            timeout_seconds=readiness_wait_seconds,
         )
         statuses = wait_result.get("statuses", [])
     elif declared and info is not None:

@@ -1330,6 +1330,7 @@ class WorkerBeeDaemon:
         project: str | None = None,
         namespace: str | None = None,
         timeout: int = 180,
+        readiness_timeout: int | None = None,
         k1s_root: str | Path | None = None,
         prune: bool = False,
     ) -> dict[str, Any]:
@@ -1347,6 +1348,7 @@ class WorkerBeeDaemon:
                     stage_dir=stage_dir,
                     namespace=namespace,
                     timeout=timeout,
+                    readiness_timeout=readiness_timeout,
                     previous_deployment=previous,
                     prune=prune,
                 )
@@ -1786,7 +1788,11 @@ class WorkerBeeDaemon:
                     "prune": (
                         "Defaults to false; reports orphaned workloads and deletes only when "
                         "the caller explicitly passes prune=true."
-                    )
+                    ),
+                    "readiness_timeout": (
+                        "Optional seconds to wait for declared workloads to become ready after "
+                        "apply; defaults preserve the standard capped readiness wait."
+                    ),
                 },
                 "workerbee_v1_manifest_deploy_remote_k1s": {
                     "allow_remote_secretrefs": (

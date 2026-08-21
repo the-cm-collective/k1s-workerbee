@@ -810,6 +810,71 @@ spec:
     assert result["app_status"]["state"] == "ready"
 
 
+def test_local_deploy_readiness_timeout_can_override_default_cap(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    sup = _supervisor(tmp_path, monkeypatch)
+    stage = tmp_path / "stage"
+    manifests = stage / "manifests"
+    manifests.mkdir(parents=True)
+    manifest = manifests / "web.yaml"
+    manifest.write_text(
+        """apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: web
+  namespace: demo
+spec:
+  template:
+    spec:
+      containers:
+        - name: web
+          image: nginx:latest
+""",
+        encoding="utf-8",
+    )
+    wait_timeouts: list[float] = []
+
+    def fake_deploy(
+        _self,
+        path: Path,
+        *,
+        namespace: str | None = None,
+        timeout: int = 180,
+    ) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "input_kind": "kubernetes",
+            "manifest": str(path),
+            "namespace": namespace,
+            "timeout": timeout,
+        }
+
+    def fake_wait(**kwargs: Any) -> dict[str, Any]:
+        wait_timeouts.append(float(kwargs["timeout_seconds"]))
+        return _ready_wait(**kwargs)
+
+    sup.deploy_k8s_manifest = MethodType(fake_deploy, sup)  # type: ignore[method-assign]
+    sup.load_stack = MethodType(  # type: ignore[method-assign]
+        lambda _self: SimpleNamespace(runtime="docker", controller_url="", read_token=""),
+        sup,
+    )
+    monkeypatch.setattr("workerbee.manifests._wait_for_service_workloads", fake_wait)
+
+    result = deploy_local_stage(
+        supervisor=sup,
+        stage_dir=stage,
+        namespace="demo",
+        timeout=240,
+        readiness_timeout=95,
+    )
+
+    assert result["ok"] is True
+    assert wait_timeouts == [95.0]
+    assert result["app_status"]["state"] == "ready"
+
+
 def test_local_deploy_reports_degraded_app_status(tmp_path: Path, monkeypatch) -> None:
     sup = _supervisor(tmp_path, monkeypatch)
     stage = tmp_path / "stage"
