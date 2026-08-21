@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2363,6 +2364,94 @@ def test_global_ingress_writes_explicit_project_imports(tmp_path: Path) -> None:
     assert "import /etc/caddy/projects/alpha/caddy/*.caddy" in text
     assert "import /etc/caddy/projects/beta/caddy/*.caddy" in text
     assert "import /etc/caddy/projects/*/caddy/*.caddy" not in text
+
+
+def test_global_ingress_dashboard_health_does_not_proxy_to_port_zero(tmp_path: Path) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="docker",
+        https_port=19443,
+        dashboard_port=0,
+    )
+    ingress.global_dir.mkdir(parents=True)
+
+    ingress._write_caddyfile([])  # noqa: SLF001
+    text = ingress.caddy_file.read_text(encoding="utf-8")
+
+    assert "@workerbee_health path /healthz" in text
+    assert 'respond "ok\\n" 200' in text
+    assert "WorkerBee dashboard backend is not enabled in this runtime" in text
+    assert "reverse_proxy host.docker.internal:0" not in text
+
+
+def test_global_ingress_reload_times_out_without_hanging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="docker",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    monkeypatch.setattr(ingress, "_container_running", lambda: True)
+
+    def timeout_run(_cmd: list[str], **_kwargs: object) -> object:
+        raise subprocess.TimeoutExpired(cmd=["docker", "exec"], timeout=30, output="reload stuck")
+
+    monkeypatch.setattr("workerbee.ingress.subprocess.run", timeout_run)
+
+    result = ingress.reload()
+
+    assert result["ok"] is False
+    assert result["reason"] == "caddy reload timed out"
+    assert result["timeout_seconds"] == 30
+    assert result["returncode"] is None
+    assert "reload stuck" in result["stdout"]
+
+
+def test_global_ingress_verified_health_probe_retries_transient_tls_eof(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ingress = GlobalIngress(
+        state_root=tmp_path,
+        runtime="podman",
+        https_port=19443,
+        dashboard_port=18090,
+    )
+    ingress.global_dir.mkdir(parents=True)
+    ingress.ca_bundle.write_text("-----BEGIN CERTIFICATE-----\ncert\n", encoding="utf-8")
+    probes = iter(
+        [
+            {
+                "ok": False,
+                "url": "https://127.0.0.1:19443/healthz",
+                "method": "loopback-host-header",
+                "error": "[SSL: UNEXPECTED_EOF_WHILE_READING]",
+            },
+            {
+                "ok": True,
+                "url": "https://127.0.0.1:19443/healthz",
+                "method": "loopback-host-header",
+                "tls_verified": True,
+            },
+        ]
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_probe(info: dict[str, object]) -> dict[str, object]:
+        calls.append(info)
+        return next(probes)
+
+    monkeypatch.setattr("workerbee.ingress._global_dashboard_health_probe", fake_probe)
+    monkeypatch.setattr("workerbee.ingress.time.sleep", lambda _delay: None)
+
+    result = ingress._verified_dashboard_health_probe()  # noqa: SLF001
+
+    assert result["ok"] is True
+    assert result["tls_verified"] is True
+    assert len(calls) == 2
 
 
 def test_global_ingress_containerd_writes_host_network_https_port(tmp_path: Path) -> None:
