@@ -92,6 +92,7 @@ def test_workerbee_dns_prefers_later_positive_over_first_nxdomain(monkeypatch) -
     calls: list[str] = []
 
     def fake_forward(packet: bytes, *, host: str, port: int) -> bytes:
+        _ = port
         calls.append(host)
         if host == "router":
             return _nxdomain_response(packet)
@@ -114,6 +115,7 @@ def test_workerbee_dns_prefers_later_positive_over_first_empty_answer(monkeypatc
     calls: list[str] = []
 
     def fake_forward(packet: bytes, *, host: str, port: int) -> bytes:
+        _ = port
         calls.append(host)
         if host == "router":
             return _empty_response(packet)
@@ -133,6 +135,7 @@ def test_workerbee_dns_prefers_later_positive_over_first_empty_answer(monkeypatc
 
 def test_workerbee_dns_returns_nxdomain_when_all_upstreams_nxdomain(monkeypatch) -> None:
     def fake_forward(packet: bytes, *, host: str, port: int) -> bytes:
+        _ = host, port
         return _nxdomain_response(packet)
 
     monkeypatch.setattr(dns_module, "_forward_udp", fake_forward)
@@ -151,6 +154,7 @@ def test_workerbee_dns_continues_after_upstream_error(monkeypatch) -> None:
     calls: list[str] = []
 
     def fake_forward(packet: bytes, *, host: str, port: int) -> bytes:
+        _ = port
         calls.append(host)
         if host == "router":
             raise OSError("timeout")
@@ -170,6 +174,7 @@ def test_workerbee_dns_continues_after_upstream_error(monkeypatch) -> None:
 
 def test_workerbee_dns_returns_servfail_when_no_upstream_is_usable(monkeypatch) -> None:
     def fake_forward(packet: bytes, *, host: str, port: int) -> bytes:
+        _ = packet, host, port
         raise OSError("timeout")
 
     monkeypatch.setattr(dns_module, "_forward_udp", fake_forward)

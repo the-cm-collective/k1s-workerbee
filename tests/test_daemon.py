@@ -3286,6 +3286,7 @@ def test_global_ingress_start_recovers_caddy_ca_mismatch_once(
         "workerbee.ingress._global_dashboard_health_probe",
         lambda _info: next(probes),
     )
+    monkeypatch.setattr("workerbee.ingress.INGRESS_HEALTH_VERIFY_TIMEOUT_SECONDS", 0)
 
     ingress.start()
 

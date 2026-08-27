@@ -48,7 +48,7 @@ class _ProofHtmlParser(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         _ = tag
-        attr_map = {name: value for name, value in attrs}
+        attr_map = dict(attrs)
         if attr_map.get("id"):
             self.ids.add(str(attr_map["id"]))
         if attr_map.get("href"):
@@ -205,7 +205,10 @@ def test_wbrr04_operation_trace_rejects_raw_secret_retention() -> None:
     result = validate_operation_trace(trace)
 
     assert result["ok"] is False
-    assert any("raw secret values are not retained" in error["message"] for error in result["errors"])
+    assert any(
+        "raw secret values are not retained" in error["message"]
+        for error in result["errors"]
+    )
 
 
 def test_wbrr05_runtime_probe_pack_fixture_is_valid() -> None:
@@ -230,7 +233,9 @@ def test_wbrr05_runtime_probe_pack_entries_are_non_mutating() -> None:
 
 def test_wbrr05_auth_negative_probe_requires_denial_expectations() -> None:
     pack = load_json_contract(PROBE_PACK_FIXTURE)
-    auth_negative = next(probe for probe in pack["spec"]["probes"] if probe["type"] == "auth-negative")
+    auth_negative = next(
+        probe for probe in pack["spec"]["probes"] if probe["type"] == "auth-negative"
+    )
     auth_negative["denial_expectations"] = []
 
     result = validate_runtime_probe_pack(pack)
@@ -292,7 +297,10 @@ def test_wbrr07_proof_summary_rejects_missing_panel() -> None:
     result = validate_proof_surface(summary)
 
     assert result["ok"] is False
-    assert any("missing proof panel security_findings" in error["message"] for error in result["errors"])
+    assert any(
+        "missing proof panel security_findings" in error["message"]
+        for error in result["errors"]
+    )
 
 
 def test_wbrr07_static_html_includes_required_review_panels() -> None:

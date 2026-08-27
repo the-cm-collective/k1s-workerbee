@@ -3,6 +3,24 @@
 All notable WorkerBee changes are documented here. Earlier entries are best
 effort summaries reconstructed from release notes and git history.
 
+## v0.1.7 - 2026-08-27
+
+- Added read-only MCP resource contracts and complementary architecture fixtures
+  so agent harnesses can discover WorkerBee runbooks, runtime state, and bounded
+  mutation surfaces without private product code.
+- Hardened WorkerBee image build context ignores to reduce accidental inclusion
+  of local state, caches, secrets, and generated artifacts.
+- Fixed DNS forwarding fallback behavior so later positive upstream responses
+  can recover from router NXDOMAIN, empty-answer, or transient upstream errors.
+- Hardened ingress readiness and dashboard health behavior, including bounded
+  Caddy reloads, transient TLS health-probe retries, safe dashboard `/healthz`
+  handling when the dashboard backend is disabled, and non-destructive Caddy CA
+  mismatch recovery.
+- Added a deploy readiness timeout override for local manifest deployment tools
+  so slower workloads can be validated without changing global timeout behavior.
+- Published as a stable release pinned to
+  `k1s-workerbee-runtime==0.1.7`.
+
 ## v0.1.6 - 2026-07-24
 
 - Stable release of the v0.1.6 line aligned with k1s v0.1.6.

@@ -179,7 +179,9 @@ def validate_target_manager(manager: dict[str, Any]) -> dict[str, Any]:
     by_name: dict[str, dict[str, Any]] = {}
     for index, target in enumerate(targets):
         if not isinstance(target, dict):
-            errors.append({"field": f"spec.targets[{index}]", "message": "target must be an object"})
+            errors.append(
+                {"field": f"spec.targets[{index}]", "message": "target must be an object"}
+            )
             continue
         name = str(target.get("name") or "").strip()
         if not name:
@@ -247,21 +249,30 @@ def mcp_resource_contract() -> dict[str, Any]:
             "uri": "workerbee://projects/{project}/status/v1",
             "read_only": True,
             "describes": "project stack, workload, ingress, runbook, and mode status",
-            "mutation_tool_refs": ["workerbee_v1_project_start", "workerbee_v1_manifest_deploy_local"],
+            "mutation_tool_refs": [
+                "workerbee_v1_project_start",
+                "workerbee_v1_manifest_deploy_local",
+            ],
         },
         {
             "name": "routes",
             "uri": "workerbee://projects/{project}/routes/v1",
             "read_only": True,
             "describes": "WorkerBee-managed dashboard, API, docs, and workload ingress routes",
-            "mutation_tool_refs": ["workerbee_v1_manifest_deploy_local", "workerbee_v1_ingress_ca_regenerate"],
+            "mutation_tool_refs": [
+                "workerbee_v1_manifest_deploy_local",
+                "workerbee_v1_ingress_ca_regenerate",
+            ],
         },
         {
             "name": "security",
             "uri": "workerbee://projects/{project}/security/v1",
             "read_only": True,
             "describes": "secret policy state, advisory security findings, and hardening metadata",
-            "mutation_tool_refs": ["workerbee_v1_security_assess", "workerbee_v1_security_review_project"],
+            "mutation_tool_refs": [
+                "workerbee_v1_security_assess",
+                "workerbee_v1_security_review_project",
+            ],
         },
         {
             "name": "trace",
@@ -306,7 +317,9 @@ def mcp_resource_contract() -> dict[str, Any]:
         "kind": MCP_RESOURCE_CONTRACT_KIND,
         "metadata": {
             "name": "workerbee-read-only-resource-contracts",
-            "description": "Read-only MCP resource contracts with bounded mutation tool references.",
+            "description": (
+                "Read-only MCP resource contracts with bounded mutation tool references."
+            ),
         },
         "spec": {
             "resources": resources,
@@ -395,7 +408,9 @@ def validate_operation_trace(trace: dict[str, Any]) -> dict[str, Any]:
     phases: set[str] = set()
     for index, event in enumerate(events):
         if not isinstance(event, dict):
-            errors.append({"field": f"spec.timeline[{index}]", "message": "event must be an object"})
+            errors.append(
+                {"field": f"spec.timeline[{index}]", "message": "event must be an object"}
+            )
             continue
         phase = str(event.get("phase") or "").strip()
         if phase:
@@ -730,7 +745,11 @@ def _validate_protocols(errors: list[dict[str, Any]], service: dict[str, Any], i
             )
 
 
-def _validate_dependencies(errors: list[dict[str, Any]], service: dict[str, Any], index: int) -> None:
+def _validate_dependencies(
+    errors: list[dict[str, Any]],
+    service: dict[str, Any],
+    index: int,
+) -> None:
     for dep_index, dependency in enumerate(_list(service.get("dependencies"))):
         if not isinstance(dependency, dict) or not str(dependency.get("service") or "").strip():
             errors.append(
@@ -763,7 +782,11 @@ def _validate_dependencies_resolve(
                 )
 
 
-def _validate_secret_refs(errors: list[dict[str, Any]], service: dict[str, Any], index: int) -> None:
+def _validate_secret_refs(
+    errors: list[dict[str, Any]],
+    service: dict[str, Any],
+    index: int,
+) -> None:
     for secret_index, secret in enumerate(_list(service.get("secrets"))):
         if not isinstance(secret, dict):
             errors.append(
