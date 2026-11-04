@@ -118,6 +118,15 @@ python -m pip install --no-index --find-links dist/workerbee-wheelhouse k1s-work
 workerbee doctor
 ```
 
+The wheelhouse installer is intentionally offline-only: it verifies the
+release `SHA256SUMS` and the archive's internal manifest, then installs with
+`--no-index`. An incomplete or incompatible wheelhouse fails closed instead of
+falling back to a package index.
+
+Release operators should follow [`docs/releasing.md`](docs/releasing.md) for
+artifact audits, deterministic hash checks, staged OIDC trusted publishing,
+the gated k1s-core provider integration point, and rollback.
+
 The public one-line installer expects each GitHub release to include these
 assets:
 

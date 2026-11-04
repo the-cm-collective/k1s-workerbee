@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools==80.9.0", "wheel==0.45.1"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,21 +8,33 @@ version = "0.1.7"
 description = "Local MCP workbench for k1s-powered cloud-native agent testing"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {text = "Apache-2.0"}
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 authors = [{name = "k1s contributors"}]
 dependencies = [
     "k1s-workerbee-runtime==0.1.7",
-    "mcp>=1.8",
+    "mcp>=1.8,<2",
 ]
 
 [project.optional-dependencies]
 dev = [
+    "build>=1.2",
     "pytest>=8.2",
     "ruff>=0.6",
+    "twine>=5",
 ]
 
 [project.scripts]
 workerbee = "workerbee.cli:main"
+
+[tool.workerbee.release]
+distribution = "k1s-workerbee"
+import-package = "workerbee"
+cli-entry-point = "workerbee.cli:main"
+mcp-entry-point = "workerbee.mcp_server:serve_mcp"
+runtime-import = "ae"
+runtime-provider-lane = "legacy"
+runtime-provider-requirement = "k1s-workerbee-runtime==0.1.7"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -8,8 +8,10 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from workerbee.paths import resolve_k1s_python, resolve_k1s_root
+from workerbee.runtime_provider import validate_installed_ae_providers
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +98,7 @@ def _probe_ae_info(python_bin: str, *, pythonpath: str | None) -> dict[str, str 
         env["PYTHONPATH"] = f"{pythonpath}{os.pathsep}{current}" if current else pythonpath
     code = """
 import json
+from importlib.metadata import packages_distributions
 import ae
 import ae.apishim.__main__
 import ae.cli.__main__
@@ -103,6 +106,7 @@ import ae.controller.__main__
 print(json.dumps({
     "origin": getattr(ae, "__file__", None),
     "version": getattr(ae, "__version__", None),
+    "providers": packages_distributions().get("ae", []),
 }))
 """
     proc = subprocess.run(
@@ -115,9 +119,13 @@ print(json.dumps({
     if proc.returncode != 0:
         return None
     try:
-        data = json.loads(proc.stdout)
+        data: dict[str, Any] = json.loads(proc.stdout)
     except Exception:
         return None
+    providers = data.get("providers")
+    if not isinstance(providers, list) or not all(isinstance(item, str) for item in providers):
+        return None
+    validate_installed_ae_providers(providers)
     return {
         "origin": str(data.get("origin") or ""),
         "version": str(data["version"]) if data.get("version") is not None else None,

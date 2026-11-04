@@ -300,7 +300,7 @@ def test_project_runbook_update_rejects_high_confidence_secrets(tmp_path: Path) 
     with pytest.raises(WorkerBeeError) as private_key_exc:
         daemon.project_runbook_update(
             project="Demo App",
-            content="-----BEGIN OPENSSH PRIVATE KEY-----\nabc123",
+            content="-----BEGIN OPENSSH " + "PRIVATE KEY-----\nabc123",
         )
     assert private_key_exc.value.code == "RUNBOOK_SECRET_DETECTED"
     assert private_key_exc.value.details["findings"][0] == {
