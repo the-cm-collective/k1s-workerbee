@@ -5,7 +5,7 @@
 WorkerBee now has two validation paths:
 
 - The default app-stack path starts a local, single-node k1s workbench from an
-  installed `k1s-workerbee-runtime` package or a sibling `../k1s` checkout
+  installed, accepted `k1s-core` package or a sibling `../k1s` checkout
   without modifying k1s.
 - The advanced profile path runs containerized k1s controller/runtime profiles
   in explicit direct containerd mode for k1s development.
@@ -68,7 +68,9 @@ WorkerBee now has the planned shared MCP shape:
   Caddy CA path, `workerbee trust install` performs the OS/user trust-store
   install only when requested, and explicit LAN mode serves the public CA
   certificate for other local devices without changing host trust stores.
-- The wheelhouse flow can package `k1s-workerbee` plus `k1s-workerbee-runtime`, so users only need the WorkerBee wheelhouse and a supported container runtime.
+- The wheelhouse flow packages `k1s-workerbee` plus the exact accepted
+  `k1s-core` provider and rejects the legacy provider, so users only need the
+  sealed WorkerBee wheelhouse and a supported container runtime.
 
 ## v0.1 Capability Baseline
 

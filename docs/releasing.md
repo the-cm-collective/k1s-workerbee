@@ -6,29 +6,33 @@ import `ae`.
 
 ## Current provider lane
 
-Release 0.1.7 is deliberately frozen on the legacy requirement
-`k1s-workerbee-runtime==0.1.7`. The release contract in `pyproject.toml`, the
-runtime provider guard, artifact audit, wheelhouse audit, and tests all require
-that to be the only installed distribution advertising the `ae` package.
+The RC1 integration lane requires `k1s-core==0.1.8a1`. The accepted,
+nonpublished compatibility wheel is
+`k1s_core-0.1.8a1-py3-none-any.whl`, size `879766`, SHA256
+`11103d1df772d9618e023d40a8bdfeecb10feac7a5a374fa2efe0b1ac607cb30`.
+The release contract in `pyproject.toml`, runtime provider guard, artifact
+audit, wheelhouse audit, and tests require that exact artifact to be the only
+installed distribution advertising the `ae` package. The legacy
+`k1s-workerbee-runtime` distribution is forbidden in the active lane.
 The MCP SDK remains on `mcp>=1.8,<2` because WorkerBee's current server contract
 uses the 1.x `FastMCP` API; a 2.x migration must be a separate compatibility
 change rather than an implicit dependency upgrade.
 
-The replacement k1s-core artifact is a separate release gate. Do not change the
-provider lane until the accepted artifact supplies all of the following:
+The accepted artifact supplies the required compatibility imports: `ae`,
+`ae.apishim`, `ae.cli`, and `ae.controller`. Its provenance is K1s commit
+`187c57e182c43db108e06dbd471d5daad1ea39a7`, tree
+`7289e2d8dd1e97ce032f90b978848c978d6e08b0`, and sealed evidence hash
+`79bf1cd2f0d80bb22491bd44c92df86ac6127c25234ed35458f9c82d7fbbcd38`.
+Do not substitute a rebuild or an index artifact.
 
-- the canonical distribution name and exact version;
-- the exact wheel filename and supported Python/platform tags;
-- the wheel SHA256 from the accepted build;
-- evidence that the wheel provides the existing `ae`, `ae.apishim`, `ae.cli`,
-  and `ae.controller` imports WorkerBee uses.
-
-The integration point is `[project].dependencies` together with
+The dependency integration and future rebind points are `[project].dependencies` together with
 `[tool.workerbee.release]` in `pyproject.toml` and the constants in
-`src/workerbee/runtime_provider.py`. Change those in one reviewed commit, add
-the accepted filename/SHA to the release validation contract, rebuild the
-wheelhouse, and rerun every command below. Never leave both legacy and new
-provider requirements active.
+`src/workerbee/runtime_provider.py`, the wheelhouse builder, release artifact
+auditor, contract tests, and this document. Before the final RC1 artifact
+freeze, stop and obtain explicit confirmation that the accepted K1s baseline
+has not been superseded. If it has, update every rebind point and rerun all
+affected build, wheelhouse, offline-install, and compatibility gates. Never
+leave both providers active.
 
 ## Build and local validation
 
@@ -49,11 +53,13 @@ For reproducibility, build twice from the same commit with the same
 `SOURCE_DATE_EPOCH` and verify the first manifest against the second directory.
 The wheel and sdist filenames, sizes, and SHA256 values must match exactly.
 
-The wheelhouse builder materializes third-party dependency wheels from one
-explicit index, builds the frozen legacy runtime wheel locally, builds WorkerBee without
-dependency or build-isolation resolution, validates that only one wheel
-provides `ae`, proves pip can resolve the complete wheelhouse with
-`--no-index`, writes an internal manifest, and creates a normalized archive.
+The wheelhouse builder accepts the exact verified `k1s-core` wheel plus a local
+directory containing all transitive wheels. It sets `PIP_NO_INDEX=1` and
+`PIP_CONFIG_FILE=/dev/null`, rejects provider wheels in the dependency input,
+builds WorkerBee without dependency or build-isolation resolution, validates
+that only the accepted wheel provides `ae`, proves pip can resolve the complete
+wheelhouse with `--no-index`, writes an internal manifest, and creates a
+normalized archive. It has no package-index resolution path.
 The installer requires the external `SHA256SUMS`, verifies the internal
 manifest, and never falls back to an index.
 
@@ -84,7 +90,10 @@ Python package files are immutable: do not replace or delete them as a normal
 rollback. Restore behavior with a new patch release that re-establishes the
 last accepted provider contract, then promote that new exact-byte candidate.
 
-If the future provider migration fails before publication, revert the single
-integration commit so the dependency, release contract, and runtime guard all
-return to `k1s-workerbee-runtime==0.1.7`. Confirm a clean no-index wheelhouse
-install and the CLI/MCP smoke tests before considering another candidate.
+If this provider migration fails before publication, revert the focused
+integration commits together so the dependency, release contract, runtime
+guard, wheelhouse contract, tests, and documentation return to the previously
+accepted state. Never install both providers as a rollback. Confirm a clean
+no-index wheelhouse install and the CLI/MCP smoke tests before considering
+another candidate. After publication, roll forward with a new version rather
+than replacing immutable package files.

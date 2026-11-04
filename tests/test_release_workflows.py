@@ -9,6 +9,11 @@ WORKFLOWS = (
 )
 
 
+def test_no_parallel_gitea_release_lane_exists() -> None:
+    directory = Path(".gitea/workflows")
+    assert not directory.exists() or not tuple(directory.glob("*.y*ml"))
+
+
 def test_release_actions_are_pinned_to_full_commit_shas() -> None:
     for workflow in WORKFLOWS:
         text = workflow.read_text(encoding="utf-8")
@@ -27,6 +32,7 @@ def test_release_workflows_are_manual_only_and_default_to_no_publish() -> None:
         assert "id-token: write" in text
         assert "skip-existing: false" in text
         assert "extra-index-url" not in text
+        assert "python scripts/audit_release_artifacts.py verify-project" in text
 
 
 def test_testpypi_workflow_builds_twice_and_publishes_only_verified_bytes() -> None:

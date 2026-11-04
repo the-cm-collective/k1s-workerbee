@@ -13,9 +13,10 @@ if [[ ! -x "$workerbee_bin" ]]; then
 workerbee executable not found: $workerbee_bin
 
 Create the editable dev venv first:
-  scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse
+  scripts/build_wheelhouse.sh --k1s-core-wheel "\$K1S_CORE_WHEEL" \
+    --dependency-wheelhouse "\$DEPENDENCY_WHEELHOUSE" --out dist/workerbee-wheelhouse
   uv venv .venv
-  uv pip install -e '.[dev]' --find-links dist/workerbee-wheelhouse
+  uv pip install --offline -e . --find-links dist/workerbee-wheelhouse
 EOF
   exit 127
 fi

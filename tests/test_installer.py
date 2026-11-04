@@ -28,28 +28,38 @@ def test_install_script_is_offline_only_and_fails_closed() -> None:
     assert "pip install --upgrade pip" not in text
 
 
-def test_wheelhouse_build_has_no_implicit_index_resolution() -> None:
+def test_wheelhouse_build_is_local_only_and_has_no_index_resolution() -> None:
     text = Path("scripts/build_wheelhouse.sh").read_text(encoding="utf-8")
-    assert "--dependency-index-url" in text
-    assert "--index-url" in text
-    assert '"${RUNTIME_WHEELS[0]}"' in text
-    assert text.count("pip wheel") >= 2
+    assert "--dependency-wheelhouse" in text
+    assert "--k1s-core-wheel" in text
+    assert "verify-runtime-artifact" in text
+    assert "PIP_NO_INDEX=1" in text
+    assert "PIP_CONFIG_FILE=/dev/null" in text
     assert "--no-index" in text
     assert "--no-build-isolation" in text
     assert "--no-deps" in text
+    assert "--index-url" not in text
+    assert "--extra-index-url" not in text
+    assert "WORKERBEE_DEPENDENCY_INDEX_URL" not in text
 
 
-def test_workerbee_runtime_pin_matches_project_version() -> None:
+def test_runtime_provider_pin_and_artifact_identity_are_exact() -> None:
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
     project = pyproject["project"]
     release = pyproject["tool"]["workerbee"]["release"]
-    runtime_pin = next(
-        dep for dep in project["dependencies"] if dep.startswith("k1s-workerbee-runtime==")
-    )
+    runtime_pin = next(dep for dep in project["dependencies"] if dep.startswith("k1s-core=="))
 
-    assert runtime_pin == f"k1s-workerbee-runtime=={project['version']}"
-    assert release["runtime-provider-lane"] == "legacy"
+    assert runtime_pin == "k1s-core==0.1.8a1"
+    assert release["runtime-provider-lane"] == "k1s-core"
     assert release["runtime-provider-requirement"] == runtime_pin
+    assert release["runtime-provider-artifact"] == "k1s_core-0.1.8a1-py3-none-any.whl"
+    assert release["runtime-provider-size"] == 879766
+    assert (
+        release["runtime-provider-sha256"]
+        == "11103d1df772d9618e023d40a8bdfeecb10feac7a5a374fa2efe0b1ac607cb30"
+    )
+    assert release["forbidden-runtime-provider"] == "k1s-workerbee-runtime"
+    assert not any(dep.startswith("k1s-workerbee-runtime") for dep in project["dependencies"])
 
 
 def test_mcp_dependency_stays_on_the_compatible_major_lane() -> None:

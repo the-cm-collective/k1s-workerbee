@@ -8,7 +8,7 @@ WorkerBee is a local MCP workbench that gives coding agents a project-scoped
 k1s-powered app engine for building, deploying, probing, and exporting
 cloud-native applications on a developer machine.
 
-WorkerBee v0.1 can use an installed `k1s-workerbee-runtime` wheel or a sibling
+WorkerBee v0.1 uses the exact accepted `k1s-core` wheel or a sibling
 `../k1s` checkout without modifying k1s. The default workflow uses Podman or
 Docker for ordinary app validation. Advanced k1s controller/runtime development
 uses explicit direct containerd mode, where every k1s profile component is
@@ -111,7 +111,10 @@ WorkerBee does not install container runtimes. It uses Podman or Docker for the 
 ### Build and install from a local wheelhouse
 
 ```bash
-scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse
+scripts/build_wheelhouse.sh \
+  --k1s-core-wheel "$K1S_CORE_WHEEL" \
+  --dependency-wheelhouse "$DEPENDENCY_WHEELHOUSE" \
+  --out dist/workerbee-wheelhouse
 python -m venv .venv
 . .venv/bin/activate
 python -m pip install --no-index --find-links dist/workerbee-wheelhouse k1s-workerbee
@@ -255,8 +258,11 @@ to create the file.
 ### Source checkout smoke workflow
 
 ```bash
-scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse
-python -m pip install -e .[dev] --find-links dist/workerbee-wheelhouse
+scripts/build_wheelhouse.sh \
+  --k1s-core-wheel "$K1S_CORE_WHEEL" \
+  --dependency-wheelhouse "$DEPENDENCY_WHEELHOUSE" \
+  --out dist/workerbee-wheelhouse
+python -m pip install --no-index -e . --find-links dist/workerbee-wheelhouse
 workerbee doctor
 workerbee start
 workerbee deploy-poc
@@ -275,9 +281,12 @@ release wheel path representative.
 
 ```bash
 direnv allow
-scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse
+scripts/build_wheelhouse.sh \
+  --k1s-core-wheel "$K1S_CORE_WHEEL" \
+  --dependency-wheelhouse "$DEPENDENCY_WHEELHOUSE" \
+  --out dist/workerbee-wheelhouse
 uv venv .venv
-uv pip install -e '.[dev]' --find-links dist/workerbee-wheelhouse
+uv pip install --offline -e . --find-links dist/workerbee-wheelhouse
 workerbee doctor
 ```
 
@@ -285,8 +294,9 @@ The dev shell provides Python, `uv`, `ruff`, `node`, `jq`, `imagemagick`, and on
 Linux, `nerdctl`, `buildctl`, `slirp4netns`, and CNI plugins for direct
 containerd development. Podman or Docker daemon setup remains a host
 prerequisite for the default runtime path.
-If `k1s-workerbee-runtime` is already available from your configured package
-index, the local wheelhouse build and `--find-links` option can be omitted.
+The accepted `k1s-core` artifact and its transitive wheels must be supplied
+locally. The release wheelhouse path does not fall back to a package index and
+rejects the legacy `k1s-workerbee-runtime` provider.
 
 When rebuilding WorkerBee from this checkout and restarting the normal
 background MCP daemon, stop the old daemon before reinstalling and refresh sudo
@@ -294,8 +304,10 @@ before start:
 
 ```bash
 workerbee mcp stop
-scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse
-uv pip install --python .venv -e '.[dev]' --find-links dist/workerbee-wheelhouse --force-reinstall
+scripts/build_wheelhouse.sh --k1s-core-wheel "$K1S_CORE_WHEEL" \
+  --dependency-wheelhouse "$DEPENDENCY_WHEELHOUSE" --out dist/workerbee-wheelhouse
+uv pip install --offline --python .venv -e . \
+  --find-links dist/workerbee-wheelhouse --force-reinstall
 sudo -v && workerbee mcp start
 ```
 
@@ -579,7 +591,7 @@ Image builds support repo-root contexts with nested Dockerfiles:
 workerbee build-image . --dockerfile backend/Dockerfile --tag workerbee-demo-api:dev
 ```
 
-WorkerBee prefers an installed `k1s-workerbee-runtime` package. For source development it
+WorkerBee prefers the accepted installed `k1s-core` package. For source development it
 falls back to a sibling k1s checkout at `../k1s`. Override with
 `WORKERBEE_K1S_ROOT=/path/to/k1s`.
 
@@ -787,20 +799,23 @@ git clone git@github.com:the-cm-collective/k1s-workerbee.git
 cd k1s-workerbee
 python3.11 -m venv .venv
 . .venv/bin/activate
-python -m pip install -U pip
 mkdir -p dist
 curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/latest/download/workerbee-wheelhouse.tar.gz -o dist/workerbee-wheelhouse.tar.gz
 tar -xzf dist/workerbee-wheelhouse.tar.gz -C dist
-python -m pip install -e '.[dev]' --find-links dist/workerbee-wheelhouse
+python -m pip install --no-index -e . --find-links dist/workerbee-wheelhouse
 workerbee doctor
 ```
 
-If you are developing against a sibling k1s checkout instead of the published
-runtime wheel, rebuild the wheelhouse from that checkout:
+If you are developing against a sibling k1s checkout, keep the installed
+provider lane bound to the accepted wheel and select the checkout at runtime
+with `WORKERBEE_K1S_ROOT`. Build the offline wheelhouse from approved local
+inputs:
 
 ```bash
-scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse --python .venv/bin/python
-python -m pip install -e '.[dev]' --find-links dist/workerbee-wheelhouse
+scripts/build_wheelhouse.sh --k1s-core-wheel "$K1S_CORE_WHEEL" \
+  --dependency-wheelhouse "$DEPENDENCY_WHEELHOUSE" \
+  --out dist/workerbee-wheelhouse --python .venv/bin/python
+python -m pip install --no-index -e . --find-links dist/workerbee-wheelhouse
 ```
 
 With Docker Desktop, WorkerBee is intended to support the same default app

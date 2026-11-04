@@ -12,7 +12,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{name = "k1s contributors"}]
 dependencies = [
-    "k1s-workerbee-runtime==0.1.7",
+    "k1s-core==0.1.8a1",
     "mcp>=1.8,<2",
 ]
 
@@ -33,8 +33,12 @@ import-package = "workerbee"
 cli-entry-point = "workerbee.cli:main"
 mcp-entry-point = "workerbee.mcp_server:serve_mcp"
 runtime-import = "ae"
-runtime-provider-lane = "legacy"
-runtime-provider-requirement = "k1s-workerbee-runtime==0.1.7"
+runtime-provider-lane = "k1s-core"
+runtime-provider-requirement = "k1s-core==0.1.8a1"
+runtime-provider-artifact = "k1s_core-0.1.8a1-py3-none-any.whl"
+runtime-provider-size = 879766
+runtime-provider-sha256 = "11103d1df772d9618e023d40a8bdfeecb10feac7a5a374fa2efe0b1ac607cb30"
+forbidden-runtime-provider = "k1s-workerbee-runtime"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

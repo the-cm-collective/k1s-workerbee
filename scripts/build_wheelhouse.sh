@@ -2,19 +2,24 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-K1S_ROOT="${K1S_ROOT:-${ROOT_DIR}/../k1s}"
 OUT_DIR="${ROOT_DIR}/dist/workerbee-wheelhouse"
 PYTHON_BIN="${PYTHON_BIN:-python3.11}"
-DEPENDENCY_INDEX_URL="${WORKERBEE_DEPENDENCY_INDEX_URL:-https://pypi.org/simple}"
+K1S_CORE_WHEEL="${WORKERBEE_K1S_CORE_WHEEL:-}"
+DEPENDENCY_WHEELHOUSE="${WORKERBEE_DEPENDENCY_WHEELHOUSE:-}"
 
 usage() {
   cat <<'EOF'
-usage: scripts/build_wheelhouse.sh [--k1s-root PATH] [--out PATH] [--python PYTHON]
-                                     [--dependency-index-url URL]
+usage: scripts/build_wheelhouse.sh --k1s-core-wheel PATH
+                                    --dependency-wheelhouse PATH
+                                    [--out PATH] [--python PYTHON]
 
 Build a local wheelhouse containing:
-  - k1s-workerbee-runtime==0.1.7 (frozen legacy provider lane)
+  - the exact release-contract k1s-core==0.1.8a1 wheel
   - k1s-workerbee
+
+All transitive wheels must already be present in --dependency-wheelhouse.
+The command never resolves from a package index and rejects any legacy or
+alternate runtime-provider wheel in the dependency input.
 
 Install with:
   python -m pip install --no-index --find-links <wheelhouse> k1s-workerbee
@@ -23,8 +28,12 @@ EOF
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --k1s-root)
-      K1S_ROOT="$2"
+    --k1s-core-wheel)
+      K1S_CORE_WHEEL="$2"
+      shift 2
+      ;;
+    --dependency-wheelhouse)
+      DEPENDENCY_WHEELHOUSE="$2"
       shift 2
       ;;
     --out)
@@ -33,10 +42,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --python)
       PYTHON_BIN="$2"
-      shift 2
-      ;;
-    --dependency-index-url)
-      DEPENDENCY_INDEX_URL="$2"
       shift 2
       ;;
     -h|--help)
@@ -51,23 +56,46 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-K1S_ROOT="$(cd "$K1S_ROOT" && pwd)"
+if [[ -z "$K1S_CORE_WHEEL" || ! -f "$K1S_CORE_WHEEL" ]]; then
+  echo "--k1s-core-wheel must name the accepted local wheel" >&2
+  exit 2
+fi
+if [[ -z "$DEPENDENCY_WHEELHOUSE" || ! -d "$DEPENDENCY_WHEELHOUSE" ]]; then
+  echo "--dependency-wheelhouse must name a local wheel-only dependency directory" >&2
+  exit 2
+fi
+K1S_CORE_WHEEL="$(cd "$(dirname "$K1S_CORE_WHEEL")" && pwd)/$(basename "$K1S_CORE_WHEEL")"
+DEPENDENCY_WHEELHOUSE="$(cd "$DEPENDENCY_WHEELHOUSE" && pwd)"
 OUT_PARENT="$(mkdir -p "$(dirname "$OUT_DIR")" && cd "$(dirname "$OUT_DIR")" && pwd)"
 OUT_DIR="${OUT_PARENT}/$(basename "$OUT_DIR")"
 rm -rf "$OUT_DIR" "${OUT_PARENT}/workerbee-wheelhouse.tar.gz" "${ROOT_DIR}/build"
 mkdir -p "$OUT_DIR"
 
-"${PYTHON_BIN}" "${K1S_ROOT}/scripts/build_workerbee_runtime_wheel.py" --out "$OUT_DIR"
-RUNTIME_WHEELS=("$OUT_DIR"/k1s_workerbee_runtime-*.whl)
-if [[ ${#RUNTIME_WHEELS[@]} -ne 1 || ! -f "${RUNTIME_WHEELS[0]}" ]]; then
-  echo "expected exactly one frozen legacy runtime wheel in $OUT_DIR" >&2
-  exit 1
-fi
-"${PYTHON_BIN}" -m pip wheel \
-  --index-url "$DEPENDENCY_INDEX_URL" \
-  --wheel-dir "$OUT_DIR" \
-  "${RUNTIME_WHEELS[0]}" \
+for forbidden in \
+  "$DEPENDENCY_WHEELHOUSE"/k1s_core-*.whl \
+  "$DEPENDENCY_WHEELHOUSE"/k1s_workerbee_runtime-*.whl; do
+  if [[ -e "$forbidden" ]]; then
+    echo "dependency input must not supply a runtime provider: $forbidden" >&2
+    exit 1
+  fi
+done
+
+export PIP_NO_INDEX=1
+export PIP_CONFIG_FILE=/dev/null
+export PYTHONDONTWRITEBYTECODE=1
+"${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" \
+  verify-runtime-artifact \
+  --artifact "$K1S_CORE_WHEEL"
+"${PYTHON_BIN}" -m pip download \
+  --no-index \
+  --only-binary=:all: \
+  --find-links "$DEPENDENCY_WHEELHOUSE" \
+  --dest "$OUT_DIR" \
+  "$K1S_CORE_WHEEL" \
   "mcp>=1.8,<2"
+"${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" \
+  verify-runtime-artifact \
+  --artifact "$OUT_DIR/$(basename "$K1S_CORE_WHEEL")"
 "${PYTHON_BIN}" -m pip wheel \
   --no-index \
   --no-build-isolation \
@@ -94,6 +122,9 @@ cat >"${OUT_DIR}/INSTALL.txt" <<EOF
 Install WorkerBee from this wheelhouse:
 
   python -m pip install --no-index --find-links ${OUT_DIR} k1s-workerbee
+
+Accepted runtime provider:
+  k1s-core==0.1.8a1
 
 Runtime requirements not bundled in wheels:
   - Podman or Docker available on PATH

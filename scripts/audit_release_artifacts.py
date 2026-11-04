@@ -51,6 +51,10 @@ class ReleaseContract:
     runtime_import: str
     runtime_provider_lane: str
     runtime_provider_requirement: str
+    runtime_provider_artifact: str
+    runtime_provider_size: int
+    runtime_provider_sha256: str
+    forbidden_runtime_provider: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +89,10 @@ def load_contract() -> tuple[ReleaseContract, dict[str, Any]]:
         runtime_import=release["runtime-import"],
         runtime_provider_lane=release["runtime-provider-lane"],
         runtime_provider_requirement=release["runtime-provider-requirement"],
+        runtime_provider_artifact=release["runtime-provider-artifact"],
+        runtime_provider_size=release["runtime-provider-size"],
+        runtime_provider_sha256=release["runtime-provider-sha256"],
+        forbidden_runtime_provider=release["forbidden-runtime-provider"],
     )
     return contract, pyproject
 
@@ -99,8 +107,8 @@ def validate_project() -> list[str]:
         errors.append("the import package must remain workerbee")
     if contract.runtime_import != "ae":
         errors.append("the compatibility runtime import must remain ae")
-    if contract.runtime_provider_lane != "legacy":
-        errors.append("the runtime provider lane changed without an accepted artifact gate")
+    if contract.runtime_provider_lane != "k1s-core":
+        errors.append("the runtime provider lane must be the accepted k1s-core lane")
     if project.get("scripts", {}).get("workerbee") != contract.cli_entry_point:
         errors.append("the workerbee console script does not match the release contract")
     dependencies = tuple(project.get("dependencies", ()))
@@ -120,13 +128,34 @@ def validate_project() -> list[str]:
         )
     if requirement_name(contract.runtime_provider_requirement) != provider_name:
         errors.append("runtime provider requirement is malformed")
+    if provider_name != "k1s-core":
+        errors.append("the accepted runtime provider distribution must be k1s-core")
+    if requirement_name(contract.forbidden_runtime_provider) != "k1s-workerbee-runtime":
+        errors.append("the forbidden legacy provider contract is malformed")
+    if any(
+        requirement_name(dependency) == requirement_name(contract.forbidden_runtime_provider)
+        for dependency in dependencies
+    ):
+        errors.append("the legacy runtime provider must not be a project dependency")
+    if not re.fullmatch(r"[0-9a-f]{64}", contract.runtime_provider_sha256):
+        errors.append("the runtime provider SHA256 must be a lowercase hex digest")
+    if contract.runtime_provider_size <= 0:
+        errors.append("the runtime provider artifact size must be positive")
     init_text = INIT_MODULE.read_text(encoding="utf-8")
     if f'__version__ = "{contract.version}"' not in init_text:
         errors.append("workerbee.__version__ does not match project.version")
     runtime_text = RUNTIME_MODULE.read_text(encoding="utf-8")
     provider_version = contract.runtime_provider_requirement.split("==", 1)[-1]
-    if f'LEGACY_RUNTIME_VERSION = "{provider_version}"' not in runtime_text:
-        errors.append("runtime provider module does not match the frozen requirement")
+    expected_runtime_constants = (
+        f'RUNTIME_DISTRIBUTION = "{provider_name}"',
+        f'RUNTIME_VERSION = "{provider_version}"',
+        f'RUNTIME_ARTIFACT_FILENAME = "{contract.runtime_provider_artifact}"',
+        f"RUNTIME_ARTIFACT_SIZE = {contract.runtime_provider_size}",
+        f'RUNTIME_ARTIFACT_SHA256 = "{contract.runtime_provider_sha256}"',
+        f'LEGACY_RUNTIME_DISTRIBUTION = "{contract.forbidden_runtime_provider}"',
+    )
+    if any(item not in runtime_text for item in expected_runtime_constants):
+        errors.append("runtime provider module does not match the accepted artifact contract")
     if pyproject["build-system"].get("build-backend") != "setuptools.build_meta":
         errors.append("unexpected build backend")
     return errors
@@ -225,6 +254,48 @@ def _wheel_has_import(path: Path, import_package: str) -> bool:
     prefix = f"{import_package}/"
     with zipfile.ZipFile(path) as archive:
         return any(name.startswith(prefix) for name in archive.namelist())
+
+
+def verify_runtime_artifact(path: Path) -> list[str]:
+    """Verify the exact accepted runtime wheel identity and compatibility imports."""
+
+    contract, _ = load_contract()
+    errors: list[str] = []
+    if path.name != contract.runtime_provider_artifact:
+        errors.append(
+            "runtime artifact filename mismatch: "
+            f"expected {contract.runtime_provider_artifact}, found {path.name}"
+        )
+    if not path.is_file():
+        return [*errors, f"runtime artifact is not a file: {path}"]
+    if path.stat().st_size != contract.runtime_provider_size:
+        errors.append(
+            "runtime artifact size mismatch: "
+            f"expected {contract.runtime_provider_size}, found {path.stat().st_size}"
+        )
+    if sha256_file(path) != contract.runtime_provider_sha256:
+        errors.append("runtime artifact SHA256 mismatch")
+    try:
+        metadata = _metadata_from_wheel(path)
+        names = set(_archive_names(path))
+    except (OSError, ValueError, zipfile.BadZipFile) as exc:
+        return [*errors, f"runtime artifact is not a valid wheel: {exc}"]
+    expected_version = contract.runtime_provider_requirement.split("==", 1)[-1]
+    if normalize_distribution(metadata.get("Name", "")) != requirement_name(
+        contract.runtime_provider_requirement
+    ):
+        errors.append("runtime artifact distribution mismatch")
+    if metadata.get("Version") != expected_version:
+        errors.append("runtime artifact version mismatch")
+    required_imports = {
+        "ae/__init__.py",
+        "ae/apishim/__main__.py",
+        "ae/cli/__main__.py",
+        "ae/controller/__main__.py",
+    }
+    for member in sorted(required_imports - names):
+        errors.append(f"runtime artifact missing compatibility import: {member}")
+    return errors
 
 
 def audit_artifacts(paths: Sequence[Path]) -> list[Finding]:
@@ -333,22 +404,32 @@ def verify_wheelhouse(wheelhouse: Path) -> list[str]:
         if normalize_distribution(_metadata_from_wheel(path).get("Name", ""))
         == normalize_distribution(contract.distribution)
     ]
-    legacy_name = requirement_name(contract.runtime_provider_requirement)
-    legacy = [
+    provider_name = requirement_name(contract.runtime_provider_requirement)
+    provider = [
         path
         for path in wheels
-        if normalize_distribution(_metadata_from_wheel(path).get("Name", "")) == legacy_name
+        if normalize_distribution(_metadata_from_wheel(path).get("Name", "")) == provider_name
+    ]
+    forbidden = [
+        path
+        for path in wheels
+        if normalize_distribution(_metadata_from_wheel(path).get("Name", ""))
+        == normalize_distribution(contract.forbidden_runtime_provider)
     ]
     ae_providers = [path for path in wheels if _wheel_has_import(path, contract.runtime_import)]
     if len(workerbee) != 1:
         errors.append(f"expected one {contract.distribution} wheel, found {workerbee!r}")
-    if len(legacy) != 1:
-        errors.append(f"expected one frozen legacy runtime wheel, found {legacy!r}")
-    if ae_providers != legacy:
+    if len(provider) != 1:
+        errors.append(f"expected one accepted runtime wheel, found {provider!r}")
+    if forbidden:
+        errors.append(f"legacy runtime provider is forbidden: {forbidden!r}")
+    if ae_providers != provider:
         errors.append(
-            "wheelhouse must contain exactly one ae provider and it must be the frozen "
-            f"legacy wheel; providers={ae_providers!r}"
+            "wheelhouse must contain exactly one ae provider and it must be the accepted "
+            f"k1s-core wheel; providers={ae_providers!r}"
         )
+    if provider:
+        errors.extend(verify_runtime_artifact(provider[0]))
     if workerbee:
         findings = _audit_workerbee_wheel(workerbee[0], contract)
         errors.extend(f"{item.kind}: {item.detail}" for item in findings)
@@ -456,6 +537,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     audit.add_argument("--json", action="store_true")
     wheelhouse = subparsers.add_parser("verify-wheelhouse")
     wheelhouse.add_argument("--wheelhouse", required=True, type=Path)
+    runtime = subparsers.add_parser("verify-runtime-artifact")
+    runtime.add_argument("--artifact", required=True, type=Path)
     manifest = subparsers.add_parser("write-manifest")
     manifest.add_argument("--output", required=True, type=Path)
     manifest.add_argument("artifacts", nargs="+", type=Path)
@@ -497,6 +580,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1 if findings else 0
     if args.command == "verify-wheelhouse":
         return _print_errors(verify_wheelhouse(args.wheelhouse))
+    if args.command == "verify-runtime-artifact":
+        return _print_errors(verify_runtime_artifact(args.artifact))
     if args.command == "write-manifest":
         write_manifest(args.output, args.artifacts)
         print(args.output)

@@ -38,9 +38,10 @@ namespaces are project-scoped, so project names are the isolation boundary.
 Create or refresh the WorkerBee editable environment from `k1s-workerbee`:
 
 ```bash
-scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse
+scripts/build_wheelhouse.sh --k1s-core-wheel "$K1S_CORE_WHEEL" \
+  --dependency-wheelhouse "$DEPENDENCY_WHEELHOUSE" --out dist/workerbee-wheelhouse
 uv venv .venv
-uv pip install -e '.[dev]' --find-links dist/workerbee-wheelhouse
+uv pip install --offline -e . --find-links dist/workerbee-wheelhouse
 ```
 
 When rebuilding WorkerBee itself and restarting the normal MCP daemon, use the
@@ -48,8 +49,10 @@ clean stop, rebuild, force-reinstall, sudo-refresh, start sequence:
 
 ```bash
 workerbee mcp stop
-scripts/build_wheelhouse.sh --k1s-root ../k1s --out dist/workerbee-wheelhouse
-uv pip install --python .venv -e '.[dev]' --find-links dist/workerbee-wheelhouse --force-reinstall
+scripts/build_wheelhouse.sh --k1s-core-wheel "$K1S_CORE_WHEEL" \
+  --dependency-wheelhouse "$DEPENDENCY_WHEELHOUSE" --out dist/workerbee-wheelhouse
+uv pip install --offline --python .venv -e . \
+  --find-links dist/workerbee-wheelhouse --force-reinstall
 sudo -v && workerbee mcp start
 ```
 

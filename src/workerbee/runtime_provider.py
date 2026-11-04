@@ -1,8 +1,8 @@
 """Runtime provider compatibility contract.
 
-The public 0.1.7 release remains on the legacy distribution while the
-replacement k1s artifact is reviewed independently.  Keep this module small:
-it is imported by runtime discovery before any k1s process is launched.
+WorkerBee accepts one exact ``k1s-core`` distribution as the provider of the
+existing ``ae`` import surface. Keep this module small: runtime discovery
+imports it before any k1s process is launched.
 """
 
 from __future__ import annotations
@@ -10,9 +10,13 @@ from __future__ import annotations
 import re
 from collections.abc import Iterable
 
+RUNTIME_DISTRIBUTION = "k1s-core"
+RUNTIME_VERSION = "0.1.8a1"
+RUNTIME_REQUIREMENT = f"{RUNTIME_DISTRIBUTION}=={RUNTIME_VERSION}"
+RUNTIME_ARTIFACT_FILENAME = "k1s_core-0.1.8a1-py3-none-any.whl"
+RUNTIME_ARTIFACT_SIZE = 879766
+RUNTIME_ARTIFACT_SHA256 = "11103d1df772d9618e023d40a8bdfeecb10feac7a5a374fa2efe0b1ac607cb30"
 LEGACY_RUNTIME_DISTRIBUTION = "k1s-workerbee-runtime"
-LEGACY_RUNTIME_VERSION = "0.1.7"
-LEGACY_RUNTIME_REQUIREMENT = f"{LEGACY_RUNTIME_DISTRIBUTION}=={LEGACY_RUNTIME_VERSION}"
 RUNTIME_IMPORT_PACKAGE = "ae"
 
 
@@ -32,7 +36,7 @@ def validate_installed_ae_providers(providers: Iterable[str]) -> tuple[str, ...]
     normalized = tuple(
         sorted({normalize_distribution_name(provider) for provider in providers if provider})
     )
-    expected = normalize_distribution_name(LEGACY_RUNTIME_DISTRIBUTION)
+    expected = normalize_distribution_name(RUNTIME_DISTRIBUTION)
     if len(normalized) > 1:
         joined = ", ".join(normalized)
         raise RuntimeError(
@@ -42,6 +46,6 @@ def validate_installed_ae_providers(providers: Iterable[str]) -> tuple[str, ...]
     if normalized and normalized != (expected,):
         raise RuntimeError(
             f"unapproved distribution provides {RUNTIME_IMPORT_PACKAGE!r}: "
-            f"{normalized[0]}; the active release lane requires {expected}"
+            f"{normalized[0]}; the active release lane requires only {expected}"
         )
     return normalized

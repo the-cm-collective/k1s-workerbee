@@ -5,6 +5,7 @@ import json
 import sys
 import tarfile
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 
@@ -28,7 +29,7 @@ def _write_workerbee_wheel(path: Path, *, extra_member: tuple[str, str] | None =
             "Metadata-Version: 2.4",
             "Name: k1s-workerbee",
             "Version: 0.1.7",
-            "Requires-Dist: k1s-workerbee-runtime==0.1.7",
+            "Requires-Dist: k1s-core==0.1.8a1",
             "Requires-Dist: mcp>=1.8,<2",
             "",
         )
@@ -51,6 +52,32 @@ def _write_workerbee_wheel(path: Path, *, extra_member: tuple[str, str] | None =
             archive.writestr(*extra_member)
 
 
+def _write_runtime_wheel(
+    path: Path,
+    *,
+    distribution: str = "k1s-core",
+    version: str = "0.1.8a1",
+) -> None:
+    dist_info = distribution.replace("-", "_")
+    metadata = "\n".join(
+        (
+            "Metadata-Version: 2.4",
+            f"Name: {distribution}",
+            f"Version: {version}",
+            "",
+        )
+    )
+    with zipfile.ZipFile(path, "w") as archive:
+        for member in (
+            "ae/__init__.py",
+            "ae/apishim/__main__.py",
+            "ae/cli/__main__.py",
+            "ae/controller/__main__.py",
+        ):
+            archive.writestr(member, "")
+        archive.writestr(f"{dist_info}-{version}.dist-info/METADATA", metadata)
+
+
 def test_project_release_contract_is_consistent() -> None:
     assert release.validate_project() == []
 
@@ -60,6 +87,49 @@ def test_clean_wheel_passes_identity_and_hygiene_audit(tmp_path: Path) -> None:
     _write_workerbee_wheel(wheel)
 
     assert release.audit_artifacts([wheel]) == []
+
+
+def test_exact_runtime_artifact_identity_and_imports_are_enforced(
+    tmp_path: Path, monkeypatch
+) -> None:
+    wheel = tmp_path / "k1s_core-0.1.8a1-py3-none-any.whl"
+    _write_runtime_wheel(wheel)
+    contract, project = release.load_contract()
+    fixture_contract = replace(
+        contract,
+        runtime_provider_size=wheel.stat().st_size,
+        runtime_provider_sha256=release.sha256_file(wheel),
+    )
+    monkeypatch.setattr(release, "load_contract", lambda: (fixture_contract, project))
+
+    assert release.verify_runtime_artifact(wheel) == []
+
+    with wheel.open("ab") as stream:
+        stream.write(b"changed")
+    assert "runtime artifact size mismatch" in "\n".join(release.verify_runtime_artifact(wheel))
+    assert "runtime artifact SHA256 mismatch" in release.verify_runtime_artifact(wheel)
+
+
+def test_wheelhouse_rejects_legacy_or_mixed_ae_providers(tmp_path: Path, monkeypatch) -> None:
+    workerbee = tmp_path / "k1s_workerbee-0.1.7-py3-none-any.whl"
+    runtime = tmp_path / "k1s_core-0.1.8a1-py3-none-any.whl"
+    _write_workerbee_wheel(workerbee)
+    _write_runtime_wheel(runtime)
+    contract, project = release.load_contract()
+    fixture_contract = replace(
+        contract,
+        runtime_provider_size=runtime.stat().st_size,
+        runtime_provider_sha256=release.sha256_file(runtime),
+    )
+    monkeypatch.setattr(release, "load_contract", lambda: (fixture_contract, project))
+
+    assert release.verify_wheelhouse(tmp_path) == []
+
+    legacy = tmp_path / "k1s_workerbee_runtime-0.1.7-py3-none-any.whl"
+    _write_runtime_wheel(legacy, distribution="k1s-workerbee-runtime", version="0.1.7")
+    errors = release.verify_wheelhouse(tmp_path)
+    assert any("legacy runtime provider is forbidden" in error for error in errors)
+    assert any("exactly one ae provider" in error for error in errors)
 
 
 def test_wheel_secret_pattern_fails_audit(tmp_path: Path) -> None:
