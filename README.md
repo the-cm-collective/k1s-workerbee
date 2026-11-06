@@ -421,6 +421,13 @@ environment. See [`docs/controlled-runs.md`](docs/controlled-runs.md) for the
 exact MCP payloads, state machine, cleanup receipt, failure codes, and private
 platform-debug carry-forward contract.
 
+Normal OSS sessions remain native/direct: `workerbee_v1_session_start(cwd=...)`
+binds the exact trusted host checkout and preserves the full local MCP surface.
+The typed source/execution boundary, native binding receipt, Agent PBX access
+profile authority, and private ownership of snapshot-import and managed-clone
+are documented in
+[`docs/native-direct-interoperability.md`](docs/native-direct-interoperability.md).
+
 App ingress is also loopback-only by default. For an explicit local-network dev
 session, start or restart MCP with LAN ingress:
 

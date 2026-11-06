@@ -25,6 +25,8 @@ from urllib.parse import parse_qs, urlsplit, urlunsplit
 from workerbee.agent import (
     DEFAULT_PROJECT_MODE,
     derive_session_project_info,
+    native_direct_binding,
+    native_interoperability_capabilities,
     next_actions_for_mode,
     normalize_project_mode,
     open_browser,
@@ -379,6 +381,7 @@ class WorkerBeeDaemon:
             "project": name,
             "cwd": str(cwd_path),
             "project_identity": project_info.public_dict(),
+            "source_binding": native_direct_binding(project_info),
             "git_root": str(project_info.git_root) if project_info.git_root else None,
             "git_branch": project_info.git_branch,
             "explicit_project": project_info.explicit_project,
@@ -1744,6 +1747,7 @@ class WorkerBeeDaemon:
             "default_project": self.default_project,
             "mcp_tools": [*MCP_TOOL_NAMES, *controlled_runs["advertised_tools"]],
             "controlled_runs": controlled_runs,
+            "native_interoperability": native_interoperability_capabilities(),
             "agent_workflow": {
                 "session_bootstrap": True,
                 "project_modes": sorted({"start", "lazy", "stop"}),

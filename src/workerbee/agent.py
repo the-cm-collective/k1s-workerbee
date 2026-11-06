@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import subprocess
 import webbrowser
 from dataclasses import asdict, dataclass
@@ -14,6 +15,8 @@ from workerbee.supervisor import project_slug
 
 PROJECT_MODES = {"start", "lazy", "stop"}
 DEFAULT_PROJECT_MODE = "lazy"
+NATIVE_INTEROPERABILITY_CAPABILITIES_SCHEMA = "workerbee.native-interoperability/v1"
+NATIVE_DIRECT_BINDING_SCHEMA = "workerbee.native-direct-binding/v1"
 AGENT_INSTRUCTIONS_START = "<!-- workerbee-agent-instructions:v1 start -->"
 AGENT_INSTRUCTIONS_END = "<!-- workerbee-agent-instructions:v1 end -->"
 
@@ -31,6 +34,105 @@ class SessionProjectInfo:
         data["cwd"] = str(self.cwd)
         data["git_root"] = str(self.git_root) if self.git_root else None
         return data
+
+
+def native_interoperability_capabilities() -> dict[str, Any]:
+    """Describe OSS-native source/execution ownership without selecting PBX access."""
+
+    contract: dict[str, Any] = {
+        "schema": NATIVE_INTEROPERABILITY_CAPABILITIES_SCHEMA,
+        "version": 1,
+        "default_binding": {
+            "source_mode": "native-direct",
+            "execution_lane": "native-local",
+        },
+        "source_modes": {
+            "native-direct": {
+                "supported": True,
+                "owner": "workerbee-oss",
+                "uses_exact_host_checkout": True,
+            },
+            "snapshot-import": {
+                "supported": False,
+                "owner": "platform-debug-adapter",
+            },
+            "managed-clone": {
+                "supported": False,
+                "owner": "platform-debug-adapter",
+            },
+        },
+        "source_binding_modes": {
+            "trusted-direct-bind": {
+                "supported": False,
+                "owner": "platform-debug-adapter",
+            },
+        },
+        "access_profile_contract": {
+            "owner": "agent-pbx",
+            "workerbee_selects": False,
+            "selected": None,
+        },
+        "execution_lanes": {
+            "native-local": {
+                "supported": True,
+                "owner": "workerbee-oss",
+                "ordinary_mcp_surface": True,
+            },
+            "strict-appliance": {
+                "supported": False,
+                "owner": "platform-debug-adapter",
+                "capability_gate": "controlled_runs",
+            },
+        },
+        "controlled_run_relation": {
+            "separate_contract": True,
+            "native_binding_satisfies_appliance_gate": False,
+            "capability_path": "controlled_runs",
+        },
+    }
+    contract["capability_sha256"] = hashlib.sha256(
+        json.dumps(contract, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    return contract
+
+
+def native_direct_binding(info: SessionProjectInfo) -> dict[str, Any]:
+    """Return a bounded receipt binding an OSS session to its exact trusted checkout."""
+
+    capabilities = native_interoperability_capabilities()
+    cwd_text = str(info.cwd)
+    git_root_text = str(info.git_root) if info.git_root else None
+    return {
+        "schema": NATIVE_DIRECT_BINDING_SCHEMA,
+        "version": 1,
+        "state": "bound",
+        "source_mode": "native-direct",
+        "execution_lane": "native-local",
+        "project": info.project,
+        "workspace_id": info.project,
+        "checkout": {
+            "canonical_path_ref": "cwd",
+            "path_sha256": hashlib.sha256(cwd_text.encode("utf-8")).hexdigest(),
+            "git_root_ref": "git_root" if git_root_text else None,
+            "git_root_sha256": (
+                hashlib.sha256(git_root_text.encode("utf-8")).hexdigest() if git_root_text else None
+            ),
+            "git_branch": info.git_branch,
+        },
+        "helper": {
+            "name": "workerbee_v1_session_start",
+            "owner": "workerbee-oss",
+            "adapter": None,
+            "capability_sha256": capabilities["capability_sha256"],
+        },
+        "evidence_refs": ["cwd", "project_identity", "git_root", "git_branch"],
+        "invariants": {
+            "snapshot_imported": False,
+            "managed_clone_created": False,
+            "trusted_direct_bind_created": False,
+            "controlled_run_appliance": False,
+        },
+    }
 
 
 def derive_session_project(cwd: Path | str, project: str | None = None) -> str:
@@ -331,8 +433,7 @@ def install_agent_instructions(
             message=f"AGENTS target does not exist: {path}",
             details={"path": str(path)},
             remediation=(
-                "Create AGENTS.md first or pass "
-                "`workerbee agent install --append --allow-create`."
+                "Create AGENTS.md first or pass `workerbee agent install --append --allow-create`."
             ),
         )
     path.parent.mkdir(parents=True, exist_ok=True)
