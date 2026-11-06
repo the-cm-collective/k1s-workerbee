@@ -13,7 +13,7 @@ import ssl
 import struct
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -40,6 +40,7 @@ from workerbee.containerd_helper import (
     temporary_containerd_privilege_env,
 )
 from workerbee.contract import WorkerBeeError
+from workerbee.controlled_runs import ControlledRunAdapter, ControlledRunService
 from workerbee.dns import WorkerBeeDNSServer
 from workerbee.edge_link import K1sEdgeLinkRunner
 from workerbee.http import request, request_https_via_loopback
@@ -148,6 +149,8 @@ class WorkerBeeDaemon:
         default_project: str = "default",
         cwd: Path | None = None,
         ingress_settings: IngressSettings | None = None,
+        controlled_run_adapter: ControlledRunAdapter | None = None,
+        controlled_run_environ: Mapping[str, str] | None = None,
     ) -> None:
         self.state_root = (state_root or default_state_root()).resolve()
         self.runtime_requested = runtime
@@ -172,6 +175,11 @@ class WorkerBeeDaemon:
         self._dns_server: WorkerBeeDNSServer | None = None
         self._dns_status: dict[str, Any] | None = None
         self._state_lock: FileLock | None = None
+        self.controlled_runs = ControlledRunService(
+            state_root=self.state_root,
+            adapter=controlled_run_adapter,
+            environ=controlled_run_environ,
+        )
 
     def configure_dashboard_lifecycle(
         self,
@@ -190,6 +198,7 @@ class WorkerBeeDaemon:
         if self._state_lock is None:
             self._state_lock = FileLock(state_root_lock_path(self.state_root), label="state root")
             self._state_lock.acquire(metadata={"mcp_bind_url": mcp_bind_url})
+        self.controlled_runs.recover_incomplete()
         dashboard_port = self._start_dashboard_server()
         dns_status = self._start_dns_server()
         self.ingress = GlobalIngress(
@@ -1727,12 +1736,14 @@ class WorkerBeeDaemon:
         except Exception as exc:  # noqa: BLE001
             k1s = {"error": str(exc)}
 
+        controlled_runs = self.controlled_runs.capabilities()
         return {
             "api_version": API_VERSION,
             "workerbee_version": __version__,
             "state_root": str(self.state_root),
             "default_project": self.default_project,
-            "mcp_tools": MCP_TOOL_NAMES,
+            "mcp_tools": [*MCP_TOOL_NAMES, *controlled_runs["advertised_tools"]],
+            "controlled_runs": controlled_runs,
             "agent_workflow": {
                 "session_bootstrap": True,
                 "project_modes": sorted({"start", "lazy", "stop"}),

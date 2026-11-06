@@ -413,6 +413,14 @@ WorkerBee does not implement remote MCP authorization yet; future remote mode
 should follow the MCP OAuth 2.1 Resource Server model with OAuth Protected
 Resource Metadata rather than a custom bearer-token scheme.
 
+Agent PBX controlled runs use a separate, fail-closed five-tool lifecycle. They
+are disabled by default and are advertised only when an explicit local policy
+and a strict platform adapter are both present. Requests bind fixed identity,
+recipe, profile, source, and tool-manifest values—never caller commands or
+environment. See [`docs/controlled-runs.md`](docs/controlled-runs.md) for the
+exact MCP payloads, state machine, cleanup receipt, failure codes, and private
+platform-debug carry-forward contract.
+
 App ingress is also loopback-only by default. For an explicit local-network dev
 session, start or restart MCP with LAN ingress:
 

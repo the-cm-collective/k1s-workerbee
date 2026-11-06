@@ -82,6 +82,108 @@ INGRESS_PROBE_INPUT_SCHEMA: dict[str, Any] = {
 }
 
 
+def _register_controlled_run_tools(mcp: Any, daemon: Any) -> tuple[str, ...]:
+    """Register the five lifecycle tools only when the strict gate is usable."""
+
+    service = getattr(daemon, "controlled_runs", None)
+    if service is None or not service.available:
+        return ()
+
+    @mcp.tool()
+    def workerbee_v1_controlled_run_preflight(
+        request_id: str,
+        idempotency_key: str,
+        request_sha256: str,
+        root_operator_agent_id: str,
+        target_fork_agent_id: str,
+        campaign_id: str,
+        workspace_binding_id: str,
+        profile: dict[str, Any],
+        profile_sha256: str,
+        baseline_commit: str,
+        candidate_commit: str,
+        recipe_id: str,
+        tool_manifest_sha256: str,
+    ) -> dict[str, Any]:
+        """Fail-closed validation of one Agent PBX fixed-recipe controlled run."""
+        payload = {
+            "request_id": request_id,
+            "idempotency_key": idempotency_key,
+            "request_sha256": request_sha256,
+            "root_operator_agent_id": root_operator_agent_id,
+            "target_fork_agent_id": target_fork_agent_id,
+            "campaign_id": campaign_id,
+            "workspace_binding_id": workspace_binding_id,
+            "profile": profile,
+            "profile_sha256": profile_sha256,
+            "baseline_commit": baseline_commit,
+            "candidate_commit": candidate_commit,
+            "recipe_id": recipe_id,
+            "tool_manifest_sha256": tool_manifest_sha256,
+        }
+        return protect("ControlledRunPreflight", None, lambda: service.preflight(payload))
+
+    @mcp.tool()
+    def workerbee_v1_controlled_run_start(
+        request_id: str,
+        idempotency_key: str,
+        request_sha256: str,
+        root_operator_agent_id: str,
+        target_fork_agent_id: str,
+        campaign_id: str,
+        workspace_binding_id: str,
+        profile: dict[str, Any],
+        profile_sha256: str,
+        baseline_commit: str,
+        candidate_commit: str,
+        recipe_id: str,
+        tool_manifest_sha256: str,
+    ) -> dict[str, Any]:
+        """Idempotently start one strict fixed-recipe controlled run."""
+        payload = {
+            "request_id": request_id,
+            "idempotency_key": idempotency_key,
+            "request_sha256": request_sha256,
+            "root_operator_agent_id": root_operator_agent_id,
+            "target_fork_agent_id": target_fork_agent_id,
+            "campaign_id": campaign_id,
+            "workspace_binding_id": workspace_binding_id,
+            "profile": profile,
+            "profile_sha256": profile_sha256,
+            "baseline_commit": baseline_commit,
+            "candidate_commit": candidate_commit,
+            "recipe_id": recipe_id,
+            "tool_manifest_sha256": tool_manifest_sha256,
+        }
+        return protect("ControlledRunStart", None, lambda: service.start(payload))
+
+    @mcp.tool()
+    def workerbee_v1_controlled_run_status(run_id: str) -> dict[str, Any]:
+        """Return a bounded status for one controlled run."""
+        return protect("ControlledRunStatus", None, lambda: service.status(run_id))
+
+    @mcp.tool()
+    def workerbee_v1_controlled_run_cancel(
+        run_id: str,
+        reason: str | None = None,
+    ) -> dict[str, Any]:
+        """Idempotently cancel, collect, and clean one controlled run."""
+        return protect("ControlledRunCancel", None, lambda: service.cancel(run_id, reason))
+
+    @mcp.tool()
+    def workerbee_v1_controlled_run_receipt(run_id: str) -> dict[str, Any]:
+        """Return the bounded redacted evidence and cleanup receipt for one run."""
+        return protect("ControlledRunReceipt", None, lambda: service.receipt(run_id))
+
+    return (
+        "workerbee_v1_controlled_run_preflight",
+        "workerbee_v1_controlled_run_start",
+        "workerbee_v1_controlled_run_status",
+        "workerbee_v1_controlled_run_cancel",
+        "workerbee_v1_controlled_run_receipt",
+    )
+
+
 def serve_mcp(
     *,
     project: str = "default",
@@ -210,6 +312,8 @@ def serve_mcp(
     def workerbee_v1_capabilities() -> dict[str, Any]:
         """Return WorkerBee v1 MCP contract capabilities."""
         return protect("Capabilities", None, daemon.capabilities)
+
+    _register_controlled_run_tools(mcp, daemon)
 
     @mcp.tool()
     def workerbee_v1_session_start(
