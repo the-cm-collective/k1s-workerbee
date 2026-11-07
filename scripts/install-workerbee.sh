@@ -38,6 +38,15 @@ need_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
+case "$INSTALL_DIR" in
+  /*) ;;
+  *) fail "standalone install directory must be absolute" ;;
+esac
+case "$BIN_DIR" in
+  /*) ;;
+  *) fail "standalone launcher directory must be absolute" ;;
+esac
+
 atomic_link() {
   link_name="$1"
   link_target="$2"
@@ -60,7 +69,10 @@ if (
 temporary = root / f".{name}.new.{os.getpid()}"
 temporary.unlink(missing_ok=True)
 temporary.symlink_to(target)
-temporary.replace(root / name)
+try:
+    temporary.replace(root / name)
+finally:
+    temporary.unlink(missing_ok=True)
 PY
 }
 
@@ -71,9 +83,19 @@ rollback_standalone() {
   previous_target="$(readlink "$INSTALL_DIR/previous")"
   validate_release_target "$current_target" || fail "current release link is unsafe"
   validate_release_target "$previous_target" || fail "previous release link is unsafe"
-  [ -x "$INSTALL_DIR/$previous_target/bin/python" ] || fail "rollback release is invalid"
-  atomic_link previous "$current_target"
-  atomic_link current "$previous_target"
+  validate_release_entrypoints "$INSTALL_DIR/$current_target" || fail "current release is invalid"
+  validate_release_entrypoints "$INSTALL_DIR/$previous_target" || fail "rollback release is invalid"
+  atomic_link previous "$current_target" || fail "failed to prepare rollback link"
+  if ! atomic_link current "$previous_target"; then
+    atomic_link previous "$previous_target" || fail "rollback failed and previous link recovery is required"
+    fail "failed to switch rollback release"
+  fi
+  if ! "$INSTALL_DIR/current/bin/workerbee" --version >/dev/null \
+    || ! "$INSTALL_DIR/current/bin/ae" version >/dev/null; then
+    atomic_link current "$current_target" || fail "rollback validation failed and current link recovery is required"
+    atomic_link previous "$previous_target" || fail "rollback validation failed and previous link recovery is required"
+    fail "rollback release failed post-switch validation"
+  fi
   log "WorkerBee rolled back to $previous_target."
 }
 
@@ -86,6 +108,54 @@ parts = pathlib.PurePosixPath(sys.argv[1]).parts
 valid = len(parts) == 2 and parts[0] == "releases" and parts[1] not in {"", ".", ".."}
 raise SystemExit(0 if valid else 1)
 PY
+}
+
+validate_release_entrypoints() {
+  release_dir="$1"
+  [ -d "$release_dir" ] || return 1
+  [ ! -L "$release_dir" ] || return 1
+  [ -x "$release_dir/bin/python" ] || return 1
+  for entrypoint in workerbee ae; do
+    [ -f "$release_dir/bin/$entrypoint" ] || return 1
+    [ ! -L "$release_dir/bin/$entrypoint" ] || return 1
+    [ -x "$release_dir/bin/$entrypoint" ] || return 1
+    "$python_bin" - "$release_dir" "$entrypoint" <<'PY' || return 1
+import os
+import pathlib
+import shlex
+import sys
+
+release = pathlib.Path(os.path.abspath(sys.argv[1]))
+script = release / "bin" / sys.argv[2]
+expected_python = str(release / "bin" / "python")
+if script.is_symlink() or not script.is_file():
+    raise SystemExit("console script must be a regular file")
+if script.stat().st_size > 1024 * 1024:
+    raise SystemExit("console script exceeds validation bound")
+payload = script.read_bytes()
+first_line = payload.splitlines()[0] if payload else b""
+if not first_line.startswith(b"#!") or len(first_line) > 4096:
+    raise SystemExit("console script has an invalid shebang")
+try:
+    command = shlex.split(first_line[2:].decode("utf-8", errors="strict"))
+except (UnicodeDecodeError, ValueError) as exc:
+    raise SystemExit("console script shebang is not parseable") from exc
+if not command or not os.path.isabs(command[0]) or not os.access(command[0], os.X_OK):
+    raise SystemExit("console script shebang target is not executable")
+interpreter = os.path.abspath(command[0])
+if interpreter == expected_python:
+    pass
+elif interpreter in {"/bin/sh", "/usr/bin/sh"} and expected_python.encode() in payload:
+    # pip uses this wrapper form when an absolute interpreter path is too long.
+    pass
+else:
+    raise SystemExit("console script is not bound to the final release interpreter")
+if b"/.candidate." in payload:
+    raise SystemExit("console script retains a relocated candidate path")
+PY
+  done
+  "$release_dir/bin/workerbee" --version >/dev/null || return 1
+  "$release_dir/bin/ae" version >/dev/null || return 1
 }
 
 fetch() {
@@ -116,13 +186,25 @@ raise SystemExit(0 if sys.version_info >= (3, 11) else 1)
 PY
 
 tmp_dir="$(mktemp -d)"
-candidate_dir=""
+created_release_dir=""
+launcher_tmp=""
+receipt_tmp=""
 cleanup() {
   rm -rf "$tmp_dir"
-  case "$candidate_dir" in
-    "$INSTALL_DIR"/releases/.candidate.*) rm -rf "$candidate_dir" ;;
+  case "$created_release_dir" in
+    "$INSTALL_DIR"/releases/workerbee-*) rm -rf "$created_release_dir" ;;
     "") ;;
-    *) fail "refusing to remove an unexpected candidate path" ;;
+    *) fail "refusing to remove an unexpected release path" ;;
+  esac
+  case "$launcher_tmp" in
+    "$BIN_DIR"/.workerbee.new.*) rm -f "$launcher_tmp" ;;
+    "") ;;
+    *) fail "refusing to remove an unexpected launcher path" ;;
+  esac
+  case "$receipt_tmp" in
+    "$INSTALL_DIR"/.install-receipt.new.*) rm -f "$receipt_tmp" ;;
+    "") ;;
+    *) fail "refusing to remove an unexpected receipt path" ;;
   esac
 }
 trap cleanup EXIT INT TERM
@@ -272,21 +354,34 @@ done
 if [ "${VIRTUAL_ENV:-}" != "" ] && [ "$FORCE_STANDALONE" != "1" ]; then
   target_python="$VIRTUAL_ENV/bin/python"
   install_mode="active-venv"
+  install_required=1
 else
   install_mode="standalone"
   release_id="workerbee-${package_version}-${archive_sha%${archive_sha#????????????}}"
   releases_dir="$INSTALL_DIR/releases"
   mkdir -p "$releases_dir"
-  candidate_dir="$(mktemp -d "$releases_dir/.candidate.XXXXXX")"
-  target_python="$candidate_dir/bin/python"
-  "$python_bin" -m venv "$candidate_dir" || fail "failed to create isolated candidate venv"
+  validate_release_target "releases/$release_id" || fail "derived release identity is unsafe"
+  release_dir="$releases_dir/$release_id"
+  [ ! -L "$release_dir" ] || fail "existing release identity must not be a symlink"
+  if [ -e "$release_dir" ]; then
+    [ -d "$release_dir" ] || fail "existing release identity is invalid"
+    install_required=0
+  else
+    mkdir "$release_dir" || fail "failed to reserve final release directory"
+    created_release_dir="$release_dir"
+    "$python_bin" -m venv "$release_dir" || fail "failed to create isolated final-path venv"
+    install_required=1
+  fi
+  target_python="$release_dir/bin/python"
 fi
 
-"$target_python" -m pip install \
-  --no-compile \
-  --no-index \
-  --find-links "$wheelhouse" \
-  "$package_spec" || fail "offline wheelhouse is incomplete or incompatible; refusing package-index fallback"
+if [ "$install_required" = "1" ]; then
+  "$target_python" -m pip install \
+    --no-compile \
+    --no-index \
+    --find-links "$wheelhouse" \
+    "$package_spec" || fail "offline wheelhouse is incomplete or incompatible; refusing package-index fallback"
+fi
 
 "$target_python" -m pip check || fail "candidate environment dependency validation failed"
 "$target_python" - <<'PY' || fail "candidate contains mixed or unexpected ae providers"
@@ -306,25 +401,25 @@ PY
 "$target_python" -m workerbee --version >/dev/null || fail "candidate CLI smoke failed"
 
 if [ "$install_mode" = "standalone" ]; then
-  release_dir="$releases_dir/$release_id"
-  [ ! -L "$release_dir" ] || fail "existing release identity must not be a symlink"
-  if [ -e "$release_dir" ]; then
-    [ -x "$release_dir/bin/python" ] || fail "existing release identity is invalid"
-    rm -rf "$candidate_dir"
-  else
-    mv "$candidate_dir" "$release_dir"
-  fi
-  candidate_dir=""
+  validate_release_entrypoints "$release_dir" || fail "final-path console-script validation failed"
   old_target=""
+  old_previous_target=""
+  had_current=0
+  had_previous=0
   if [ -L "$INSTALL_DIR/current" ]; then
+    had_current=1
     old_target="$(readlink "$INSTALL_DIR/current")"
     validate_release_target "$old_target" || fail "current release link is unsafe"
+  elif [ -e "$INSTALL_DIR/current" ]; then
+    fail "current release identity must be a symlink"
   fi
-  if [ "$old_target" != "" ] && [ "$old_target" != "releases/$release_id" ]; then
-    atomic_link previous "$old_target"
+  if [ -L "$INSTALL_DIR/previous" ]; then
+    had_previous=1
+    old_previous_target="$(readlink "$INSTALL_DIR/previous")"
+    validate_release_target "$old_previous_target" || fail "previous release link is unsafe"
+  elif [ -e "$INSTALL_DIR/previous" ]; then
+    fail "previous release identity must be a symlink"
   fi
-  atomic_link current "releases/$release_id"
-  target_python="$INSTALL_DIR/current/bin/python"
   mkdir -p "$BIN_DIR"
   launcher_tmp="$BIN_DIR/.workerbee.new.$$"
   cat >"$launcher_tmp" <<EOF
@@ -332,13 +427,22 @@ if [ "$install_mode" = "standalone" ]; then
 exec "$INSTALL_DIR/current/bin/python" -m workerbee "\$@"
 EOF
   chmod 755 "$launcher_tmp"
-  mv -f "$launcher_tmp" "$BIN_DIR/workerbee"
-  "$python_bin" - "$INSTALL_DIR" "$release_id" "${old_target:-}" <<'PY'
+  sh -n "$launcher_tmp" || fail "generated launcher is invalid"
+  launcher_probe="$tmp_dir/workerbee-launcher-probe"
+  cat >"$launcher_probe" <<EOF
+#!/usr/bin/env sh
+exec "$release_dir/bin/python" -m workerbee "\$@"
+EOF
+  chmod 700 "$launcher_probe"
+  sh -n "$launcher_probe" || fail "generated launcher probe is invalid"
+  "$launcher_probe" --version >/dev/null || fail "final-path launcher probe failed"
+  receipt_tmp="$INSTALL_DIR/.install-receipt.new.$$"
+  "$python_bin" - "$receipt_tmp" "$release_id" "${old_target:-}" <<'PY'
 import json
 import pathlib
 import sys
 
-install_dir = pathlib.Path(sys.argv[1])
+temporary = pathlib.Path(sys.argv[1])
 payload = {
     "schema": "workerbee.standalone-install/v1",
     "release_id": sys.argv[2],
@@ -348,11 +452,93 @@ payload = {
     "activation": "atomic-symlink",
     "rollback_retained": bool(sys.argv[3]),
 }
-temporary = install_dir / ".install-receipt.new"
 temporary.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 temporary.chmod(0o600)
-temporary.replace(install_dir / "install-receipt.json")
 PY
+
+  had_launcher=0
+  launcher_backup="$tmp_dir/workerbee-launcher.backup"
+  if [ -e "$BIN_DIR/workerbee" ] || [ -L "$BIN_DIR/workerbee" ]; then
+    [ -f "$BIN_DIR/workerbee" ] && [ ! -L "$BIN_DIR/workerbee" ] \
+      || fail "existing WorkerBee launcher must be a regular file"
+    cp -p "$BIN_DIR/workerbee" "$launcher_backup" || fail "failed to back up existing launcher"
+    had_launcher=1
+  fi
+  had_receipt=0
+  receipt_backup="$tmp_dir/install-receipt.backup"
+  if [ -e "$INSTALL_DIR/install-receipt.json" ] || [ -L "$INSTALL_DIR/install-receipt.json" ]; then
+    [ -f "$INSTALL_DIR/install-receipt.json" ] && [ ! -L "$INSTALL_DIR/install-receipt.json" ] \
+      || fail "existing install receipt must be a regular file"
+    cp -p "$INSTALL_DIR/install-receipt.json" "$receipt_backup" \
+      || fail "failed to back up existing install receipt"
+    had_receipt=1
+  fi
+
+  restore_release_links() {
+    if [ "$had_current" = "1" ]; then
+      atomic_link current "$old_target" || return 1
+    else
+      rm -f "$INSTALL_DIR/current" || return 1
+    fi
+    if [ "$had_previous" = "1" ]; then
+      atomic_link previous "$old_previous_target" || return 1
+    else
+      rm -f "$INSTALL_DIR/previous" || return 1
+    fi
+  }
+
+  restore_install_metadata() {
+    if [ "$had_launcher" = "1" ]; then
+      cp -p "$launcher_backup" "$BIN_DIR/workerbee" || return 1
+    else
+      rm -f "$BIN_DIR/workerbee" || return 1
+    fi
+    if [ "$had_receipt" = "1" ]; then
+      cp -p "$receipt_backup" "$INSTALL_DIR/install-receipt.json" || return 1
+    else
+      rm -f "$INSTALL_DIR/install-receipt.json" || return 1
+    fi
+  }
+
+  if [ "$old_target" != "" ] && [ "$old_target" != "releases/$release_id" ]; then
+    atomic_link previous "$old_target" || fail "failed to retain previous release"
+  fi
+  if ! atomic_link current "releases/$release_id"; then
+    restore_release_links || {
+      created_release_dir=""
+      fail "activation failed and release-link recovery is required"
+    }
+    fail "failed to activate final release"
+  fi
+  if ! "$INSTALL_DIR/current/bin/workerbee" --version >/dev/null \
+    || ! "$INSTALL_DIR/current/bin/ae" version >/dev/null \
+    || ! "$launcher_tmp" --version >/dev/null; then
+    restore_release_links || {
+      created_release_dir=""
+      fail "post-activation validation failed and release-link recovery is required"
+    }
+    fail "post-activation entrypoint or launcher validation failed"
+  fi
+  if ! mv -f "$launcher_tmp" "$BIN_DIR/workerbee"; then
+    restore_release_links || {
+      created_release_dir=""
+      fail "launcher installation failed and release-link recovery is required"
+    }
+    fail "failed to install WorkerBee launcher"
+  fi
+  if ! mv -f "$receipt_tmp" "$INSTALL_DIR/install-receipt.json"; then
+    restore_install_metadata || {
+      created_release_dir=""
+      fail "receipt installation failed and metadata recovery is required"
+    }
+    restore_release_links || {
+      created_release_dir=""
+      fail "receipt installation failed and release-link recovery is required"
+    }
+    fail "failed to install WorkerBee receipt"
+  fi
+  created_release_dir=""
+  target_python="$INSTALL_DIR/current/bin/python"
   case ":$PATH:" in
     *":$BIN_DIR:"*) ;;
     *)

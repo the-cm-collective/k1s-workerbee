@@ -1,7 +1,40 @@
+import hashlib
+import json
 import os
 import subprocess
+import sys
+import tarfile
 import tomllib
 from pathlib import Path
+
+
+def _write_fake_release(release_dir: Path, *, shebang: Path | None = None) -> None:
+    bin_dir = release_dir / "bin"
+    bin_dir.mkdir(parents=True)
+    python = bin_dir / "python"
+    python.write_text(
+        "#!/bin/sh\n"
+        'if [ "${1:-}" = "-m" ] && [ "${2:-}" = "workerbee" ]; then exit 0; fi\n'
+        'exec /bin/sh "$@"\n',
+        encoding="utf-8",
+    )
+    python.chmod(0o700)
+    interpreter = shebang or python
+    for name in ("workerbee", "ae"):
+        script = bin_dir / name
+        script.write_text(f"#!{interpreter}\nexit 0\n", encoding="utf-8")
+        script.chmod(0o700)
+
+
+def _installer_env(install_dir: Path, bin_dir: Path) -> dict[str, str]:
+    return {
+        "HOME": str(install_dir.parent),
+        "PATH": os.environ["PATH"],
+        "PYTHON": sys.executable,
+        "WORKERBEE_BIN_DIR": str(bin_dir),
+        "WORKERBEE_FORCE_STANDALONE": "1",
+        "WORKERBEE_INSTALL_DIR": str(install_dir),
+    }
 
 
 def test_install_script_is_valid_shell() -> None:
@@ -41,8 +74,18 @@ def test_standalone_install_uses_validated_versioned_venv_and_atomic_launcher() 
 
     assert "workerbee-install" in text
     assert 'releases_dir="$INSTALL_DIR/releases"' in text
-    assert ".candidate.XXXXXX" in text
-    assert 'mv "$candidate_dir" "$release_dir"' in text
+    assert ".candidate.XXXXXX" not in text
+    assert "candidate_dir" not in text
+    assert 'mkdir "$release_dir"' in text
+    assert '"$python_bin" -m venv "$release_dir"' in text
+    assert 'created_release_dir="$release_dir"' in text
+    assert 'validate_release_entrypoints "$release_dir"' in text
+    assert '"$release_dir/bin/workerbee" --version' in text
+    assert '"$release_dir/bin/ae" version' in text
+    assert '"$INSTALL_DIR/current/bin/workerbee" --version' in text
+    assert '"$INSTALL_DIR/current/bin/ae" version' in text
+    assert 'exec "$release_dir/bin/python" -m workerbee' in text
+    assert '"$launcher_probe" --version' in text
     assert 'atomic_link current "releases/$release_id"' in text
     assert 'exec "$INSTALL_DIR/current/bin/python" -m workerbee' in text
     assert "workerbee.standalone-install/v1" in text
@@ -54,27 +97,157 @@ def test_standalone_install_uses_validated_versioned_venv_and_atomic_launcher() 
 def test_standalone_rollback_switches_only_versioned_release_links(tmp_path: Path) -> None:
     install_dir = tmp_path / "workerbee-install"
     for release in ("current-release", "previous-release"):
-        binary = install_dir / "releases" / release / "bin" / "python"
-        binary.parent.mkdir(parents=True)
-        binary.write_text("#!/bin/sh\n", encoding="utf-8")
-        binary.chmod(0o700)
+        _write_fake_release(install_dir / "releases" / release)
     (install_dir / "current").symlink_to("releases/current-release")
     (install_dir / "previous").symlink_to("releases/previous-release")
-    env = {
-        **os.environ,
-        "WORKERBEE_INSTALL_DIR": str(install_dir),
-    }
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "workerbee"
+    wrapper.write_text(
+        f'#!/bin/sh\nexec "{install_dir}/current/bin/python" -m workerbee "$@"\n',
+        encoding="utf-8",
+    )
+    wrapper.chmod(0o700)
 
     proc = subprocess.run(
         ["sh", "scripts/install-workerbee.sh", "--rollback"],
         text=True,
         capture_output=True,
-        env=env,
+        env=_installer_env(install_dir, bin_dir),
     )
 
     assert proc.returncode == 0, proc.stderr
     assert (install_dir / "current").readlink() == Path("releases/previous-release")
     assert (install_dir / "previous").readlink() == Path("releases/current-release")
+    for name, args in (("workerbee", ["--version"]), ("ae", ["version"])):
+        script = install_dir / "current" / "bin" / name
+        shebang_target = Path(script.read_text(encoding="utf-8").splitlines()[0][2:])
+        assert shebang_target.exists()
+        assert subprocess.run([str(script), *args], check=False).returncode == 0
+    assert subprocess.run([str(wrapper), "--version"], check=False).returncode == 0
+
+
+def test_standalone_rollback_rejects_stale_shebang_without_link_mutation(
+    tmp_path: Path,
+) -> None:
+    install_dir = tmp_path / "workerbee-install"
+    _write_fake_release(install_dir / "releases" / "current-release")
+    stale = install_dir / "releases" / ".candidate.gone" / "bin" / "python"
+    _write_fake_release(
+        install_dir / "releases" / "previous-release",
+        shebang=stale,
+    )
+    (install_dir / "current").symlink_to("releases/current-release")
+    (install_dir / "previous").symlink_to("releases/previous-release")
+    current_before = (install_dir / "current").readlink()
+    previous_before = (install_dir / "previous").readlink()
+
+    proc = subprocess.run(
+        ["sh", "scripts/install-workerbee.sh", "--rollback"],
+        text=True,
+        capture_output=True,
+        env=_installer_env(install_dir, tmp_path / "bin"),
+    )
+
+    assert proc.returncode != 0
+    assert "rollback release is invalid" in proc.stderr
+    assert (install_dir / "current").readlink() == current_before
+    assert (install_dir / "previous").readlink() == previous_before
+
+
+def test_failed_offline_install_preserves_links_and_cleans_final_release(
+    tmp_path: Path,
+) -> None:
+    install_dir = tmp_path / "workerbee-install"
+    for release in ("current-release", "previous-release"):
+        (install_dir / "releases" / release).mkdir(parents=True)
+    (install_dir / "current").symlink_to("releases/current-release")
+    (install_dir / "previous").symlink_to("releases/previous-release")
+    current_before = (install_dir / "current").readlink()
+    previous_before = (install_dir / "previous").readlink()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    wrapper = bin_dir / "workerbee"
+    wrapper.write_text("original launcher\n", encoding="utf-8")
+
+    release_files = tmp_path / "release-files"
+    release_files.mkdir()
+    wheel = release_files / "k1s_workerbee-0.1.7-py3-none-any.whl"
+    wheel.write_bytes(b"intentionally invalid wheel")
+    sbom = release_files / "SBOM.cdx.json"
+    sbom.write_text("{}\n", encoding="utf-8")
+    artifacts = []
+    for path, role, publish in (
+        (wheel, "package", True),
+        (sbom, "sbom", False),
+    ):
+        artifacts.append(
+            {
+                "filename": path.name,
+                "publish": publish,
+                "role": role,
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "size": path.stat().st_size,
+            }
+        )
+    (release_files / "RELEASE-MANIFEST.json").write_text(
+        json.dumps({"artifacts": artifacts}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    published = tmp_path / "published"
+    published.mkdir()
+    archive = published / "workerbee-wheelhouse.tar.gz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        for path in sorted(release_files.iterdir()):
+            bundle.add(path, arcname=path.name)
+    archive_sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+    (published / "SHA256SUMS").write_text(
+        f"{archive_sha}  {archive.name}\n",
+        encoding="utf-8",
+    )
+
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    fake_curl = fake_bin / "curl"
+    fake_curl.write_text(
+        "#!/bin/sh\n"
+        "url=''\n"
+        "dest=''\n"
+        'while [ "$#" -gt 0 ]; do\n'
+        '  case "$1" in\n'
+        '    -o) dest="$2"; shift 2 ;;\n'
+        "    -*) shift ;;\n"
+        '    *) url="$1"; shift ;;\n'
+        "  esac\n"
+        "done\n"
+        'cp "${url#file://}" "$dest"\n',
+        encoding="utf-8",
+    )
+    fake_curl.chmod(0o700)
+    env = _installer_env(install_dir, bin_dir)
+    env.update(
+        {
+            "PATH": f"{fake_bin}:{env['PATH']}",
+            "WORKERBEE_INSTALL_BASE_URL": published.as_uri(),
+        }
+    )
+
+    proc = subprocess.run(
+        ["sh", "scripts/install-workerbee.sh"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert proc.returncode != 0
+    assert "refusing package-index fallback" in proc.stderr
+    assert (install_dir / "current").readlink() == current_before
+    assert (install_dir / "previous").readlink() == previous_before
+    assert wrapper.read_text(encoding="utf-8") == "original launcher\n"
+    assert sorted(path.name for path in (install_dir / "releases").iterdir()) == [
+        "current-release",
+        "previous-release",
+    ]
 
 
 def test_wheelhouse_build_is_local_only_and_has_no_index_resolution() -> None:
