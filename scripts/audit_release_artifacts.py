@@ -10,10 +10,12 @@ import gzip
 import hashlib
 import json
 import re
+import stat
 import sys
 import tarfile
 import tomllib
 import urllib.request
+import uuid
 import zipfile
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass
@@ -33,12 +35,28 @@ SECRET_PATTERNS: tuple[tuple[str, re.Pattern[bytes]], ...] = (
 )
 FORBIDDEN_PATH_PARTS = {
     ".git",
+    ".gitea",
+    ".github",
     ".mypy_cache",
+    ".nox",
     ".pytest_cache",
     ".ruff_cache",
+    ".tox",
     ".venv",
+    ".workerbee",
     "__pycache__",
+    "build",
+    "dist",
+    "generated",
+    "htmlcov",
+    "node_modules",
+    "state",
+    "temp",
+    "tmp",
 }
+PRIVATE_PATH_PATTERN = re.compile(
+    r"(?i)(?:^|[-_.])(?:private|internal)(?:[-_.]|$)|platform[-_]debug"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,23 +219,41 @@ def _safe_member(path: str) -> bool:
 
 
 def _iter_archive(path: Path) -> Iterator[tuple[str, bytes]]:
-    if path.suffix == ".whl" or path.suffix == ".zip":
+    for name, kind, blob in _archive_entries(path):
+        if kind == "file" and blob is not None:
+            yield name, blob
+
+
+def _archive_entries(path: Path) -> Iterator[tuple[str, str, bytes | None]]:
+    """Yield member name, normalized kind, and regular-file bytes."""
+
+    if path.suffix in {".whl", ".zip"}:
         with zipfile.ZipFile(path) as archive:
             for info in archive.infolist():
+                mode = info.external_attr >> 16
                 if info.is_dir():
-                    continue
-                yield info.filename, archive.read(info)
+                    yield info.filename, "directory", None
+                elif mode and stat.S_ISLNK(mode):
+                    yield info.filename, "symlink", None
+                else:
+                    yield info.filename, "file", archive.read(info)
         return
     if path.name.endswith((".tar.gz", ".tgz")):
         with tarfile.open(path, "r:gz") as archive:
             for info in archive.getmembers():
-                if not info.isfile():
-                    continue
-                stream = archive.extractfile(info)
-                if stream is not None:
-                    yield info.name, stream.read()
+                if info.isdir():
+                    yield info.name, "directory", None
+                elif info.isfile():
+                    stream = archive.extractfile(info)
+                    yield info.name, "file", stream.read() if stream is not None else b""
+                elif info.issym():
+                    yield info.name, "symlink", None
+                elif info.islnk():
+                    yield info.name, "hardlink", None
+                else:
+                    yield info.name, "special", None
         return
-    yield path.name, path.read_bytes()
+    yield path.name, "file", path.read_bytes()
 
 
 def _archive_names(path: Path) -> tuple[str, ...]:
@@ -243,6 +279,8 @@ def normalize_sdist(path: Path, epoch: int) -> None:
         for member in sorted(source.getmembers(), key=lambda item: item.name):
             if not _safe_member(member.name):
                 raise ValueError(f"unsafe sdist member: {member.name}")
+            if not (member.isfile() or member.isdir()):
+                raise ValueError(f"unsupported sdist member type: {member.name}")
             member.mtime = epoch
             member.uid = 0
             member.gid = 0
@@ -331,12 +369,8 @@ def audit_artifacts(paths: Sequence[Path]) -> list[Finding]:
         if not path.is_file():
             findings.append(Finding(str(path), "", "missing", "artifact does not exist"))
             continue
+        findings.extend(audit_archive_container(path))
         for member, blob in _iter_archive(path):
-            parts = PurePosixPath(member).parts
-            if not _safe_member(member):
-                findings.append(Finding(str(path), member, "unsafe-path", "path traversal"))
-            if any(part in FORBIDDEN_PATH_PARTS or part.startswith(".env") for part in parts):
-                findings.append(Finding(str(path), member, "forbidden-path", "local state"))
             for name, pattern in SECRET_PATTERNS:
                 if pattern.search(blob):
                     findings.append(Finding(str(path), member, "secret-pattern", name))
@@ -346,6 +380,27 @@ def audit_artifacts(paths: Sequence[Path]) -> list[Finding]:
             findings.extend(_audit_workerbee_sdist(path, contract))
         else:
             findings.append(Finding(str(path), path.name, "unsupported", "release type"))
+    return findings
+
+
+def audit_archive_container(path: Path) -> list[Finding]:
+    """Reject unsafe or non-public archive topology before content inspection."""
+
+    findings: list[Finding] = []
+    seen: set[str] = set()
+    for member, kind, _blob in _archive_entries(path):
+        parts = PurePosixPath(member).parts
+        if member in seen:
+            findings.append(Finding(str(path), member, "duplicate-member", "duplicate path"))
+        seen.add(member)
+        if not _safe_member(member):
+            findings.append(Finding(str(path), member, "unsafe-path", "path traversal"))
+        if kind not in {"file", "directory"}:
+            findings.append(Finding(str(path), member, "unsafe-member-type", kind))
+        if any(part in FORBIDDEN_PATH_PARTS or part.startswith(".env") for part in parts):
+            findings.append(Finding(str(path), member, "forbidden-path", "local/generated state"))
+        if any(PRIVATE_PATH_PATTERN.search(part) for part in parts):
+            findings.append(Finding(str(path), member, "private-marker", "non-public path marker"))
     return findings
 
 
@@ -403,6 +458,7 @@ def _audit_workerbee_sdist(path: Path, contract: ReleaseContract) -> list[Findin
     required = {
         f"{root}/LICENSE",
         f"{root}/README.md",
+        f"{root}/docs/v1-contract.md",
         f"{root}/pyproject.toml",
         f"{root}/scripts/audit_release_artifacts.py",
         f"{root}/scripts/build_release_candidate.sh",
@@ -466,11 +522,27 @@ def write_manifest(output: Path, paths: Sequence[Path]) -> dict[str, Any]:
     contract, _ = load_contract()
     output_resolved = output.resolve()
     artifacts = []
+    names: set[str] = set()
     for path in sorted((item.resolve() for item in paths), key=lambda item: item.name):
         if path == output_resolved:
             raise ValueError("manifest cannot include itself")
+        if path.name in names:
+            raise ValueError(f"manifest artifact filename is duplicated: {path.name}")
+        names.add(path.name)
         artifacts.append(
-            {"filename": path.name, "sha256": sha256_file(path), "size": path.stat().st_size}
+            {
+                "filename": path.name,
+                "sha256": sha256_file(path),
+                "size": path.stat().st_size,
+                "role": (
+                    "sbom"
+                    if path.name == "SBOM.cdx.json"
+                    else "package"
+                    if path.suffix == ".whl" or path.name.endswith(".tar.gz")
+                    else "support"
+                ),
+                "publish": path.suffix == ".whl" or path.name.endswith(".tar.gz"),
+            }
         )
     payload = {
         "schema": "k1s-workerbee.release-manifest/v1",
@@ -491,6 +563,87 @@ def write_sha256s(output: Path, paths: Sequence[Path]) -> None:
     output.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
+def verify_sha256s(output: Path, paths: Sequence[Path]) -> list[str]:
+    expected = {
+        path.resolve().name: sha256_file(path.resolve())
+        for path in paths
+        if path.resolve() != output.resolve()
+    }
+    actual: dict[str, str] = {}
+    errors: list[str] = []
+    for line in output.read_text(encoding="utf-8").splitlines():
+        fields = line.split()
+        if len(fields) != 2 or not re.fullmatch(r"[0-9a-f]{64}", fields[0]):
+            errors.append("invalid SHA256SUMS entry")
+            continue
+        name = fields[1].lstrip("*")
+        if name in actual:
+            errors.append(f"duplicate checksum entry: {name}")
+        actual[name] = fields[0]
+    for name in sorted(set(expected) - set(actual)):
+        errors.append(f"missing checksum entry: {name}")
+    for name in sorted(set(actual) - set(expected)):
+        errors.append(f"unexpected checksum entry: {name}")
+    for name in sorted(set(expected) & set(actual)):
+        if actual[name] != expected[name]:
+            errors.append(f"checksum mismatch: {name}")
+    return errors
+
+
+def write_sbom(output: Path, paths: Sequence[Path]) -> dict[str, Any]:
+    """Write a deterministic CycloneDX inventory for exact local artifacts."""
+
+    contract, _ = load_contract()
+    components: list[dict[str, Any]] = []
+    for path in sorted((item.resolve() for item in paths), key=lambda item: item.name):
+        digest = sha256_file(path)
+        component: dict[str, Any] = {
+            "type": "file",
+            "name": path.name,
+            "bom-ref": f"artifact:sha256:{digest}",
+            "hashes": [{"alg": "SHA-256", "content": digest}],
+            "properties": [
+                {"name": "workerbee:artifact:size", "value": str(path.stat().st_size)},
+                {
+                    "name": "workerbee:artifact:publishable",
+                    "value": str(path.suffix == ".whl" or path.name.endswith(".tar.gz")).lower(),
+                },
+            ],
+        }
+        if path.suffix == ".whl":
+            metadata = _metadata_from_wheel(path)
+            component["type"] = "library"
+            component["group"] = normalize_distribution(metadata.get("Name", ""))
+            component["version"] = metadata.get("Version", "")
+            component["properties"].extend(
+                {"name": "workerbee:requires-dist", "value": requirement}
+                for requirement in sorted(metadata.get_all("Requires-Dist", ()))
+            )
+        components.append(component)
+    seed = json.dumps(components, sort_keys=True, separators=(",", ":")).encode()
+    serial = uuid.UUID(hashlib.sha256(seed).hexdigest()[:32])
+    payload = {
+        "bomFormat": "CycloneDX",
+        "specVersion": "1.5",
+        "serialNumber": f"urn:uuid:{serial}",
+        "version": 1,
+        "metadata": {
+            "component": {
+                "type": "application",
+                "name": contract.distribution,
+                "version": contract.version,
+            },
+            "properties": [
+                {"name": "workerbee:generator", "value": "audit_release_artifacts.py"},
+                {"name": "workerbee:network", "value": "not-used"},
+            ],
+        },
+        "components": components,
+    }
+    output.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return payload
+
+
 def verify_manifest(manifest_path: Path, directory: Path) -> list[str]:
     contract, _ = load_contract()
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -501,8 +654,32 @@ def verify_manifest(manifest_path: Path, directory: Path) -> list[str]:
         errors.append("manifest distribution does not match the project")
     if payload.get("version") != contract.version:
         errors.append("manifest version does not match the project")
-    for entry in payload.get("artifacts", []):
-        path = directory / entry["filename"]
+    entries = payload.get("artifacts", [])
+    if not isinstance(entries, list):
+        return [*errors, "manifest artifacts must be a list"]
+    names: list[str] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            errors.append("manifest artifact entry must be an object")
+            continue
+        filename = entry.get("filename")
+        if not isinstance(filename, str) or Path(filename).name != filename:
+            errors.append("manifest artifact filename is unsafe")
+            continue
+        names.append(filename)
+        if entry.get("role") not in {"package", "sbom", "support"}:
+            errors.append(f"invalid artifact role: {filename}")
+        if not isinstance(entry.get("publish"), bool):
+            errors.append(f"invalid publish flag: {filename}")
+        if not isinstance(entry.get("size"), int) or entry["size"] < 0:
+            errors.append(f"invalid artifact size: {filename}")
+            continue
+        if not isinstance(entry.get("sha256"), str) or not re.fullmatch(
+            r"[0-9a-f]{64}", entry["sha256"]
+        ):
+            errors.append(f"invalid artifact digest: {filename}")
+            continue
+        path = directory / filename
         if not path.is_file():
             errors.append(f"missing artifact: {path}")
             continue
@@ -510,6 +687,15 @@ def verify_manifest(manifest_path: Path, directory: Path) -> list[str]:
             errors.append(f"size mismatch: {path.name}")
         if sha256_file(path) != entry["sha256"]:
             errors.append(f"sha256 mismatch: {path.name}")
+    if len(names) != len(set(names)):
+        errors.append("manifest contains duplicate artifact filenames")
+    directory_manifest = (directory / manifest_path.name).resolve()
+    actual = {path.name for path in directory.iterdir() if path.resolve() != directory_manifest}
+    for name in sorted(actual - set(names)):
+        errors.append(f"untracked artifact: {name}")
+    for name in sorted(set(names) - actual):
+        if f"missing artifact: {directory / name}" not in errors:
+            errors.append(f"missing artifact: {directory / name}")
     return errors
 
 
@@ -529,6 +715,8 @@ def fetch_index_artifacts(
     output.mkdir(parents=True, exist_ok=True)
     errors: list[str] = []
     for entry in payload["artifacts"]:
+        if not entry.get("publish", True):
+            continue
         filename = entry["filename"]
         item = by_name.get(filename)
         if item is None:
@@ -572,6 +760,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     checksums = subparsers.add_parser("write-sha256s")
     checksums.add_argument("--output", required=True, type=Path)
     checksums.add_argument("artifacts", nargs="+", type=Path)
+    verify_checksums = subparsers.add_parser("verify-sha256s")
+    verify_checksums.add_argument("--checksums", required=True, type=Path)
+    verify_checksums.add_argument("artifacts", nargs="+", type=Path)
+    sbom = subparsers.add_parser("write-sbom")
+    sbom.add_argument("--output", required=True, type=Path)
+    sbom.add_argument("artifacts", nargs="+", type=Path)
+    archive = subparsers.add_parser("audit-archive")
+    archive.add_argument("artifact", type=Path)
     normalize = subparsers.add_parser("normalize-sdist")
     normalize.add_argument("--epoch", required=True, type=int)
     normalize.add_argument("sdist", type=Path)
@@ -619,6 +815,22 @@ def main(argv: Sequence[str] | None = None) -> int:
         write_sha256s(args.output, args.artifacts)
         print(args.output)
         return 0
+    if args.command == "verify-sha256s":
+        return _print_errors(verify_sha256s(args.checksums, args.artifacts))
+    if args.command == "write-sbom":
+        write_sbom(args.output, args.artifacts)
+        print(args.output)
+        return 0
+    if args.command == "audit-archive":
+        findings = audit_archive_container(args.artifact)
+        for finding in findings:
+            print(
+                f"{finding.artifact}: {finding.member}: {finding.kind}: {finding.detail}",
+                file=sys.stderr,
+            )
+        if not findings:
+            print("archive hygiene audit passed")
+        return 1 if findings else 0
     if args.command == "normalize-sdist":
         normalize_sdist(args.sdist, args.epoch)
         print(args.sdist)

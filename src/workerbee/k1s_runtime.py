@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from workerbee.paths import resolve_k1s_python, resolve_k1s_root
-from workerbee.runtime_provider import validate_installed_ae_providers
+from workerbee.runtime_provider import runtime_provider_status, validate_installed_ae_providers
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,6 +22,7 @@ class K1sRuntime:
     pythonpath: str | None
     ae_origin: str | None
     ae_version: str | None = None
+    provider_status: dict[str, Any] | None = None
 
     def apply_env(self, env: dict[str, str]) -> dict[str, str]:
         if not self.pythonpath:
@@ -54,6 +55,7 @@ def resolve_k1s_runtime(
             pythonpath=None,
             ae_origin=installed["origin"],
             ae_version=installed.get("version"),
+            provider_status=installed.get("provider_status"),
         )
 
     return _runtime_from_root(resolve_k1s_root(cwd))
@@ -73,6 +75,7 @@ def _runtime_from_root(root: Path) -> K1sRuntime:
         pythonpath=pythonpath,
         ae_origin=info["origin"],
         ae_version=info.get("version"),
+        provider_status=info.get("provider_status"),
     )
 
 
@@ -91,7 +94,7 @@ def _probe_ae(python_bin: str, *, pythonpath: str | None) -> str | None:
     return info["origin"] if info else None
 
 
-def _probe_ae_info(python_bin: str, *, pythonpath: str | None) -> dict[str, str | None] | None:
+def _probe_ae_info(python_bin: str, *, pythonpath: str | None) -> dict[str, Any] | None:
     env = os.environ.copy()
     if pythonpath:
         current = env.get("PYTHONPATH")
@@ -125,8 +128,10 @@ print(json.dumps({
     providers = data.get("providers")
     if not isinstance(providers, list) or not all(isinstance(item, str) for item in providers):
         return None
+    status = runtime_provider_status(providers)
     validate_installed_ae_providers(providers)
     return {
         "origin": str(data.get("origin") or ""),
         "version": str(data["version"]) if data.get("version") is not None else None,
+        "provider_status": status,
     }

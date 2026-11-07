@@ -1556,12 +1556,15 @@ def _doctor(
         mode=containerd_privilege,
     )
     try:
+        from workerbee.runtime_provider import RuntimeProviderError
+
         runtime = resolve_k1s_runtime()
         checks["k1s_runtime_source"] = runtime.source
         checks["k1s_root"] = str(runtime.k1s_root) if runtime.k1s_root else None
         checks["k1s_python"] = runtime.python_executable
         checks["ae_origin"] = runtime.ae_origin
         checks["ae_version"] = getattr(runtime, "ae_version", None)
+        checks["runtime_provider"] = getattr(runtime, "provider_status", None)
         env = runtime.apply_env(os.environ.copy())
         proc = subprocess.run(
             [runtime.python_executable, "-m", "ae.cli", "--help"],
@@ -1589,6 +1592,10 @@ def _doctor(
         checks["apishim_env_helper"] = helper.returncode == 0
         if helper.returncode != 0:
             checks["apishim_env_helper_error"] = helper.stderr[-500:]
+    except RuntimeProviderError as exc:
+        checks["runtime_provider"] = exc.status
+        checks["k1s_runtime_error"] = str(exc)
+        checks["ae_import"] = False
     except Exception as exc:  # noqa: BLE001
         checks["k1s_runtime_error"] = str(exc)
         checks["ae_import"] = False

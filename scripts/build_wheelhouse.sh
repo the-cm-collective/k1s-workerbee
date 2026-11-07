@@ -121,7 +121,7 @@ rm -rf "$VERIFY_DIR"
 cat >"${OUT_DIR}/INSTALL.txt" <<EOF
 Install WorkerBee from this wheelhouse:
 
-  python -m pip install --no-index --find-links ${OUT_DIR} k1s-workerbee
+  python -m pip install --no-index --find-links <wheelhouse> k1s-workerbee
 
 Accepted runtime provider:
   k1s-core==0.1.8a1
@@ -131,9 +131,17 @@ Runtime requirements not bundled in wheels:
 EOF
 
 "${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" \
+  write-sbom \
+  --output "${OUT_DIR}/SBOM.cdx.json" \
+  "$OUT_DIR"/*.whl
+"${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" \
   write-manifest \
   --output "${OUT_DIR}/RELEASE-MANIFEST.json" \
-  "$OUT_DIR"/*.whl "$OUT_DIR"/INSTALL.txt
+  "$OUT_DIR"/*.whl "$OUT_DIR"/INSTALL.txt "$OUT_DIR"/SBOM.cdx.json
+"${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" \
+  verify-manifest \
+  --manifest "${OUT_DIR}/RELEASE-MANIFEST.json" \
+  --directory "$OUT_DIR"
 
 echo "wheelhouse: ${OUT_DIR}"
 SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-$(git -C "$ROOT_DIR" log -1 --format=%ct)}"
@@ -149,8 +157,16 @@ tar \
   "$(basename "$OUT_DIR")" \
   | gzip -n >"$(dirname "$OUT_DIR")/workerbee-wheelhouse.tar.gz"
 "${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" \
+  audit-archive \
+  "$(dirname "$OUT_DIR")/workerbee-wheelhouse.tar.gz"
+"${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" \
   write-sha256s \
   --output "$(dirname "$OUT_DIR")/SHA256SUMS" \
+  "$(dirname "$OUT_DIR")/workerbee-wheelhouse.tar.gz" \
+  "${ROOT_DIR}/scripts/install-workerbee.sh"
+"${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" \
+  verify-sha256s \
+  --checksums "$(dirname "$OUT_DIR")/SHA256SUMS" \
   "$(dirname "$OUT_DIR")/workerbee-wheelhouse.tar.gz" \
   "${ROOT_DIR}/scripts/install-workerbee.sh"
 echo "archive: $(dirname "$OUT_DIR")/workerbee-wheelhouse.tar.gz"

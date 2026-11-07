@@ -54,9 +54,13 @@ export PYTHONDONTWRITEBYTECODE=1
 "${PYTHON_BIN}" -m twine check "$OUT_DIR"/*
 "${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" audit "$OUT_DIR"/*
 "${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" \
+  write-sbom \
+  --output "$OUT_DIR/SBOM.cdx.json" \
+  "$OUT_DIR"/*.whl "$OUT_DIR"/*.tar.gz
+"${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" \
   write-manifest \
   --output "$OUT_DIR/RELEASE-MANIFEST.json" \
-  "$OUT_DIR"/*.whl "$OUT_DIR"/*.tar.gz
+  "$OUT_DIR"/*.whl "$OUT_DIR"/*.tar.gz "$OUT_DIR/SBOM.cdx.json"
 "${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" \
   verify-manifest \
   --manifest "$OUT_DIR/RELEASE-MANIFEST.json" \

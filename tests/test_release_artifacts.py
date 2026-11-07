@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import sys
 import tarfile
@@ -170,6 +171,163 @@ def test_release_manifest_detects_byte_changes(tmp_path: Path) -> None:
     errors = release.verify_manifest(manifest, tmp_path)
     assert "size mismatch: demo.whl" not in errors
     assert errors == ["sha256 mismatch: demo.whl"]
+
+
+def test_release_manifest_fails_closed_on_incomplete_or_extra_inventory(tmp_path: Path) -> None:
+    artifact = tmp_path / "demo.whl"
+    artifact.write_bytes(b"candidate")
+    manifest = tmp_path / "RELEASE-MANIFEST.json"
+    release.write_manifest(manifest, [artifact])
+
+    extra = tmp_path / "untracked.txt"
+    extra.write_text("not inventoried", encoding="utf-8")
+    assert release.verify_manifest(manifest, tmp_path) == ["untracked artifact: untracked.txt"]
+
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    payload["artifacts"].append(dict(payload["artifacts"][0]))
+    manifest.write_text(json.dumps(payload), encoding="utf-8")
+    errors = release.verify_manifest(manifest, tmp_path)
+    assert "manifest contains duplicate artifact filenames" in errors
+
+
+def test_manifest_can_verify_a_second_candidate_directory(tmp_path: Path) -> None:
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    first.mkdir()
+    second.mkdir()
+    artifact = first / "demo.whl"
+    artifact.write_bytes(b"identical")
+    manifest = first / "RELEASE-MANIFEST.json"
+    release.write_manifest(manifest, [artifact])
+    (second / artifact.name).write_bytes(artifact.read_bytes())
+    (second / manifest.name).write_bytes(manifest.read_bytes())
+
+    assert release.verify_manifest(manifest, second) == []
+
+
+def test_deterministic_sbom_binds_exact_artifact_bytes(tmp_path: Path) -> None:
+    wheel = tmp_path / "k1s_workerbee-0.1.7-py3-none-any.whl"
+    _write_workerbee_wheel(wheel)
+    first = tmp_path / "first.cdx.json"
+    second = tmp_path / "second.cdx.json"
+
+    first_payload = release.write_sbom(first, [wheel])
+    second_payload = release.write_sbom(second, [wheel])
+
+    assert first.read_bytes() == second.read_bytes()
+    assert first_payload == second_payload
+    assert first_payload["bomFormat"] == "CycloneDX"
+    assert first_payload["specVersion"] == "1.5"
+    component = first_payload["components"][0]
+    assert component["name"] == wheel.name
+    assert component["version"] == "0.1.7"
+    assert component["hashes"] == [{"alg": "SHA-256", "content": release.sha256_file(wheel)}]
+
+
+def test_index_verification_fetches_only_publishable_manifest_entries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    wheel = tmp_path / "demo.whl"
+    wheel.write_bytes(b"wheel")
+    sbom = tmp_path / "SBOM.cdx.json"
+    sbom.write_text("{}\n", encoding="utf-8")
+    manifest = tmp_path / "RELEASE-MANIFEST.json"
+    release.write_manifest(manifest, [wheel, sbom])
+    index = {
+        "releases": {
+            "0.1.7": [
+                {
+                    "filename": wheel.name,
+                    "digests": {"sha256": release.sha256_file(wheel)},
+                    "url": "https://files.invalid/demo.whl",
+                }
+            ]
+        }
+    }
+    retrieved: list[str] = []
+    monkeypatch.setattr(
+        release.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: io.BytesIO(json.dumps(index).encode()),
+    )
+
+    def retrieve(url: str, destination: Path) -> None:
+        retrieved.append(url)
+        Path(destination).write_bytes(wheel.read_bytes())
+
+    monkeypatch.setattr(release.urllib.request, "urlretrieve", retrieve)
+
+    errors = release.fetch_index_artifacts(
+        manifest,
+        "https://index.invalid/pypi",
+        tmp_path / "download",
+    )
+
+    assert errors == []
+    assert retrieved == ["https://files.invalid/demo.whl"]
+    assert not (tmp_path / "download" / sbom.name).exists()
+
+
+def test_archive_hygiene_rejects_links_private_generated_and_duplicate_members(
+    tmp_path: Path,
+) -> None:
+    archive_path = tmp_path / "unsafe.tar.gz"
+    with tarfile.open(archive_path, "w:gz") as archive:
+        payload = b"safe"
+        normal = tarfile.TarInfo("package/file.txt")
+        normal.size = len(payload)
+        archive.addfile(normal, io.BytesIO(payload))
+        duplicate = tarfile.TarInfo("package/file.txt")
+        duplicate.size = len(payload)
+        archive.addfile(duplicate, io.BytesIO(payload))
+        generated = tarfile.TarInfo("package/dist/generated.txt")
+        generated.size = len(payload)
+        archive.addfile(generated, io.BytesIO(payload))
+        private = tarfile.TarInfo("package/platform-debug/adapter.py")
+        private.size = len(payload)
+        archive.addfile(private, io.BytesIO(payload))
+        symlink = tarfile.TarInfo("package/current")
+        symlink.type = tarfile.SYMTYPE
+        symlink.linkname = "file.txt"
+        archive.addfile(symlink)
+        hardlink = tarfile.TarInfo("package/copy")
+        hardlink.type = tarfile.LNKTYPE
+        hardlink.linkname = "package/file.txt"
+        archive.addfile(hardlink)
+
+    findings = release.audit_archive_container(archive_path)
+    kinds = {finding.kind for finding in findings}
+
+    assert {
+        "duplicate-member",
+        "forbidden-path",
+        "private-marker",
+        "unsafe-member-type",
+    } <= kinds
+    assert {finding.detail for finding in findings if finding.kind == "unsafe-member-type"} == {
+        "hardlink",
+        "symlink",
+    }
+
+
+def test_checksum_inventory_rejects_missing_extra_duplicate_and_mismatch(tmp_path: Path) -> None:
+    first = tmp_path / "a.whl"
+    second = tmp_path / "b.whl"
+    first.write_bytes(b"a")
+    second.write_bytes(b"b")
+    sums = tmp_path / "SHA256SUMS"
+    release.write_sha256s(sums, [first, second])
+    assert release.verify_sha256s(sums, [first, second]) == []
+
+    sums.write_text(
+        f"{'0' * 64}  a.whl\n{'1' * 64}  a.whl\n{'2' * 64}  extra.whl\n",
+        encoding="utf-8",
+    )
+    errors = release.verify_sha256s(sums, [first, second])
+    assert "duplicate checksum entry: a.whl" in errors
+    assert "missing checksum entry: b.whl" in errors
+    assert "unexpected checksum entry: extra.whl" in errors
+    assert "checksum mismatch: a.whl" in errors
 
 
 def test_sha256s_are_sorted_by_filename(tmp_path: Path) -> None:

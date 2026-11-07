@@ -1,3 +1,4 @@
+import os
 import subprocess
 import tomllib
 from pathlib import Path
@@ -14,6 +15,11 @@ def test_wheelhouse_build_script_creates_release_archive() -> None:
     assert "workerbee-wheelhouse.tar.gz" in text
     assert "SHA256SUMS" in text
     assert "RELEASE-MANIFEST.json" in text
+    assert "SBOM.cdx.json" in text
+    assert "audit-archive" in text
+    assert "verify-sha256s" in text
+    assert "--find-links <wheelhouse>" in text
+    assert "--find-links ${OUT_DIR}" not in text
     assert "rm -rf" in text
     assert "gzip -n" in text
 
@@ -26,6 +32,49 @@ def test_install_script_is_offline_only_and_fails_closed() -> None:
     assert "refusing package-index fallback" in text
     assert "retrying with package index" not in text.lower()
     assert "pip install --upgrade pip" not in text
+    assert "pip check" in text
+    assert 'providers != ["k1s-core"]' in text
+
+
+def test_standalone_install_uses_validated_versioned_venv_and_atomic_launcher() -> None:
+    text = Path("scripts/install-workerbee.sh").read_text(encoding="utf-8")
+
+    assert "workerbee-install" in text
+    assert 'releases_dir="$INSTALL_DIR/releases"' in text
+    assert ".candidate.XXXXXX" in text
+    assert 'mv "$candidate_dir" "$release_dir"' in text
+    assert 'atomic_link current "releases/$release_id"' in text
+    assert 'exec "$INSTALL_DIR/current/bin/python" -m workerbee' in text
+    assert "workerbee.standalone-install/v1" in text
+    assert '"runtime_state": "outside-versioned-venv"' in text
+    assert "--rollback" in text
+    assert "wheelhouse archive must contain exactly one top-level directory" in text
+
+
+def test_standalone_rollback_switches_only_versioned_release_links(tmp_path: Path) -> None:
+    install_dir = tmp_path / "workerbee-install"
+    for release in ("current-release", "previous-release"):
+        binary = install_dir / "releases" / release / "bin" / "python"
+        binary.parent.mkdir(parents=True)
+        binary.write_text("#!/bin/sh\n", encoding="utf-8")
+        binary.chmod(0o700)
+    (install_dir / "current").symlink_to("releases/current-release")
+    (install_dir / "previous").symlink_to("releases/previous-release")
+    env = {
+        **os.environ,
+        "WORKERBEE_INSTALL_DIR": str(install_dir),
+    }
+
+    proc = subprocess.run(
+        ["sh", "scripts/install-workerbee.sh", "--rollback"],
+        text=True,
+        capture_output=True,
+        env=env,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert (install_dir / "current").readlink() == Path("releases/previous-release")
+    assert (install_dir / "previous").readlink() == Path("releases/current-release")
 
 
 def test_wheelhouse_build_is_local_only_and_has_no_index_resolution() -> None:

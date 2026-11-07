@@ -13,6 +13,7 @@ AGENT_FEEDBACK_SCHEMA = "workerbee.agent_feedback/v1"
 AGENT_FEEDBACK_LIMIT = 6
 MCP_TOOL_NAMES = [
     "workerbee_v1_capabilities",
+    "workerbee_v1_readiness_receipt",
     "workerbee_v1_session_start",
     "workerbee_v1_projects",
     "workerbee_v1_project_mode_get",

@@ -71,6 +71,21 @@ normalized archive. It has no package-index resolution path.
 The installer requires the external `SHA256SUMS`, verifies the internal
 manifest, and never falls back to an index.
 
+Both candidate and wheelhouse builders emit deterministic `SBOM.cdx.json`
+inventories. The manifest records the SBOM as nonpublishable support evidence;
+PyPI fetch verification therefore compares only the wheel and sdist while the
+preserved candidate bundle still verifies the complete local inventory.
+Archive checks reject private markers, protected dotenv names, unapproved
+generated roots, duplicate entries, symlinks, hardlinks, and special members.
+Manifest and checksum verification reject missing, extra, duplicate, malformed,
+or byte-mismatched inventory entries.
+
+The standalone installer uses versioned environments under
+`workerbee-install/releases`, validates the isolated candidate and exact
+single-provider ownership, then atomically switches the launcher. It retains a
+previous release for `install-workerbee.sh --rollback`; WorkerBee runtime state
+is not stored inside a versioned environment.
+
 ## Staged trusted publishing
 
 The immutable C0 baseline, four candidate receipts, `dev` to `main` promotion

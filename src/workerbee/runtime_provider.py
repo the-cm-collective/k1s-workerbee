@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterable
+from typing import Any
 
 RUNTIME_DISTRIBUTION = "k1s-core"
 RUNTIME_VERSION = "0.1.8a1"
@@ -18,6 +19,15 @@ RUNTIME_ARTIFACT_SIZE = 879766
 RUNTIME_ARTIFACT_SHA256 = "11103d1df772d9618e023d40a8bdfeecb10feac7a5a374fa2efe0b1ac607cb30"
 LEGACY_RUNTIME_DISTRIBUTION = "k1s-workerbee-runtime"
 RUNTIME_IMPORT_PACKAGE = "ae"
+RUNTIME_PROVIDER_STATUS_SCHEMA = "workerbee.runtime-provider-status/v1"
+
+
+class RuntimeProviderError(RuntimeError):
+    """Fail-closed provider error carrying a safe structured diagnostic."""
+
+    def __init__(self, message: str, *, status: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.status = status
 
 
 def normalize_distribution_name(name: str) -> str:
@@ -33,19 +43,55 @@ def validate_installed_ae_providers(providers: Iterable[str]) -> tuple[str, ...]
     which supplies ``ae`` through ``PYTHONPATH`` instead of installed metadata.
     """
 
+    status = runtime_provider_status(providers)
+    normalized = tuple(status["providers"])
+    if status["state"] == "mixed":
+        joined = ", ".join(normalized)
+        raise RuntimeProviderError(
+            f"multiple distributions provide {RUNTIME_IMPORT_PACKAGE!r}: {joined}; "
+            "remove the mixed runtime providers before starting WorkerBee",
+            status=status,
+        )
+    if status["state"] in {"legacy", "unapproved"}:
+        raise RuntimeProviderError(
+            f"unapproved distribution provides {RUNTIME_IMPORT_PACKAGE!r}: "
+            f"{normalized[0]}; the active release lane requires only "
+            f"{normalize_distribution_name(RUNTIME_DISTRIBUTION)}",
+            status=status,
+        )
+    return normalized
+
+
+def runtime_provider_status(providers: Iterable[str]) -> dict[str, Any]:
+    """Classify installed ownership of the compatibility ``ae`` namespace."""
+
     normalized = tuple(
         sorted({normalize_distribution_name(provider) for provider in providers if provider})
     )
     expected = normalize_distribution_name(RUNTIME_DISTRIBUTION)
-    if len(normalized) > 1:
-        joined = ", ".join(normalized)
-        raise RuntimeError(
-            f"multiple distributions provide {RUNTIME_IMPORT_PACKAGE!r}: {joined}; "
-            "remove the mixed runtime providers before starting WorkerBee"
-        )
-    if normalized and normalized != (expected,):
-        raise RuntimeError(
-            f"unapproved distribution provides {RUNTIME_IMPORT_PACKAGE!r}: "
-            f"{normalized[0]}; the active release lane requires only {expected}"
-        )
-    return normalized
+    legacy = normalize_distribution_name(LEGACY_RUNTIME_DISTRIBUTION)
+    if not normalized:
+        state = "source-checkout"
+        ok = True
+    elif len(normalized) > 1:
+        state = "mixed"
+        ok = False
+    elif normalized == (expected,):
+        state = "exact"
+        ok = True
+    elif normalized == (legacy,):
+        state = "legacy"
+        ok = False
+    else:
+        state = "unapproved"
+        ok = False
+    return {
+        "schema": RUNTIME_PROVIDER_STATUS_SCHEMA,
+        "state": state,
+        "ok": ok,
+        "providers": list(normalized),
+        "expected": expected,
+        "forbidden": legacy,
+        "import_package": RUNTIME_IMPORT_PACKAGE,
+        "requirement": RUNTIME_REQUIREMENT,
+    }

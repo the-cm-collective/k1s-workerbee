@@ -67,6 +67,7 @@ from workerbee.paths import daemon_project_state_dir, default_state_root
 from workerbee.ports import choose_port
 from workerbee.probe import build_probe_url, probe_workerbee_url
 from workerbee.profiles import K1sProfileRunner, builtin_profiles, is_edge_link_profile
+from workerbee.readiness import read_readiness_receipt, readiness_evidence_path
 from workerbee.runbooks import (
     DEFAULT_REPO_RUNBOOK_PATH,
     ensure_project_runbook,
@@ -74,6 +75,7 @@ from workerbee.runbooks import (
     import_project_runbook,
     update_project_runbook,
 )
+from workerbee.runtime_policy import runtime_state_readback, tool_policy_descriptors
 from workerbee.runtime_support import (
     CONTAINERD_RUNTIME,
     cleanup_runtime,
@@ -1722,6 +1724,35 @@ class WorkerBeeDaemon:
             tail=tail,
         )
 
+    def readiness_receipt(
+        self,
+        *,
+        project: str | None = None,
+        generation: str,
+        evidence_name: str = "readiness",
+        required_consumers: dict[str, list[str]] | None = None,
+        max_age_seconds: float = 300.0,
+        settle_timeout_seconds: float = 1.0,
+    ) -> dict[str, Any]:
+        """Return a bounded receipt for project-scoped readiness evidence."""
+
+        name = project_slug(project or self.default_project)
+        path = readiness_evidence_path(
+            project=name,
+            evidence_name=evidence_name,
+            state_root=self.state_root,
+        )
+        return read_readiness_receipt(
+            path=path,
+            project=name,
+            generation=generation,
+            evidence_name=evidence_name,
+            required_consumers=required_consumers,
+            configured_runtime=self.runtime_requested,
+            max_age_seconds=max_age_seconds,
+            settle_timeout_seconds=settle_timeout_seconds,
+        )
+
     def capabilities(self) -> dict[str, Any]:
         from workerbee import __version__
         from workerbee.contract import AGENT_FEEDBACK_SCHEMA, API_VERSION, MCP_TOOL_NAMES
@@ -1735,18 +1766,34 @@ class WorkerBeeDaemon:
                 "root": str(k1s_runtime.k1s_root) if k1s_runtime.k1s_root else None,
                 "ae_origin": k1s_runtime.ae_origin,
                 "ae_version": k1s_runtime.ae_version,
+                "provider_status": k1s_runtime.provider_status,
             }
         except Exception as exc:  # noqa: BLE001
             k1s = {"error": str(exc)}
 
         controlled_runs = self.controlled_runs.capabilities()
+        runtime = runtime_diagnostics(self.runtime_requested, state_root=self.state_root)
+        advertised_tools = [*MCP_TOOL_NAMES, *controlled_runs["advertised_tools"]]
         return {
             "api_version": API_VERSION,
             "workerbee_version": __version__,
             "state_root": str(self.state_root),
             "default_project": self.default_project,
-            "mcp_tools": [*MCP_TOOL_NAMES, *controlled_runs["advertised_tools"]],
+            "mcp_tools": advertised_tools,
             "controlled_runs": controlled_runs,
+            "runtime_policy": {
+                "runtime_state": runtime_state_readback(self.runtime_requested, runtime),
+                "tool_policy": tool_policy_descriptors(advertised_tools),
+                "readiness_receipt": {
+                    "schema": "workerbee.readiness-receipt/v1",
+                    "evidence_schema": "workerbee.readiness-evidence/v1",
+                    "project_scoped": True,
+                    "owner_only": True,
+                    "nofollow": hasattr(os, "O_NOFOLLOW"),
+                    "bounded": True,
+                    "dependency_consumer_gate": True,
+                },
+            },
             "native_interoperability": native_interoperability_capabilities(),
             "agent_workflow": {
                 "session_bootstrap": True,
@@ -1878,7 +1925,7 @@ class WorkerBeeDaemon:
                 "components": ["edge-nats", "rathole-client", "gateway", "node"],
                 "gpu_validation": True,
             },
-            "runtime": runtime_diagnostics(self.runtime_requested, state_root=self.state_root),
+            "runtime": runtime,
             "containerd_privilege": containerd_privilege_summary(
                 containerd_privilege_status(
                     state_root=self.state_root,

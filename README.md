@@ -104,7 +104,14 @@ On macOS, pass an explicit Python 3.11+ interpreter when needed:
 PYTHON=python3.11 WORKERBEE_INSTALL_BASE_URL="file://$(pwd)" ./install-workerbee.sh
 ```
 
-The installer uses the currently active Python virtual environment when `VIRTUAL_ENV` is set. If no venv is active, it creates a standalone WorkerBee venv under `${XDG_DATA_HOME:-~/.local/share}/workerbee/venv` and writes a `workerbee` wrapper to `~/.local/bin`. If that directory is not on `PATH`, the installer prints the exact `export PATH=...` line to add.
+The installer uses the currently active Python virtual environment when
+`VIRTUAL_ENV` is set. Otherwise it validates a fresh versioned environment
+under `${XDG_DATA_HOME:-~/.local/share}/workerbee-install/releases`, atomically
+switches the `current` launcher only after validation, and retains `previous`
+for `install-workerbee.sh --rollback`. Runtime state remains outside those
+versioned environments. Set `WORKERBEE_FORCE_STANDALONE=1` to require this path
+even inside an active virtual environment. If `~/.local/bin` is not on `PATH`,
+the installer prints the exact `export PATH=...` line to add.
 
 WorkerBee does not install container runtimes. It uses Podman or Docker for the default workflow and supports explicit direct containerd development with `nerdctl`.
 
@@ -122,13 +129,17 @@ workerbee doctor
 ```
 
 The wheelhouse installer is intentionally offline-only: it verifies the
-release `SHA256SUMS` and the archive's internal manifest, then installs with
-`--no-index`. An incomplete or incompatible wheelhouse fails closed instead of
-falling back to a package index.
+release `SHA256SUMS`, deterministic CycloneDX SBOM, archive topology, and exact
+internal inventory, then installs with `--no-index`. An incomplete,
+mixed-provider, or incompatible wheelhouse fails closed instead of falling back
+to a package index.
 
 Release operators should follow [`docs/releasing.md`](docs/releasing.md) for
 artifact audits, deterministic hash checks, staged OIDC trusted publishing,
-the gated k1s-core provider integration point, and rollback.
+the gated k1s-core provider integration point, and rollback. The consolidated
+public v1 scope, compatibility, installation, operations, security, support,
+versioning, migration, and optional Agent PBX boundaries are in
+[`docs/v1-contract.md`](docs/v1-contract.md).
 
 The public one-line installer expects each GitHub release to include these
 assets:
@@ -774,7 +785,7 @@ Other MCP clients can connect to the same Streamable HTTP endpoint if they suppo
 Uninstall standalone WorkerBee:
 
 ```bash
-rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/workerbee/venv" "$HOME/.local/bin/workerbee"
+rm -rf "${XDG_DATA_HOME:-$HOME/.local/share}/workerbee-install" "$HOME/.local/bin/workerbee"
 ```
 
 If installed into an active venv, uninstall with `python -m pip uninstall k1s-workerbee`.
@@ -803,9 +814,9 @@ To pin a specific release or dev-channel candidate, replace
 `/releases/download/v0.1.7/`.
 
 The installer uses an active virtual environment when one is enabled. Without an
-active venv, it creates a standalone WorkerBee venv under
-`${XDG_DATA_HOME:-$HOME/.local/share}/workerbee/venv` and writes a wrapper to
-`~/.local/bin/workerbee`.
+active venv, it uses the same validated, versioned release layout under
+`${XDG_DATA_HOME:-$HOME/.local/share}/workerbee-install/releases` and writes the
+atomic-current wrapper to `~/.local/bin/workerbee`.
 
 ### macOS clone/dev install
 

@@ -313,6 +313,29 @@ def serve_mcp(
         """Return WorkerBee v1 MCP contract capabilities."""
         return protect("Capabilities", None, daemon.capabilities)
 
+    @mcp.tool()
+    def workerbee_v1_readiness_receipt(
+        generation: str,
+        project: str = "default",
+        evidence_name: str = "readiness",
+        required_consumers: dict[str, list[str]] | None = None,
+        max_age_seconds: float = 300.0,
+        settle_timeout_seconds: float = 1.0,
+    ) -> dict[str, Any]:
+        """Read bounded project readiness evidence without invoking runtime state."""
+        return protect(
+            "ReadinessReceipt",
+            project,
+            lambda: daemon.readiness_receipt(
+                project=project,
+                generation=generation,
+                evidence_name=evidence_name,
+                required_consumers=required_consumers,
+                max_age_seconds=max_age_seconds,
+                settle_timeout_seconds=settle_timeout_seconds,
+            ),
+        )
+
     _register_controlled_run_tools(mcp, daemon)
 
     @mcp.tool()

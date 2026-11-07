@@ -31,6 +31,7 @@ def test_contract_tool_names_are_v1_only() -> None:
     assert "workerbee_v1_project_runbook_export" in MCP_TOOL_NAMES
     assert "workerbee_v1_project_runbook_import" in MCP_TOOL_NAMES
     assert "workerbee_v1_workload_restart" in MCP_TOOL_NAMES
+    assert "workerbee_v1_readiness_receipt" in MCP_TOOL_NAMES
 
 
 def test_result_envelopes_are_stable_and_mask_errors() -> None:
@@ -214,9 +215,7 @@ def test_agent_feedback_prioritizes_app_ingress_links_for_deploy() -> None:
                 "state": "ready",
                 "ingress_urls": ["https://rawform.alpha.workerbee.localhost:19443/"],
             },
-            "deployment": {
-                "ingress_urls": ["https://rawform.alpha.workerbee.localhost:19443/"]
-            },
+            "deployment": {"ingress_urls": ["https://rawform.alpha.workerbee.localhost:19443/"]},
         },
     )
 
