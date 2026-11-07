@@ -29,6 +29,7 @@ workerbee = "workerbee.cli:main"
 
 [tool.workerbee.release]
 distribution = "k1s-workerbee"
+published-baseline-version = "0.1.7"
 import-package = "workerbee"
 cli-entry-point = "workerbee.cli:main"
 mcp-entry-point = "workerbee.mcp_server:serve_mcp"
@@ -38,6 +39,7 @@ runtime-provider-requirement = "k1s-core==0.1.8a1"
 runtime-provider-artifact = "k1s_core-0.1.8a1-py3-none-any.whl"
 runtime-provider-size = 879766
 runtime-provider-sha256 = "11103d1df772d9618e023d40a8bdfeecb10feac7a5a374fa2efe0b1ac607cb30"
+runtime-provider-publication-status = "temporary-nonpublished"
 forbidden-runtime-provider = "k1s-workerbee-runtime"
 
 [tool.setuptools]

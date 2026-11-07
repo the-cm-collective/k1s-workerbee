@@ -82,6 +82,19 @@ def test_project_release_contract_is_consistent() -> None:
     assert release.validate_project() == []
 
 
+def test_temporary_provider_contract_fails_closed_for_publication(capsys) -> None:
+    contract = release.load_contract()[0]
+    assert contract.runtime_provider_publication_status == "temporary-nonpublished"
+    assert contract.published_baseline_version == "0.1.7"
+    assert release.validate_publication_ready() == [
+        "runtime provider is temporary-nonpublished; refusing WorkerBee publication",
+        "WorkerBee 0.1.7 is already the published baseline; refusing same-version publication",
+    ]
+
+    assert release.main(["verify-publication-ready"]) == 1
+    assert "refusing WorkerBee publication" in capsys.readouterr().err
+
+
 def test_clean_wheel_passes_identity_and_hygiene_audit(tmp_path: Path) -> None:
     wheel = tmp_path / "k1s_workerbee-0.1.7-py3-none-any.whl"
     _write_workerbee_wheel(wheel)

@@ -86,6 +86,8 @@ jobs:
             dist/candidate/*.whl dist/candidate/*.tar.gz
           mkdir -p dist/publish
           cp dist/candidate/*.whl dist/candidate/*.tar.gz dist/publish/
+      - name: Require a publication-ready release contract
+        run: python scripts/audit_release_artifacts.py verify-publication-ready
       - name: Publish candidate to TestPyPI with trusted publishing
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # release/v1
         with:

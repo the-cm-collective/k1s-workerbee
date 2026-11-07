@@ -25,6 +25,14 @@ The accepted artifact supplies the required compatibility imports: `ae`,
 `79bf1cd2f0d80bb22491bd44c92df86ac6127c25234ed35458f9c82d7fbbcd38`.
 Do not substitute a rebuild or an index artifact.
 
+Its release-contract publication status is `temporary-nonpublished`, and the
+contract records `0.1.7` as the already-published WorkerBee baseline. The
+GitHub publishing jobs call `verify-publication-ready` immediately before
+trusted publishing and therefore fail closed while either the provider is
+temporary or the WorkerBee version still matches that baseline. A later
+reviewed checkpoint must verify public availability of the exact provider,
+select a new WorkerBee version, and update the contract before publication.
+
 The dependency integration and future rebind points are `[project].dependencies` together with
 `[tool.workerbee.release]` in `pyproject.toml` and the constants in
 `src/workerbee/runtime_provider.py`, the wheelhouse builder, release artifact
@@ -64,6 +72,10 @@ The installer requires the external `SHA256SUMS`, verifies the internal
 manifest, and never falls back to an index.
 
 ## Staged trusted publishing
+
+The immutable C0 baseline, four candidate receipts, `dev` to `main` promotion
+gate, Gitea/GitHub authority split, and host-safety boundary are recorded in
+[`release-foundation.md`](release-foundation.md).
 
 Both workflows are manual-only and default to validation without publication:
 

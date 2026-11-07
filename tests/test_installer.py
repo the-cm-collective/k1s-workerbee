@@ -50,6 +50,7 @@ def test_runtime_provider_pin_and_artifact_identity_are_exact() -> None:
     runtime_pin = next(dep for dep in project["dependencies"] if dep.startswith("k1s-core=="))
 
     assert runtime_pin == "k1s-core==0.1.8a1"
+    assert release["published-baseline-version"] == "0.1.7"
     assert release["runtime-provider-lane"] == "k1s-core"
     assert release["runtime-provider-requirement"] == runtime_pin
     assert release["runtime-provider-artifact"] == "k1s_core-0.1.8a1-py3-none-any.whl"
@@ -58,6 +59,7 @@ def test_runtime_provider_pin_and_artifact_identity_are_exact() -> None:
         release["runtime-provider-sha256"]
         == "11103d1df772d9618e023d40a8bdfeecb10feac7a5a374fa2efe0b1ac607cb30"
     )
+    assert release["runtime-provider-publication-status"] == "temporary-nonpublished"
     assert release["forbidden-runtime-provider"] == "k1s-workerbee-runtime"
     assert not any(dep.startswith("k1s-workerbee-runtime") for dep in project["dependencies"])
 

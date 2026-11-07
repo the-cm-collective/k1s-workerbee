@@ -45,6 +45,7 @@ FORBIDDEN_PATH_PARTS = {
 class ReleaseContract:
     distribution: str
     version: str
+    published_baseline_version: str
     import_package: str
     cli_entry_point: str
     mcp_entry_point: str
@@ -54,6 +55,7 @@ class ReleaseContract:
     runtime_provider_artifact: str
     runtime_provider_size: int
     runtime_provider_sha256: str
+    runtime_provider_publication_status: str
     forbidden_runtime_provider: str
 
 
@@ -83,6 +85,7 @@ def load_contract() -> tuple[ReleaseContract, dict[str, Any]]:
     contract = ReleaseContract(
         distribution=release["distribution"],
         version=project["version"],
+        published_baseline_version=release["published-baseline-version"],
         import_package=release["import-package"],
         cli_entry_point=release["cli-entry-point"],
         mcp_entry_point=release["mcp-entry-point"],
@@ -92,6 +95,7 @@ def load_contract() -> tuple[ReleaseContract, dict[str, Any]]:
         runtime_provider_artifact=release["runtime-provider-artifact"],
         runtime_provider_size=release["runtime-provider-size"],
         runtime_provider_sha256=release["runtime-provider-sha256"],
+        runtime_provider_publication_status=release["runtime-provider-publication-status"],
         forbidden_runtime_provider=release["forbidden-runtime-provider"],
     )
     return contract, pyproject
@@ -103,6 +107,8 @@ def validate_project() -> list[str]:
     errors: list[str] = []
     if project["name"] != contract.distribution:
         errors.append("project.name does not match the release distribution")
+    if contract.published_baseline_version != "0.1.7":
+        errors.append("the published baseline version receipt must remain 0.1.7")
     if contract.import_package != "workerbee":
         errors.append("the import package must remain workerbee")
     if contract.runtime_import != "ae":
@@ -141,6 +147,11 @@ def validate_project() -> list[str]:
         errors.append("the runtime provider SHA256 must be a lowercase hex digest")
     if contract.runtime_provider_size <= 0:
         errors.append("the runtime provider artifact size must be positive")
+    if contract.runtime_provider_publication_status not in {
+        "temporary-nonpublished",
+        "published",
+    }:
+        errors.append("the runtime provider publication status is invalid")
     init_text = INIT_MODULE.read_text(encoding="utf-8")
     if f'__version__ = "{contract.version}"' not in init_text:
         errors.append("workerbee.__version__ does not match project.version")
@@ -158,6 +169,21 @@ def validate_project() -> list[str]:
         errors.append("runtime provider module does not match the accepted artifact contract")
     if pyproject["build-system"].get("build-backend") != "setuptools.build_meta":
         errors.append("unexpected build backend")
+    return errors
+
+
+def validate_publication_ready() -> list[str]:
+    """Fail closed until the provider and WorkerBee version can be published."""
+
+    contract, _ = load_contract()
+    errors = validate_project()
+    if contract.runtime_provider_publication_status != "published":
+        errors.append("runtime provider is temporary-nonpublished; refusing WorkerBee publication")
+    if contract.version == contract.published_baseline_version:
+        errors.append(
+            f"WorkerBee {contract.version} is already the published baseline; "
+            "refusing same-version publication"
+        )
     return errors
 
 
@@ -532,6 +558,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("verify-project")
+    subparsers.add_parser("verify-publication-ready")
     audit = subparsers.add_parser("audit")
     audit.add_argument("artifacts", nargs="+", type=Path)
     audit.add_argument("--json", action="store_true")
@@ -559,6 +586,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "verify-project":
         return _print_errors(validate_project())
+    if args.command == "verify-publication-ready":
+        return _print_errors(validate_publication_ready())
     if args.command == "audit":
         findings = audit_artifacts(args.artifacts)
         if args.json:
