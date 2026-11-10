@@ -112,6 +112,25 @@ credentials, endpoints, and raw run IDs. Bootstrap creation is never public;
 only pure adaptation of an already-selected public bootstrap projection is
 available internally for qualification.
 
+## Claim and evidence boundary
+
+Public documentation distinguishes implemented OSS behavior from negotiated or
+environment-dependent capability:
+
+| Surface | Public claim | Evidence boundary |
+| --- | --- | --- |
+| Native/direct lifecycle | Implemented by WorkerBee OSS; the ordinary local MCP and CLI surface operates against the trusted caller checkout. | Source, parser/contract tests, and runtime-policy descriptors establish the contract. A particular container runtime or deployed workload is ready only when measured by that environment. |
+| K1s profile evidence | Implemented metadata-safe consumer and same-runtime bridge for `list`, `doctor`, `plan`, `status`, and `logs`. | Capability posture remains `source-validated/unqualified`; a capability descriptor is not proof that a particular profile is running or healthy. Raw log content and private source data are intentionally not evidence fields. |
+| Controlled runs | The five schemas, validation rules, state machine, receipts, and capability gate are implemented in OSS. | Usability is not claimed unless an explicit policy and a strict private adapter satisfy the gate. Native/direct mode is never appliance evidence. |
+| Agent PBX integration | Optional composition that may consume public WorkerBee receipts and capabilities. | Agent PBX campaign, access-profile, and private-adapter authority is outside the WorkerBee OSS product boundary. |
+| Snapshot, clone, trusted binding, and strict appliance modes | Stable vocabulary only. | These modes are reported as unsupported and adapter-owned; their presence in a schema is not an OSS implementation or availability claim. |
+
+Examples and future plans are not readiness receipts. Public release claims
+must be supported by repository tests and exact artifact evidence; live runtime,
+host-platform, or private-adapter claims require separate environment-qualified
+receipts. No public receipt should contain protected local configuration,
+credentials, private paths, endpoints, or private authority.
+
 ## Security
 
 MCP and application ingress are loopback-only by default. Remote MCP remains an

@@ -5,6 +5,9 @@ effort summaries reconstructed from release notes and git history.
 
 ## Unreleased - 1.0.0a2
 
+- Clarified the public evidence/authority boundaries and recorded the exact
+  future `k1s-core==1.0.0rc1` rebind inventory without changing the current
+  `1.0.0a3` provider lock or creating a WorkerBee release candidate.
 - Added the bounded, metadata-safe K1s profile-evidence consumer with an
   unambiguous `workerbee k1s-evidence` CLI, read-only MCP projection, exact
   same-runtime provider binding, and versioned capability readback.

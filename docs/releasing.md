@@ -41,6 +41,73 @@ has not been superseded. If it has, update every rebind point and rerun all
 affected build, wheelhouse, offline-install, and compatibility gates. Never
 leave both providers active.
 
+### Future `k1s-core==1.0.0rc1` rebind inventory
+
+The `1.0.0rc1` name is an intended future dependency checkpoint, not an
+accepted artifact. Do not edit the active lock until the root release authority
+supplies an immutable source commit/tree plus the exact published wheel
+filename, byte size, SHA256, publication status, and accepted provenance. A
+local rebuild, index resolution, inferred filename, or provisional digest is
+not a substitute.
+
+Once those inputs are accepted, the provider-only rebind changes exactly these
+version-bearing repository paths:
+
+- `pyproject.toml`: `[project].dependencies` and every
+  `[tool.workerbee.release]` provider identity field;
+- `src/workerbee/runtime_provider.py`: provider version, requirement, artifact
+  filename, size, and SHA256 constants;
+- `scripts/build_wheelhouse.sh`: the human-readable accepted provider pin in
+  usage and generated `INSTALL.txt` output;
+- `CHANGELOG.md`, `docs/releasing.md`, and `docs/v1-contract.md`: current
+  provider and compatibility statements;
+- `docs/release-foundation.md`: append the new accepted checkpoint without
+  rewriting the immutable C0/C4 historical receipts; and
+- `tests/test_installer.py`, `tests/test_profile_evidence.py`,
+  `tests/test_release_artifacts.py`, `tests/test_runtime_provider.py`, and
+  `tests/test_v1_contract_docs.py`: exact pin, artifact, capability-readiness,
+  and documentation assertions. Deliberate negative fixtures that represent a
+  mismatched provider remain mismatches rather than being mechanically updated.
+
+These consumers are intentionally contract-driven and normally require no
+version-specific source edit: `scripts/audit_release_artifacts.py`,
+`scripts/install-workerbee.sh`, `src/workerbee/profile_evidence.py`, and
+`README.md`. Review them after the rebind and change them only if the accepted
+artifact changes a public contract. The four workflow files
+`.gitea/workflows/integration.yml`, `.github/workflows/promote-main.yml`,
+`.github/workflows/release-testpypi.yml`, and
+`.github/workflows/release-pypi.yml` also remain version-neutral; rerun their
+contract checks, but do not add a provider-specific workflow path or index
+fallback.
+
+The rebind invalidates every previous WorkerBee candidate bundle even when the
+WorkerBee package version is unchanged. Rebuild and reseal both deterministic
+candidate copies and both wheelhouses, including:
+
+- `k1s_workerbee-1.0.0a2-py3-none-any.whl` and
+  `k1s_workerbee-1.0.0a2.tar.gz`;
+- candidate `SBOM.cdx.json` and `RELEASE-MANIFEST.json`;
+- the accepted `k1s_core-1.0.0rc1-py3-none-any.whl` and every exact transitive
+  dependency wheel;
+- wheelhouse `INSTALL.txt`, `SBOM.cdx.json`, and `RELEASE-MANIFEST.json`; and
+- normalized `workerbee-wheelhouse.tar.gz` plus external `SHA256SUMS` covering
+  the archive and installer.
+
+Before accepting the rebind, require two byte-identity builds, Twine and archive
+hygiene checks, complete manifest/SBOM/SHA256 verification, exactly-one-`ae`
+provider checks, mixed legacy-provider rejection, and two clean installs with
+`PIP_NO_INDEX=1`, `PIP_CONFIG_FILE=/dev/null`, and explicit `--no-index`. Each
+install must pass `pip check`, `workerbee`/MCP/import/`ae` smoke checks, runtime
+provider discovery, and the five-operation K1s profile-evidence contract plus
+the internal pure bootstrap projection. Rerun focused provider, installer,
+profile-evidence, release-artifact, workflow, and documentation tests; the full
+safe suite; Ruff/format/compile; shell and workflow-YAML checks; protected-file
+archive exclusions; and final clean Git checks.
+
+This dependency rebind does not by itself create `k1s-workerbee==1.0.0rc1`.
+Changing the WorkerBee package version, creating a tag, or publishing is a
+separate reviewed release decision.
+
 ## Build and local validation
 
 Use Python 3.11 or newer and build from a clean commit. The candidate builder

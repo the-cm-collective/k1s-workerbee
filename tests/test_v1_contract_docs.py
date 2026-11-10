@@ -162,3 +162,58 @@ def test_public_docs_use_application_neutral_governance_examples() -> None:
         "nitda",
     ):
         assert project_specific_term not in text
+
+
+def test_public_claim_boundaries_distinguish_contract_from_qualification() -> None:
+    text = Path("docs/v1-contract.md").read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+
+    assert "## Claim and evidence boundary" in text
+    for contract in (
+        "source-validated/unqualified",
+        "a capability descriptor is not proof",
+        "Native/direct mode is never appliance evidence",
+        "outside the WorkerBee OSS product boundary",
+        "their presence in a schema is not an OSS implementation or availability claim",
+        "Examples and future plans are not readiness receipts",
+    ):
+        assert contract in normalized
+
+
+def test_release_docs_record_exact_future_k1s_rc1_rebind_inventory() -> None:
+    text = Path("docs/releasing.md").read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+
+    assert "### Future `k1s-core==1.0.0rc1` rebind inventory" in text
+    assert "not an accepted artifact" in normalized
+    for mutable_path in (
+        "pyproject.toml",
+        "src/workerbee/runtime_provider.py",
+        "scripts/build_wheelhouse.sh",
+        "CHANGELOG.md",
+        "docs/release-foundation.md",
+        "tests/test_installer.py",
+        "tests/test_profile_evidence.py",
+        "tests/test_release_artifacts.py",
+        "tests/test_runtime_provider.py",
+        "tests/test_v1_contract_docs.py",
+    ):
+        assert f"`{mutable_path}`" in text
+    for validation_only_path in (
+        "scripts/audit_release_artifacts.py",
+        "scripts/install-workerbee.sh",
+        "src/workerbee/profile_evidence.py",
+        ".gitea/workflows/integration.yml",
+        ".github/workflows/promote-main.yml",
+        ".github/workflows/release-testpypi.yml",
+        ".github/workflows/release-pypi.yml",
+    ):
+        assert f"`{validation_only_path}`" in text
+    for gate in (
+        "PIP_NO_INDEX=1",
+        "PIP_CONFIG_FILE=/dev/null",
+        "exactly-one-`ae`",
+        "two byte-identity builds",
+        "does not by itself create `k1s-workerbee==1.0.0rc1`",
+    ):
+        assert gate in text
