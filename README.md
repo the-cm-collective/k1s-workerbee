@@ -8,7 +8,7 @@ WorkerBee is a local MCP workbench that gives coding agents a project-scoped
 k1s-powered app engine for building, deploying, probing, and exporting
 cloud-native applications on a developer machine.
 
-WorkerBee v0.1 uses the exact accepted `k1s-core` wheel or a sibling
+WorkerBee v1 alpha uses the exact accepted `k1s-core` wheel or a sibling
 `../k1s` checkout without modifying k1s. The default workflow uses Podman or
 Docker for ordinary app validation. Advanced k1s controller/runtime development
 uses explicit direct containerd mode, where every k1s profile component is
@@ -780,7 +780,7 @@ workerbee --runtime containerd containerd-privilege stop-helper
 
 Shared host containerd is still a privileged development mode. WorkerBee avoids broad prune operations and cleanup is constrained to WorkerBee state-hash namespaces, but Podman or Docker remains the safer default for ordinary users.
 
-Other MCP clients can connect to the same Streamable HTTP endpoint if they support HTTP MCP. For example, Claude Code documents `claude mcp add --transport http workerbee http://127.0.0.1:8765/mcp`; Codex is the tested target for WorkerBee v0.1.
+Other MCP clients can connect to the same Streamable HTTP endpoint if they support HTTP MCP. For example, Claude Code documents `claude mcp add --transport http workerbee http://127.0.0.1:8765/mcp`; Codex is the tested target for WorkerBee v1 alpha.
 
 Uninstall standalone WorkerBee:
 
@@ -792,7 +792,7 @@ If installed into an active venv, uninstall with `python -m pip uninstall k1s-wo
 
 ## macOS Notes
 
-macOS support is best effort for v0.1, with Docker Desktop as the recommended
+macOS support is best effort for v1 alpha, with Docker Desktop as the recommended
 runtime for the default WorkerBee app workflow. Install Python 3.11 or newer,
 install Docker Desktop, start Docker Desktop, and confirm the Docker CLI works:
 

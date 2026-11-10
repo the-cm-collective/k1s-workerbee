@@ -30,10 +30,10 @@ operator, access-profile, or instruction-injection behavior.
 ## Compatibility
 
 WorkerBee v1 requires Python 3.11 or newer and `mcp>=1.8,<2`. The current
-prepublication provider contract is exactly `k1s-core==0.1.8a1`, while the
-compatibility import remains `ae`. That K1s artifact is temporary and
-nonpublished; it is not a public dependency freeze and checkpoint E must rebind
-only after root acceptance of the canonical K1s release artifact.
+provider contract is exactly `k1s-core==1.0.0a3`, while the compatibility
+import remains `ae`. That published provider artifact is bound by filename,
+size, and SHA256 in the release contract; a future K1s rebind requires another
+reviewed compatibility checkpoint.
 
 Exactly one installed distribution may own `ae`. Startup and `workerbee doctor`
 fail closed when `k1s-core` and legacy `k1s-workerbee-runtime` coexist, when the

@@ -55,21 +55,19 @@ GitHub alone contains the public TestPyPI/PyPI workflows. They remain manual,
 default to no publication, use OIDC trusted publishing, and verify the exact
 candidate bytes. No Gitea workflow may call or reproduce those publishing jobs.
 
-## Temporary provider gate
+## Temporary provider gate at C0
 
-The current provider requirement remains exactly `k1s-core==0.1.8a1` with the
-accepted nonpublished artifact identity already recorded in `pyproject.toml`.
-Its publication status is `temporary-nonpublished`. Both GitHub publishing jobs
-run `verify-publication-ready` immediately before their publishing action, so
-this C0 source state fails closed even if a manual operator selects
-`publish=true`. The same check rejects the candidate while its version remains
-the already-published `0.1.7` baseline.
+At C0, the provider requirement was exactly `k1s-core==0.1.8a1` with an
+accepted nonpublished artifact identity recorded in `pyproject.toml`. Its
+publication status was `temporary-nonpublished`, and both GitHub publishing
+jobs failed closed even if a manual operator selected `publish=true`. The same
+check rejected the candidate while its version remained the already-published
+`0.1.7` baseline.
 
-Changing the status to `published` is not sufficient by itself: a later
-reviewed checkpoint must prove that the exact provider artifact is publicly
-available, preserve the single-provider/no-index contract, rerun deterministic
-build and offline-install gates, and approve the final release candidate. C0
-does not perform that rebind or begin WorkerBee C4 work.
+C4 later fulfills that deferred gate by binding the exact published
+`k1s-core==1.0.0a3` wheel, advancing WorkerBee to `1.0.0a1`, and rerunning the
+single-provider, deterministic-build, and offline-install checks. The C0
+receipts above remain immutable historical evidence.
 
 ## Host-safety boundary
 

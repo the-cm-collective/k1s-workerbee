@@ -6,10 +6,10 @@ import `ae`.
 
 ## Current provider lane
 
-The RC1 integration lane requires `k1s-core==0.1.8a1`. The accepted,
-nonpublished compatibility wheel is
-`k1s_core-0.1.8a1-py3-none-any.whl`, size `879766`, SHA256
-`11103d1df772d9618e023d40a8bdfeecb10feac7a5a374fa2efe0b1ac607cb30`.
+The WorkerBee 1.0 alpha lane requires the published `k1s-core==1.0.0a3`
+provider. The accepted wheel is
+`k1s_core-1.0.0a3-py3-none-any.whl`, size `1056823`, SHA256
+`f642244ebbd9bdfa22eea1b848b1f8a34f8ee69b233f1135dc63bf058c1c5ba1`.
 The release contract in `pyproject.toml`, runtime provider guard, artifact
 audit, wheelhouse audit, and tests require that exact artifact to be the only
 installed distribution advertising the `ae` package. The legacy
@@ -19,19 +19,18 @@ uses the 1.x `FastMCP` API; a 2.x migration must be a separate compatibility
 change rather than an implicit dependency upgrade.
 
 The accepted artifact supplies the required compatibility imports: `ae`,
-`ae.apishim`, `ae.cli`, and `ae.controller`. Its provenance is K1s commit
-`187c57e182c43db108e06dbd471d5daad1ea39a7`, tree
-`7289e2d8dd1e97ce032f90b978848c978d6e08b0`, and sealed evidence hash
-`79bf1cd2f0d80bb22491bd44c92df86ac6127c25234ed35458f9c82d7fbbcd38`.
-Do not substitute a rebuild or an index artifact.
+`ae.apishim`, `ae.cli`, and `ae.controller`. PyPI and TestPyPI serve the same
+wheel bytes. The K1s version tag is `v1.0.0a3`, and the final production
+workflow correction is tagged `v1.0.0a3-publish1`; the exact index artifact
+identity above is authoritative for WorkerBee's release contract. Do not
+substitute a local rebuild.
 
-Its release-contract publication status is `temporary-nonpublished`, and the
-contract records `0.1.7` as the already-published WorkerBee baseline. The
-GitHub publishing jobs call `verify-publication-ready` immediately before
-trusted publishing and therefore fail closed while either the provider is
-temporary or the WorkerBee version still matches that baseline. A later
-reviewed checkpoint must verify public availability of the exact provider,
-select a new WorkerBee version, and update the contract before publication.
+Its release-contract publication status is `published`, and the contract still
+records `0.1.7` as the immutable already-published WorkerBee baseline.
+WorkerBee's candidate version is `1.0.0a1`. The GitHub publishing jobs call
+`verify-publication-ready` immediately before trusted publishing and fail
+closed if a future provider is temporary or the WorkerBee version regresses to
+the published baseline.
 
 The dependency integration and future rebind points are `[project].dependencies` together with
 `[tool.workerbee.release]` in `pyproject.toml` and the constants in

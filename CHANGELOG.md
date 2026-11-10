@@ -3,15 +3,15 @@
 All notable WorkerBee changes are documented here. Earlier entries are best
 effort summaries reconstructed from release notes and git history.
 
-## Unreleased - RC1 integration
+## Unreleased - 1.0.0a1
 
-- Migrated the active runtime-provider contract from the legacy
-  `k1s-workerbee-runtime` lane to the accepted `k1s-core==0.1.8a1` artifact
-  while preserving the `ae` compatibility imports.
+- Rebound the active runtime-provider contract from the temporary
+  `k1s-core==0.1.8a1` candidate to the published exact-byte
+  `k1s-core==1.0.0a3` artifact while preserving the `ae` compatibility imports.
 - Added exact provider filename, size, and SHA256 verification; mixed-provider
   rejection; and local-only, no-index wheelhouse construction.
-- Kept the final RC1 dependency freeze gated on an explicit root-operator
-  recheck in case the accepted K1s candidate is superseded.
+- Added the public v1 MCP, readiness, controlled-run, native-direct,
+  deterministic release, transactional installer, and rollback contracts.
 
 ## v0.1.7 - 2026-08-27
 
