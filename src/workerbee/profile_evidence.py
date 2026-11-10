@@ -4,11 +4,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import selectors
+import subprocess
+import time
+from collections.abc import Callable, Mapping
+from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any, Literal, NoReturn, cast
+from pathlib import Path
+from typing import Any, Literal, NoReturn, Protocol, cast
 
 from workerbee.contract import WorkerBeeError
+from workerbee.k1s_runtime import K1sRuntime, resolve_k1s_runtime
+from workerbee.runtime_provider import RUNTIME_VERSION
 
 ADAPTER_API_VERSION = "k1s.dev/workerbee-profile-adapter/v1"
 EVIDENCE_API_VERSION = "k1s.dev/workerbee-profile-evidence/v1"
@@ -167,6 +176,25 @@ class OperationSpec:
     component_required: bool
 
 
+@dataclass(frozen=True, slots=True)
+class BoundedProcessResult:
+    returncode: int
+    stdout: bytes
+
+
+class ProcessRunner(Protocol):
+    def __call__(
+        self,
+        argv: tuple[str, ...],
+        *,
+        env: Mapping[str, str],
+        stdin: bytes | None,
+        timeout: float,
+        stdout_limit: int,
+        stderr_limit: int,
+    ) -> BoundedProcessResult: ...
+
+
 OPERATION_TABLE: dict[AdapterOperation, OperationSpec] = {
     "list": OperationSpec("list", True, False, False),
     "doctor": OperationSpec("doctor", True, True, False),
@@ -175,6 +203,27 @@ OPERATION_TABLE: dict[AdapterOperation, OperationSpec] = {
     "logs": OperationSpec("logs", True, True, True),
     "bootstrap": OperationSpec("bootstrap", False, False, False),
 }
+
+_ADAPTER_BRIDGE_SCRIPT = r"""
+import json
+import sys
+
+from ae.kctl.profile_adapter import (
+    adapt_workerbee_profile_evidence,
+    render_workerbee_profile_evidence_json,
+)
+
+request = json.loads(sys.stdin.buffer.read())
+if set(request) != {"node_observation", "operation", "source", "source_exit_code"}:
+    raise ValueError("invalid bridge request")
+evidence = adapt_workerbee_profile_evidence(
+    request["operation"],
+    request["source"],
+    source_exit_code=request["source_exit_code"],
+    node_observation=request["node_observation"],
+)
+sys.stdout.write(render_workerbee_profile_evidence_json(evidence))
+"""
 
 
 class ProfileEvidenceError(WorkerBeeError):
@@ -217,6 +266,368 @@ def validate_public_request(
     elif component is not None:
         _fail("unexpected-component")
     return typed_operation, profile, component
+
+
+class K1sProfileEvidenceBridge:
+    """Resolve one exact K1s runtime and create same-runtime evidence sessions."""
+
+    def __init__(
+        self,
+        *,
+        cwd: Path | None = None,
+        runtime_resolver: Callable[..., K1sRuntime] = resolve_k1s_runtime,
+        process_runner: ProcessRunner | None = None,
+    ) -> None:
+        self._cwd = cwd
+        self._runtime_resolver = runtime_resolver
+        self._process_runner = process_runner or _run_bounded
+
+    def session(self) -> K1sProfileEvidenceSession:
+        """Resolve exactly once; no caller-selected executable, root, or environment exists."""
+
+        try:
+            runtime = self._runtime_resolver(cwd=self._cwd)
+            _validate_runtime(runtime)
+        except ProfileEvidenceError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - public failures are deliberately redacted
+            raise ProfileEvidenceError("provider-unavailable", retryable=True) from exc
+        return K1sProfileEvidenceSession(runtime=runtime, process_runner=self._process_runner)
+
+    def collect(
+        self,
+        operation: str,
+        *,
+        profile: str | None = None,
+        component: str | None = None,
+    ) -> dict[str, Any]:
+        return self.session().collect(operation, profile=profile, component=component)
+
+    def capabilities(self) -> dict[str, Any]:
+        """Probe only provider binding; never acquire profile state for capability readback."""
+
+        try:
+            session = self.session()
+        except ProfileEvidenceError as exc:
+            return profile_evidence_capabilities(
+                ready=False,
+                provider_version=None,
+                error_code=cast(str, exc.details["reason"]),
+            )
+        return profile_evidence_capabilities(
+            ready=True,
+            provider_version=session.provider_version,
+        )
+
+
+class K1sProfileEvidenceSession:
+    """One selected K1s runtime shared by source acquisition and projection."""
+
+    def __init__(self, *, runtime: K1sRuntime, process_runner: ProcessRunner) -> None:
+        self._runtime = runtime
+        self._process_runner = process_runner
+        self._environment = runtime.apply_env(os.environ.copy())
+
+    @property
+    def provider_version(self) -> str:
+        return cast(str, self._runtime.ae_version)
+
+    def collect(
+        self,
+        operation: str,
+        *,
+        profile: str | None = None,
+        component: str | None = None,
+    ) -> dict[str, Any]:
+        typed_operation, profile, component = validate_public_request(
+            operation,
+            profile=profile,
+            component=component,
+        )
+        command = _source_command(
+            self._runtime,
+            typed_operation,
+            profile=profile,
+            component=component,
+        )
+        source = self._run(
+            command,
+            stdin=None,
+            stdout_limit=MAX_INPUT_BYTES,
+            accepted_exit_codes=((0, 1) if typed_operation == "doctor" else (0,)),
+            failure_reason="source-acquisition-failed",
+        )
+        evidence = self._project(
+            typed_operation,
+            source_payload=source.stdout,
+            source_exit_code=source.returncode,
+            node_observation=None,
+        )
+        return {
+            "evidence": evidence,
+            "diagnostics": _safe_diagnostics(evidence, provider_version=self.provider_version),
+        }
+
+    def project_bootstrap(
+        self,
+        source_projection: bytes | str | dict[str, Any],
+        *,
+        node_observation: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Purely adapt an already-selected public bootstrap projection; never create one."""
+
+        if isinstance(source_projection, dict):
+            raw_source = _canonical_json(source_projection)
+        elif isinstance(source_projection, str):
+            raw_source = source_projection.encode("utf-8")
+        elif isinstance(source_projection, bytes):
+            raw_source = source_projection
+        else:
+            _fail("unsupported-schema")
+        if not raw_source or len(raw_source) > MAX_INPUT_BYTES:
+            _fail("size-limit")
+        return self._project(
+            "bootstrap",
+            source_payload=raw_source,
+            source_exit_code=0,
+            node_observation=node_observation,
+        )
+
+    def _project(
+        self,
+        operation: AdapterOperation,
+        *,
+        source_payload: bytes,
+        source_exit_code: int,
+        node_observation: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        try:
+            source_text = source_payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ProfileEvidenceError("source-shape-mismatch") from exc
+        request = _canonical_json(
+            {
+                "node_observation": node_observation,
+                "operation": operation,
+                "source": source_text,
+                "source_exit_code": source_exit_code,
+            }
+        )
+        projected = self._run(
+            (self._runtime.python_executable, "-c", _ADAPTER_BRIDGE_SCRIPT),
+            stdin=request,
+            stdout_limit=MAX_OUTPUT_BYTES,
+            accepted_exit_codes=(0,),
+            failure_reason="adapter-projection-failed",
+        )
+        evidence = consume_projected_evidence(projected.stdout)
+        provenance = cast(dict[str, Any], evidence["provenance"])
+        if provenance["distributionVersion"] != self.provider_version:
+            _fail("provider-version-drift")
+        return evidence
+
+    def _run(
+        self,
+        argv: tuple[str, ...],
+        *,
+        stdin: bytes | None,
+        stdout_limit: int,
+        accepted_exit_codes: tuple[int, ...],
+        failure_reason: str,
+    ) -> BoundedProcessResult:
+        try:
+            result = self._process_runner(
+                argv,
+                env=self._environment,
+                stdin=stdin,
+                timeout=SUBPROCESS_TIMEOUT_SECONDS,
+                stdout_limit=stdout_limit,
+                stderr_limit=MAX_STDERR_BYTES,
+            )
+        except ProfileEvidenceError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - adapter details must never escape
+            raise ProfileEvidenceError(failure_reason, retryable=True) from exc
+        if result.returncode not in accepted_exit_codes:
+            _fail(failure_reason)
+        if not result.stdout or len(result.stdout) > stdout_limit:
+            _fail("size-limit")
+        return result
+
+
+def _validate_runtime(runtime: K1sRuntime) -> None:
+    if runtime.source not in {"installed", "sibling"}:
+        _fail("unsupported-provider-source")
+    if runtime.ae_version != RUNTIME_VERSION or not runtime.ae_origin:
+        _fail("provider-version-mismatch")
+    status = runtime.provider_status
+    if not isinstance(status, dict) or status.get("ok") is not True:
+        _fail("provider-ownership-mismatch")
+    if status.get("state") not in {"exact", "source-checkout"}:
+        _fail("provider-ownership-mismatch")
+    if runtime.source == "installed":
+        if runtime.k1s_root is not None or runtime.pythonpath is not None:
+            _fail("provider-binding-mismatch")
+        if status.get("state") != "exact" or status.get("providers") != ["k1s-core"]:
+            _fail("provider-ownership-mismatch")
+        return
+    if runtime.k1s_root is None or runtime.pythonpath is None:
+        _fail("provider-binding-mismatch")
+    expected_pythonpath = (runtime.k1s_root / "src").resolve()
+    if Path(runtime.pythonpath).resolve() != expected_pythonpath:
+        _fail("provider-binding-mismatch")
+    try:
+        origin = Path(runtime.ae_origin).resolve()
+        origin.relative_to(expected_pythonpath / "ae")
+    except (OSError, ValueError) as exc:
+        raise ProfileEvidenceError("provider-binding-mismatch") from exc
+
+
+def _source_command(
+    runtime: K1sRuntime,
+    operation: PublicOperation,
+    *,
+    profile: str | None,
+    component: str | None,
+) -> tuple[str, ...]:
+    command = [runtime.python_executable, "-m", "ae.kctl", "profile", operation]
+    if profile is not None:
+        command.append(profile)
+    if operation == "logs":
+        command.extend(("--component", cast(str, component), "--tail", "200"))
+    command.extend(("--output", "json"))
+    return tuple(command)
+
+
+def _safe_diagnostics(evidence: dict[str, Any], *, provider_version: str) -> dict[str, Any]:
+    operation = cast(str, evidence["operation"])
+    payload = cast(dict[str, Any], evidence["payload"])
+    diagnostics: dict[str, Any] = {
+        "operation": operation,
+        "provider_distribution": "k1s-core",
+        "provider_version": provider_version,
+        "qualification_posture": QUALIFICATION_POSTURE,
+        "same_runtime": True,
+    }
+    if operation == "status":
+        diagnostics["state"] = {
+            "lifecycle_status": payload["lifecycleStatus"],
+            "phase": payload["phase"],
+            "profile_generation": payload["profileGeneration"],
+            "run_ref": payload["runRef"],
+        }
+    elif operation == "logs":
+        diagnostics["logs"] = {
+            "content_policy": payload["contentPolicy"],
+            "line_count": payload["lineCount"],
+            "run_ref": payload["runRef"],
+            "source_truncated": payload["sourceTruncated"],
+        }
+    return diagnostics
+
+
+def _run_bounded(
+    argv: tuple[str, ...],
+    *,
+    env: Mapping[str, str],
+    stdin: bytes | None,
+    timeout: float,
+    stdout_limit: int,
+    stderr_limit: int,
+) -> BoundedProcessResult:
+    """Run one fixed argv without a shell while bounding time and both output pipes."""
+
+    if not argv or timeout <= 0 or stdout_limit <= 0 or stderr_limit <= 0:
+        _fail("invalid-process-contract")
+    if stdin is not None and len(stdin) > (MAX_INPUT_BYTES * 2 + MAX_OUTPUT_BYTES):
+        _fail("size-limit")
+    try:
+        process = subprocess.Popen(  # noqa: S603 - fixed argv is validated by the caller
+            list(argv),
+            env=dict(env),
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except OSError as exc:
+        raise ProfileEvidenceError("subprocess-unavailable", retryable=True) from exc
+    assert process.stdin is not None
+    assert process.stdout is not None
+    assert process.stderr is not None
+    selector = selectors.DefaultSelector()
+    stdout = bytearray()
+    stderr = bytearray()
+    input_view = memoryview(stdin or b"")
+    input_offset = 0
+    for stream, label in ((process.stdout, "stdout"), (process.stderr, "stderr")):
+        os.set_blocking(stream.fileno(), False)
+        selector.register(stream, selectors.EVENT_READ, label)
+    if input_view:
+        os.set_blocking(process.stdin.fileno(), False)
+        selector.register(process.stdin, selectors.EVENT_WRITE, "stdin")
+    else:
+        process.stdin.close()
+    deadline = time.monotonic() + timeout
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _stop_process(process)
+                _fail("subprocess-timeout", retryable=True)
+            events = selector.select(remaining)
+            if not events:
+                _stop_process(process)
+                _fail("subprocess-timeout", retryable=True)
+            for key, _mask in events:
+                stream = key.fileobj
+                label = cast(str, key.data)
+                if label == "stdin":
+                    try:
+                        written = os.write(
+                            stream.fileno(), input_view[input_offset : input_offset + 65536]
+                        )
+                    except BrokenPipeError:
+                        written = len(input_view) - input_offset
+                    input_offset += written
+                    if input_offset >= len(input_view):
+                        selector.unregister(stream)
+                        stream.close()
+                    continue
+                try:
+                    chunk = os.read(stream.fileno(), 65536)
+                except BlockingIOError:
+                    continue
+                if not chunk:
+                    selector.unregister(stream)
+                    stream.close()
+                    continue
+                target = stdout if label == "stdout" else stderr
+                target.extend(chunk)
+                limit = stdout_limit if label == "stdout" else stderr_limit
+                if len(target) > limit:
+                    _stop_process(process)
+                    _fail("size-limit")
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            _stop_process(process)
+            _fail("subprocess-timeout", retryable=True)
+        returncode = process.wait(timeout=remaining)
+    except subprocess.TimeoutExpired as exc:
+        _stop_process(process)
+        raise ProfileEvidenceError("subprocess-timeout", retryable=True) from exc
+    finally:
+        selector.close()
+        for stream in (process.stdin, process.stdout, process.stderr):
+            if stream is not None and not stream.closed:
+                stream.close()
+    return BoundedProcessResult(returncode=returncode, stdout=bytes(stdout))
+
+
+def _stop_process(process: subprocess.Popen[bytes]) -> None:
+    if process.poll() is None:
+        process.kill()
+    with suppress(subprocess.TimeoutExpired):
+        process.wait(timeout=1.0)
 
 
 def consume_projected_evidence(value: bytes | str | dict[str, Any]) -> dict[str, Any]:
