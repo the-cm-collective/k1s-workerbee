@@ -53,3 +53,13 @@ def test_readme_and_sdist_expose_the_public_v1_contract() -> None:
     assert "docs/v1-contract.md" in readme
     assert "include docs/v1-contract.md" in manifest
     assert "workerbee-install/releases" in readme
+
+    for image in (
+        "docs/assets/k1s-workerbee-hero.jpg",
+        "docs/assets/how-workerbee-works-v0.png",
+    ):
+        assert (
+            "https://raw.githubusercontent.com/the-cm-collective/"
+            f"k1s-workerbee/dev/{image}" in readme
+        )
+    assert 'src="docs/assets/' not in readme

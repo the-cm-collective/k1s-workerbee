@@ -1,7 +1,7 @@
 # K1S WorkerBee MCP
 
 <p align="center">
-  <img src="docs/assets/k1s-workerbee-hero.jpg" alt="K1S WorkerBee" width="640">
+  <img src="https://raw.githubusercontent.com/the-cm-collective/k1s-workerbee/dev/docs/assets/k1s-workerbee-hero.jpg" alt="K1S WorkerBee" width="640">
 </p>
 
 WorkerBee is a local MCP workbench that gives coding agents a project-scoped
@@ -26,7 +26,7 @@ The short version: you keep editing in your repo, and WorkerBee gives the agent
 a bounded build-deploy-check-export workbench around that repo.
 
 <p align="center">
-  <img src="docs/assets/how-workerbee-works-v0.png" alt="How WorkerBee works" width="760">
+  <img src="https://raw.githubusercontent.com/the-cm-collective/k1s-workerbee/dev/docs/assets/how-workerbee-works-v0.png" alt="How WorkerBee works" width="760">
 </p>
 
 ## Capabilities
