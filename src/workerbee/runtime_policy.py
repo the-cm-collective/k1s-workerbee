@@ -35,6 +35,7 @@ _READ_ONLY_LOW = frozenset(
         "workerbee_v1_controlled_run_receipt",
     }
 )
+_READ_ONLY_LOCAL_STATE = frozenset({"workerbee_v1_k1s_profile_evidence"})
 _READ_ONLY_NETWORK = frozenset({"workerbee_v1_ingress_probe", "workerbee_v1_security_assess"})
 _PROJECT_STATE = frozenset(
     {
@@ -149,6 +150,15 @@ def _descriptor(name: str) -> dict[str, Any] | None:
             "mutation_intent": "read-only",
             "risk": "low",
             "state_scope": "none",
+            "network_scope": "none",
+            "requires_explicit_confirmation": False,
+        }
+    if name in _READ_ONLY_LOCAL_STATE:
+        return {
+            **common,
+            "mutation_intent": "read-only",
+            "risk": "low",
+            "state_scope": "local-state",
             "network_scope": "none",
             "requires_explicit_confirmation": False,
         }

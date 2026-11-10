@@ -54,6 +54,7 @@ from workerbee.mcp_daemon import (
 )
 from workerbee.mcp_server import serve_mcp
 from workerbee.paths import daemon_project_state_dir, default_state_root
+from workerbee.profile_evidence import PORTABLE_PROFILES, PROFILE_COMPONENTS, PROFILE_NAMES
 from workerbee.runbooks import DEFAULT_REPO_RUNBOOK_PATH
 from workerbee.runtime_support import CONTAINERD_RUNTIME, runtime_diagnostics
 from workerbee.security import DEFAULT_SECURITY_CHECKS, assess_stage_security
@@ -226,6 +227,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser("status", help="Show WorkerBee stack status")
     sub.add_parser("projects", help="List WorkerBee daemon projects")
+    k1s_evidence = sub.add_parser(
+        "k1s-evidence",
+        help="Read metadata-safe evidence from the selected K1s provider",
+    )
+    k1s_evidence_sub = k1s_evidence.add_subparsers(dest="k1s_evidence_cmd", required=True)
+    k1s_evidence_sub.add_parser("list", help="List installed public K1s profile contracts")
+    for operation in ("doctor", "plan"):
+        operation_parser = k1s_evidence_sub.add_parser(
+            operation,
+            help=f"Read the K1s profile {operation} projection",
+        )
+        operation_parser.add_argument("profile", choices=PROFILE_NAMES)
+    status_evidence = k1s_evidence_sub.add_parser(
+        "status",
+        help="Read metadata-safe K1s profile state",
+    )
+    status_evidence.add_argument("profile", choices=PORTABLE_PROFILES)
+    logs_evidence = k1s_evidence_sub.add_parser(
+        "logs",
+        help="Read log metadata without exposing log content",
+    )
+    logs_evidence.add_argument("profile", choices=PORTABLE_PROFILES)
+    logs_evidence.add_argument(
+        "--component",
+        required=True,
+        choices=sorted({item for values in PROFILE_COMPONENTS.values() for item in values}),
+    )
     profile = sub.add_parser(
         "profile",
         help="Manage advanced direct-containerd k1s profiles",
@@ -665,6 +693,21 @@ def main(argv: list[str] | None = None) -> int:
                 cwd=args.cwd,
             )
             return _print(daemon.projects(), json_out=args.json)
+        if args.cmd == "k1s-evidence":
+            daemon = WorkerBeeDaemon(
+                state_root=args.state_root,
+                runtime=args.runtime,
+                containerd_privilege=containerd_privilege,
+                cwd=args.cwd,
+            )
+            return _print(
+                daemon.k1s_profile_evidence(
+                    args.k1s_evidence_cmd,
+                    profile=getattr(args, "profile", None),
+                    component=getattr(args, "component", None),
+                ),
+                json_out=args.json,
+            )
         if args.cmd == "profile":
             daemon = WorkerBeeDaemon(
                 state_root=args.state_root,

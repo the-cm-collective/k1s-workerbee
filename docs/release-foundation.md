@@ -65,7 +65,7 @@ check rejected the candidate while its version remained the already-published
 `0.1.7` baseline.
 
 C4 later fulfills that deferred gate by binding the exact published
-`k1s-core==1.0.0a3` wheel, advancing WorkerBee to `1.0.0a1`, and rerunning the
+`k1s-core==1.0.0a3` wheel, advancing WorkerBee to `1.0.0a2`, and rerunning the
 single-provider, deterministic-build, and offline-install checks. The C0
 receipts above remain immutable historical evidence.
 

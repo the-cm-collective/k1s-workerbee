@@ -184,6 +184,30 @@ def _register_controlled_run_tools(mcp: Any, daemon: Any) -> tuple[str, ...]:
     )
 
 
+def _register_k1s_profile_evidence_tool(mcp: Any, daemon: Any) -> tuple[str, ...]:
+    """Register the fixed read-only K1s profile-evidence projection."""
+
+    @mcp.tool()
+    def workerbee_v1_k1s_profile_evidence(
+        operation: str,
+        profile: str | None = None,
+        component: str | None = None,
+    ) -> dict[str, Any]:
+        """Return bounded metadata-safe evidence from one selected K1s runtime."""
+
+        return protect(
+            "K1sProfileEvidence",
+            None,
+            lambda: daemon.k1s_profile_evidence(
+                operation,
+                profile=profile,
+                component=component,
+            ),
+        )
+
+    return ("workerbee_v1_k1s_profile_evidence",)
+
+
 def serve_mcp(
     *,
     project: str = "default",
@@ -337,6 +361,7 @@ def serve_mcp(
         )
 
     _register_controlled_run_tools(mcp, daemon)
+    _register_k1s_profile_evidence_tool(mcp, daemon)
 
     @mcp.tool()
     def workerbee_v1_session_start(

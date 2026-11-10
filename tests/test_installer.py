@@ -172,7 +172,7 @@ def test_failed_offline_install_preserves_links_and_cleans_final_release(
 
     release_files = tmp_path / "release-files"
     release_files.mkdir()
-    wheel = release_files / "k1s_workerbee-1.0.0a1-py3-none-any.whl"
+    wheel = release_files / "k1s_workerbee-1.0.0a2-py3-none-any.whl"
     wheel.write_bytes(b"intentionally invalid wheel")
     sbom = release_files / "SBOM.cdx.json"
     sbom.write_text("{}\n", encoding="utf-8")

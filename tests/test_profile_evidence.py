@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import inspect
 import json
 import os
 import sys
@@ -10,7 +11,11 @@ from typing import Any
 
 import pytest
 
+from workerbee import cli
+from workerbee.contract import MCP_TOOL_NAMES
+from workerbee.daemon import WorkerBeeDaemon
 from workerbee.k1s_runtime import K1sRuntime
+from workerbee.mcp_server import _register_k1s_profile_evidence_tool
 from workerbee.profile_evidence import (
     ADAPTER_API_VERSION,
     ADAPTER_OPERATIONS,
@@ -25,6 +30,7 @@ from workerbee.profile_evidence import (
     profile_evidence_capabilities,
     validate_public_request,
 )
+from workerbee.runtime_policy import tool_policy_descriptors
 
 
 def _payload(operation: str) -> dict[str, object]:
@@ -529,3 +535,213 @@ def test_bounded_runner_caps_stdout_stderr_and_wall_time() -> None:
             stderr_limit=8,
         )
     assert timeout_error.value.details == {"reason": "subprocess-timeout"}
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("list",),
+        ("doctor", "core"),
+        ("plan", "core"),
+        ("status", "node"),
+        ("logs", "node", "--component", "node-agent"),
+    ],
+)
+def test_cli_exposes_exact_public_operation_table_without_runtime_overrides(
+    arguments: tuple[str, ...],
+) -> None:
+    parsed = cli.build_parser().parse_args(["k1s-evidence", *arguments])
+
+    assert parsed.k1s_evidence_cmd in PUBLIC_OPERATIONS
+    assert not {
+        "bootstrap",
+        "command",
+        "environment",
+        "executable",
+        "k1s_root",
+        "run_id",
+    }.intersection(vars(parsed))
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["k1s-evidence", "bootstrap"])
+
+
+def test_cli_dispatches_metadata_safe_evidence_without_starting_a_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeDaemon:
+        def __init__(self, **kwargs: Any) -> None:
+            captured["init"] = kwargs
+
+        def k1s_profile_evidence(
+            self,
+            operation: str,
+            *,
+            profile: str | None = None,
+            component: str | None = None,
+        ) -> dict[str, Any]:
+            captured["request"] = {
+                "operation": operation,
+                "profile": profile,
+                "component": component,
+            }
+            return {"evidence": {"operation": operation}, "diagnostics": {"same_runtime": True}}
+
+    monkeypatch.setattr(cli, "WorkerBeeDaemon", FakeDaemon)
+    monkeypatch.setattr(cli, "_apply_cli_defaults", lambda *_args: None)
+
+    result = cli.main(["--json", "k1s-evidence", "logs", "node", "--component", "node-agent"])
+
+    assert result == 0
+    assert captured["request"] == {
+        "operation": "logs",
+        "profile": "node",
+        "component": "node-agent",
+    }
+    output = json.loads(capsys.readouterr().out)
+    assert output["evidence"] == {"operation": "logs"}
+    assert output["diagnostics"] == {"same_runtime": True}
+
+
+def test_mcp_schema_and_envelope_match_the_locked_public_contract() -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeMCP:
+        def __init__(self) -> None:
+            self.tools: dict[str, Any] = {}
+
+        def tool(self):  # type: ignore[no-untyped-def]
+            def decorator(function):  # type: ignore[no-untyped-def]
+                self.tools[function.__name__] = function
+                return function
+
+            return decorator
+
+    class FakeDaemon:
+        def k1s_profile_evidence(
+            self,
+            operation: str,
+            *,
+            profile: str | None = None,
+            component: str | None = None,
+        ) -> dict[str, Any]:
+            captured.update(
+                operation=operation,
+                profile=profile,
+                component=component,
+            )
+            return {"evidence": _fixture(operation), "diagnostics": {"same_runtime": True}}
+
+    mcp = FakeMCP()
+    registered = _register_k1s_profile_evidence_tool(mcp, FakeDaemon())
+
+    assert registered == ("workerbee_v1_k1s_profile_evidence",)
+    assert set(mcp.tools) == {"workerbee_v1_k1s_profile_evidence"}
+    tool = mcp.tools["workerbee_v1_k1s_profile_evidence"]
+    assert tuple(inspect.signature(tool).parameters) == ("operation", "profile", "component")
+    assert {
+        "argv",
+        "bootstrap",
+        "command",
+        "env",
+        "environment",
+        "executable",
+        "k1s_root",
+        "run_id",
+    }.isdisjoint(inspect.signature(tool).parameters)
+
+    result = tool("logs", "node", "node-agent")
+
+    assert captured == {"operation": "logs", "profile": "node", "component": "node-agent"}
+    assert result["api_version"] == "workerbee.mcp/v1"
+    assert result["kind"] == "K1sProfileEvidence"
+    assert result["ok"] is True
+    assert result["data"]["evidence"]["operation"] == "logs"
+
+
+def test_mcp_error_is_stable_and_redacted() -> None:
+    class FakeMCP:
+        def __init__(self) -> None:
+            self.tools: dict[str, Any] = {}
+
+        def tool(self):  # type: ignore[no-untyped-def]
+            def decorator(function):  # type: ignore[no-untyped-def]
+                self.tools[function.__name__] = function
+                return function
+
+            return decorator
+
+    class FailingDaemon:
+        def k1s_profile_evidence(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+            try:
+                raise RuntimeError("token=private /home/operator/.config")
+            except RuntimeError as exc:
+                raise ProfileEvidenceError("source-acquisition-failed", retryable=True) from exc
+
+    mcp = FakeMCP()
+    _register_k1s_profile_evidence_tool(mcp, FailingDaemon())
+    result = mcp.tools["workerbee_v1_k1s_profile_evidence"]("list")
+    encoded = json.dumps(result, sort_keys=True)
+
+    assert result["ok"] is False
+    assert result["error"]["code"] == "K1S_PROFILE_EVIDENCE_FAILED_CLOSED"
+    assert result["error"]["details"] == {"reason": "source-acquisition-failed"}
+    assert result["error"]["retryable"] is True
+    assert "private" not in encoded
+    assert "/home" not in encoded
+
+
+def test_capability_and_policy_readback_are_exact_and_nonmutating(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    capability = profile_evidence_capabilities(ready=True, provider_version="1.0.0a3")
+
+    class FakeBridge:
+        def collect(self, *_args: object, **_kwargs: object) -> dict[str, Any]:
+            raise AssertionError("capability readback must not collect evidence")
+
+        def capabilities(self) -> dict[str, Any]:
+            return capability
+
+    monkeypatch.setattr(
+        "workerbee.k1s_runtime.resolve_k1s_runtime",
+        lambda **_kwargs: _installed_runtime(),
+    )
+    monkeypatch.setattr(
+        "workerbee.daemon.runtime_diagnostics",
+        lambda *_args, **_kwargs: {"ok": True, "selected": "podman"},
+    )
+    monkeypatch.setattr(
+        "workerbee.daemon.containerd_privilege_status",
+        lambda **_kwargs: {"enabled": False, "effective_mode": "off", "runtime": "podman"},
+    )
+    daemon = WorkerBeeDaemon(
+        state_root=tmp_path / "state",
+        runtime="podman",
+        cwd=tmp_path,
+        profile_evidence_bridge=FakeBridge(),  # type: ignore[arg-type]
+    )
+
+    capabilities = daemon.capabilities()
+    descriptors = {
+        item["name"]: item for item in capabilities["runtime_policy"]["tool_policy"]["tools"]
+    }
+    policy = descriptors["workerbee_v1_k1s_profile_evidence"]
+
+    assert capabilities["k1s_profile_evidence"] == capability
+    assert capabilities["mcp_tools"].count("workerbee_v1_k1s_profile_evidence") == 1
+    assert policy == {
+        "name": "workerbee_v1_k1s_profile_evidence",
+        "availability": "standard",
+        "evidence_provenance": "WorkerBee v1 MCP registration and static policy map",
+        "mutation_intent": "read-only",
+        "risk": "low",
+        "state_scope": "local-state",
+        "network_scope": "none",
+        "requires_explicit_confirmation": False,
+    }
+    assert tool_policy_descriptors(MCP_TOOL_NAMES)["complete"] is True

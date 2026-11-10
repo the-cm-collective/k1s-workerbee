@@ -95,6 +95,7 @@ def test_cli_reference_covers_installed_command_tree() -> None:
         "export-k8s",
         "global-dashboard",
         "ingress",
+        "k1s-evidence",
         "logs",
         "manifest",
         "mcp",
@@ -136,12 +137,21 @@ def test_cli_reference_covers_installed_command_tree() -> None:
         "status",
         "update",
     }
+    assert set(_subcommands(commands["k1s-evidence"])) == {
+        "doctor",
+        "list",
+        "logs",
+        "plan",
+        "status",
+    }
+    assert "read-only, local-state, non-networked" in text
+    assert "workerbee_v1_k1s_profile_evidence(operation, profile," in text
+    assert "Bootstrap creation is not exposed" in text
 
 
 def test_public_docs_use_application_neutral_governance_examples() -> None:
     text = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (Path("README.md"), *Path("docs").glob("*.md"))
+        path.read_text(encoding="utf-8") for path in (Path("README.md"), *Path("docs").glob("*.md"))
     ).lower()
     for project_specific_term in (
         "nigerian",

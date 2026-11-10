@@ -66,6 +66,7 @@ from workerbee.manifests import (
 from workerbee.paths import daemon_project_state_dir, default_state_root
 from workerbee.ports import choose_port
 from workerbee.probe import build_probe_url, probe_workerbee_url
+from workerbee.profile_evidence import K1sProfileEvidenceBridge
 from workerbee.profiles import K1sProfileRunner, builtin_profiles, is_edge_link_profile
 from workerbee.readiness import read_readiness_receipt, readiness_evidence_path
 from workerbee.runbooks import (
@@ -155,6 +156,7 @@ class WorkerBeeDaemon:
         ingress_settings: IngressSettings | None = None,
         controlled_run_adapter: ControlledRunAdapter | None = None,
         controlled_run_environ: Mapping[str, str] | None = None,
+        profile_evidence_bridge: K1sProfileEvidenceBridge | None = None,
     ) -> None:
         self.state_root = (state_root or default_state_root()).resolve()
         self.runtime_requested = runtime
@@ -184,6 +186,7 @@ class WorkerBeeDaemon:
             adapter=controlled_run_adapter,
             environ=controlled_run_environ,
         )
+        self.profile_evidence = profile_evidence_bridge or K1sProfileEvidenceBridge(cwd=self.cwd)
 
     def configure_dashboard_lifecycle(
         self,
@@ -853,6 +856,21 @@ class WorkerBeeDaemon:
 
     def profile_list(self) -> dict[str, Any]:
         return builtin_profiles()
+
+    def k1s_profile_evidence(
+        self,
+        operation: str,
+        *,
+        profile: str | None = None,
+        component: str | None = None,
+    ) -> dict[str, Any]:
+        """Read one metadata-safe K1s profile evidence projection."""
+
+        return self.profile_evidence.collect(
+            operation,
+            profile=profile,
+            component=component,
+        )
 
     def profile_start(
         self,
@@ -1795,6 +1813,7 @@ class WorkerBeeDaemon:
                 },
             },
             "native_interoperability": native_interoperability_capabilities(),
+            "k1s_profile_evidence": self.profile_evidence.capabilities(),
             "agent_workflow": {
                 "session_bootstrap": True,
                 "project_modes": sorted({"start", "lazy", "stop"}),

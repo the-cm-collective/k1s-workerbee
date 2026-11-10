@@ -27,7 +27,7 @@ substitute a local rebuild.
 
 Its release-contract publication status is `published`, and the contract still
 records `0.1.7` as the immutable already-published WorkerBee baseline.
-WorkerBee's candidate version is `1.0.0a1`. The GitHub publishing jobs call
+WorkerBee's candidate version is `1.0.0a2`. The GitHub publishing jobs call
 `verify-publication-ready` immediately before trusted publishing and fail
 closed if a future provider is temporary or the WorkerBee version regresses to
 the published baseline.

@@ -48,6 +48,9 @@ a bounded build-deploy-check-export workbench around that repo.
   image metadata.
 - Advanced direct containerd profiles for k1s development, including sqlite,
   etcd, direct containerd workload, and HA-min profile shapes.
+- Bounded K1s profile-evidence readback through `workerbee k1s-evidence` and
+  `workerbee_v1_k1s_profile_evidence`, without exposing raw source, logs,
+  credentials, endpoints, runtime paths, or bootstrap authority.
 - End-to-end profile workload validation with a realtime frontend/backend/db
   stack, dashboard/docs/API health checks, HTTPS ingress probes, WebSocket
   validation, logs/status, and exported handoff artifacts.
@@ -440,6 +443,12 @@ The typed source/execution boundary, native binding receipt, Agent PBX access
 profile authority, and private ownership of snapshot-import and managed-clone
 are documented in
 [`docs/native-direct-interoperability.md`](docs/native-direct-interoperability.md).
+
+K1s profile evidence is a separate read-only, local-state, non-networked
+surface. Its public operations are exactly `list`, `doctor`, `plan`, `status`,
+and `logs`; bootstrap is available only as an internal pure projection of an
+already selected public K1s result. See the
+[`workerbee k1s-evidence` CLI reference](docs/cli-reference.md#k1s-profile-evidence).
 
 App ingress is also loopback-only by default. For an explicit local-network dev
 session, start or restart MCP with LAN ingress:

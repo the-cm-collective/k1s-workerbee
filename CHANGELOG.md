@@ -3,8 +3,11 @@
 All notable WorkerBee changes are documented here. Earlier entries are best
 effort summaries reconstructed from release notes and git history.
 
-## Unreleased - 1.0.0a1
+## Unreleased - 1.0.0a2
 
+- Added the bounded, metadata-safe K1s profile-evidence consumer with an
+  unambiguous `workerbee k1s-evidence` CLI, read-only MCP projection, exact
+  same-runtime provider binding, and versioned capability readback.
 - Rebound the active runtime-provider contract from the temporary
   `k1s-core==0.1.8a1` candidate to the published exact-byte
   `k1s-core==1.0.0a3` artifact while preserving the `ae` compatibility imports.

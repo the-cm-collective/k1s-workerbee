@@ -97,6 +97,21 @@ advertised tool. Each descriptor states mutation intent, risk, state scope,
 network scope, confirmation posture, and evidence provenance. Conditional
 controlled-run tools appear only when their strict capability gate is usable.
 
+`workerbee_v1_k1s_profile_evidence(operation, profile, component)` and the
+matching `workerbee k1s-evidence` CLI expose metadata-safe evidence for exactly
+`list`, `doctor`, `plan`, `status`, and `logs`. WorkerBee resolves one
+`K1sRuntime`, uses that same Python and `PYTHONPATH` for fixed K1s source
+acquisition and `ae.kctl.profile_adapter` projection, and bounds subprocess
+time and output. The tool policy is read-only, local-state, and non-networked.
+Capability schema `workerbee.k1s-profile-evidence-capabilities/v1` reports the
+adapter/evidence versions, exact operation lists, provider readiness and
+version, pure-projection-only bootstrap mode, and
+`source-validated/unqualified` posture. Public output excludes source JSON,
+raw logs, stderr, paths, environment, executable and socket identities,
+credentials, endpoints, and raw run IDs. Bootstrap creation is never public;
+only pure adaptation of an already-selected public bootstrap projection is
+available internally for qualification.
+
 ## Security
 
 MCP and application ingress are loopback-only by default. Remote MCP remains an

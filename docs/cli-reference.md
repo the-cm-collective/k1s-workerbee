@@ -108,6 +108,29 @@ Profiles are advanced containerized k1s development environments. Edge links
 are explicit, short-lived external gateway/node validation sessions. Neither
 surface silently promotes a normal app project to host-wide authority.
 
+## K1s profile evidence
+
+```text
+workerbee k1s-evidence list
+workerbee k1s-evidence doctor PROFILE
+workerbee k1s-evidence plan PROFILE
+workerbee k1s-evidence status PROFILE
+workerbee k1s-evidence logs PROFILE --component COMPONENT
+```
+
+This is a read-only, local-state, non-networked evidence surface backed by the
+one exact `k1s-core` runtime selected by WorkerBee. It is distinct from
+`workerbee profile`, which manages advanced direct-containerd development
+profiles. The evidence command never accepts a K1s root, executable,
+environment, command, endpoint, credential, runtime socket, or raw run ID.
+Results omit raw source JSON, log content, stderr, and filesystem paths.
+
+The MCP equivalent is `workerbee_v1_k1s_profile_evidence(operation, profile,
+component)`. Its public operation list is exactly `list`, `doctor`, `plan`,
+`status`, and `logs`. Bootstrap creation is not exposed through either CLI or
+MCP; WorkerBee may only apply its internal pure adapter to an already-selected
+public bootstrap projection during a separately authorized qualification flow.
+
 ## Security and privilege controls
 
 | Command | Purpose |
