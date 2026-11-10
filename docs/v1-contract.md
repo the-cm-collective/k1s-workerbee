@@ -77,6 +77,12 @@ Start the direct MCP daemon with `workerbee mcp start`, inspect it with
 MCP calls. Project modes are `lazy`, `start`, and `stop`; direct runtime actions
 remain explicit and project-scoped.
 
+The complete installed CLI command map and the distinction between ordinary
+native-direct app work, advanced direct-containerd development, and
+adapter-owned controlled runs are documented in
+[CLI reference](cli-reference.md). New command groups must update that reference
+and its parser-backed documentation contract test.
+
 `workerbee_v1_readiness_receipt` reads one named JSON evidence file from the
 WorkerBee-managed project readiness directory. The read is owner-only,
 `O_NOFOLLOW`, size- and time-bounded, and requires the file identity to settle.

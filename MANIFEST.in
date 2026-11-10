@@ -2,6 +2,7 @@ include LICENSE
 include README.md
 include pyproject.toml
 include docs/releasing.md
+include docs/cli-reference.md
 include docs/v1-contract.md
 include scripts/audit_release_artifacts.py
 include scripts/build_release_candidate.sh

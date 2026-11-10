@@ -140,6 +140,8 @@ the gated k1s-core provider integration point, and rollback. The consolidated
 public v1 scope, compatibility, installation, operations, security, support,
 versioning, migration, and optional Agent PBX boundaries are in
 [`docs/v1-contract.md`](docs/v1-contract.md).
+The installed command surface and its OSS/native-direct safety boundaries are
+summarized in [`docs/cli-reference.md`](docs/cli-reference.md).
 
 The public one-line installer expects each GitHub release to include these
 assets:
@@ -599,7 +601,7 @@ as a directly runnable WorkerBee input. Map each service to a separate
 one-container workload, keep API and background workers separate unless the repo
 already ships a combined development image, run object stores or queues as their
 own workloads, and model bucket/database/bootstrap setup as an explicit Job or
-temporary setup workload. WorkerBee v0.1 does not run Kubernetes
+temporary setup workload. The WorkerBee v1 local-apply lane does not run Kubernetes
 `initContainers`, multi-container pods, or exact Kubernetes entrypoint override
 semantics in local apply, so validate these translations with status, logs, and
 ingress probes after deployment.

@@ -1,4 +1,9 @@
-# WorkerBee v0.1 Scope
+# WorkerBee v0.1 historical scope
+
+> This page records the pre-v1 implementation baseline. It is retained for
+> design history and does not override the current
+> [WorkerBee v1 public contract](v1-contract.md) or
+> [CLI reference](cli-reference.md).
 
 ## Implemented Baseline
 

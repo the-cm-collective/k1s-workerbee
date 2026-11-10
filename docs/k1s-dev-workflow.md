@@ -223,9 +223,8 @@ The resulting WorkerBee state exposes an `edge_cell_contract` block with:
 - `assurance_enforcement.tampered_quarantine_fixture` with deterministic
   `boot-measurement-mismatch` quarantine metadata and reduced usable fabric size
 - `governance_evidence.readiness: governance-evidence-ready`
-- `governance_evidence.use_case: nigerian-language-translation`
-- `governance_evidence.dataset_card.dataset_id:
-  ng-translation-public-demo-v1`
+- `governance_evidence.use_case: multilingual-translation-validation`
+- `governance_evidence.dataset_card.dataset_id: multilingual-demo-v1`
 - `governance_evidence.model_card.task: translation`
 - `governance_evidence.eval_report.metrics.semantic_adequacy: 0.81`
 - `governance_evidence.approval_record.release_gate:
@@ -262,8 +261,8 @@ The resulting WorkerBee state exposes an `edge_cell_contract` block with:
 - `readiness_evidence_bundle.data_handling.cross_border_support_access_caution:
   true`
 - `readiness_evidence_bundle.readiness_gaps_next_actions` for legal review,
-  production key custody, TPM/Secure Boot evidence, live drills, and NITDA
-  review
+  production key custody, TPM/Secure Boot evidence, live drills, and applicable
+  external regulatory review
 - `boot_assurance.secure_image_validation: enabled`
 - `boot_assurance.boot_validation: measured-verified`
 - `boot_assurance.validation_failure_action: disable-quarantine`
@@ -294,11 +293,11 @@ alert/failure metadata. WorkerBee does not apply real kubelet/node admission,
 network quarantine, TPM-backed enforcement, or alert transport in this path.
 
 The `governance_evidence` block is the Stage 15 local governance evidence
-fixture for the Nigerian-language translation workload. It mirrors the k1s
-contract shape as WorkerBee metadata: dataset card, model card, eval report,
-risk assessment, approval gate, rollback marker, and readiness summary. This is
-not legal compliance completion, consent verification, production approval, or
-an external governance workflow.
+fixture for an application-neutral multilingual workload. It mirrors the k1s
+contract shape as WorkerBee metadata: dataset card, model card, evaluation
+report, risk assessment, approval gate, rollback marker, and readiness summary.
+This is not legal compliance completion, consent verification, production
+approval, or an external governance workflow.
 
 The `autonomy_state` block is the Stage 11 local state-machine simulation. It
 starts connected with a ready gateway cache, shows the supported transition
@@ -333,13 +332,13 @@ operator actions with their own failure injection, probe capture, recovery
 verification, and cleanup.
 
 The `readiness_evidence_bundle` block is the Stage 16 local export checkpoint.
-It summarizes the AI Max Nigerian-language translation edge-fabric architecture,
-data handling posture, installer/platform assurance, autonomy and HA drill
-evidence, Stage 15 governance evidence, operator handover checklist, and
-remaining readiness gaps. The bundle is intended for review, procurement, and
-discovery conversations. It is deterministic test metadata, not production
-certification, legal compliance completion, NITDA approval, live cluster
-mutation, or proof that live drills have been run.
+It summarizes the AI Max edge-fabric architecture, data handling posture,
+installer/platform assurance, autonomy and HA drill evidence, Stage 15
+governance evidence, operator handover checklist, and remaining readiness gaps.
+The bundle is intended for review and discovery conversations. It is
+deterministic test metadata, not production certification, legal compliance
+completion, regulator approval, live cluster mutation, or proof that live
+drills have been run.
 
 The simulation starts one gateway component, one gateway node-agent component,
 and three additional node-agent components. The legacy `node_id` and
