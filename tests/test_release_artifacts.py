@@ -232,15 +232,13 @@ def test_index_verification_fetches_only_publishable_manifest_entries(
     manifest = tmp_path / "RELEASE-MANIFEST.json"
     release.write_manifest(manifest, [wheel, sbom])
     index = {
-        "releases": {
-            "1.0.0a1": [
-                {
-                    "filename": wheel.name,
-                    "digests": {"sha256": release.sha256_file(wheel)},
-                    "url": "https://files.invalid/demo.whl",
-                }
-            ]
-        }
+        "urls": [
+            {
+                "filename": wheel.name,
+                "digests": {"sha256": release.sha256_file(wheel)},
+                "url": "https://files.invalid/demo.whl",
+            }
+        ]
     }
     retrieved: list[str] = []
     monkeypatch.setattr(

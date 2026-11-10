@@ -710,8 +710,13 @@ def fetch_index_artifacts(
     endpoint = f"{repository_json_base.rstrip('/')}/{distribution}/{version}/json"
     with urllib.request.urlopen(endpoint, timeout=30) as response:  # noqa: S310
         index_payload = json.load(response)
-    releases = index_payload.get("releases", {}).get(version, [])
-    by_name = {item["filename"]: item for item in releases}
+    # The version-specific Warehouse JSON endpoint exposes release files under
+    # ``urls``. Keep the project-level ``releases`` shape as a compatibility
+    # fallback for mirrors that return it from a version endpoint.
+    release_files = index_payload.get("urls") or index_payload.get("releases", {}).get(
+        version, []
+    )
+    by_name = {item["filename"]: item for item in release_files}
     output.mkdir(parents=True, exist_ok=True)
     errors: list[str] = []
     for entry in payload["artifacts"]:
