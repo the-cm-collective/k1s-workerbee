@@ -32,8 +32,8 @@ def test_consolidated_v1_contract_covers_public_operator_surface() -> None:
         'source_mode="native-direct"',
         'execution_lane="native-local"',
         "mcp>=1.8,<2",
-        "k1s-core==1.0.0a3",
-        "published provider artifact",
+        "k1s-core==1.0.0rc1",
+        "sealed provider artifact",
         "workerbee_v1_readiness_receipt",
         "configured, measured, and unknown",
         "different or expired generation is rejected",
@@ -180,12 +180,20 @@ def test_public_claim_boundaries_distinguish_contract_from_qualification() -> No
         assert contract in normalized
 
 
-def test_release_docs_record_exact_future_k1s_rc1_rebind_inventory() -> None:
+def test_release_docs_record_exact_accepted_k1s_rc1_checkpoint() -> None:
     text = Path("docs/releasing.md").read_text(encoding="utf-8")
     normalized = " ".join(text.split())
 
-    assert "### Future `k1s-core==1.0.0rc1` rebind inventory" in text
-    assert "not an accepted artifact" in normalized
+    assert "### Accepted `k1s-core==1.0.0rc1` checkpoint" in text
+    for identity in (
+        "0827108aa2ee429de491de0842d33871e84b9eba",
+        "44b9aaab8073f5534f38655b29258b4eb1774f0c",
+        "k1s_core-1.0.0rc1-py3-none-any.whl",
+        "1057213",
+        "f341d21a2b0297aaa598826b694fccbc2e07aedc6a449b259010d9e07f520d20",
+        "temporary-nonpublished",
+    ):
+        assert identity in normalized
     for mutable_path in (
         "pyproject.toml",
         "src/workerbee/runtime_provider.py",
@@ -214,6 +222,6 @@ def test_release_docs_record_exact_future_k1s_rc1_rebind_inventory() -> None:
         "PIP_CONFIG_FILE=/dev/null",
         "exactly-one-`ae`",
         "two byte-identity builds",
-        "does not by itself create `k1s-workerbee==1.0.0rc1`",
+        "does not publish either Python distribution",
     ):
-        assert gate in text
+        assert gate in normalized

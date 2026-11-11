@@ -3,15 +3,15 @@
 All notable WorkerBee changes are documented here. Earlier entries are best
 effort summaries reconstructed from release notes and git history.
 
-## Unreleased - 1.0.0a2
+## v1.0.0rc1 - 2026-11-11
 
-- Clarified the public evidence/authority boundaries and recorded the exact
-  future `k1s-core==1.0.0rc1` rebind inventory without changing the current
-  `1.0.0a3` provider lock or creating a WorkerBee release candidate.
+- Rebound the release contract to the sealed exact-byte
+  `k1s-core==1.0.0rc1` provider while keeping package publication fail-closed
+  until that provider has separate published-index authority.
 - Added the bounded, metadata-safe K1s profile-evidence consumer with an
   unambiguous `workerbee k1s-evidence` CLI, read-only MCP projection, exact
   same-runtime provider binding, and versioned capability readback.
-- Rebound the active runtime-provider contract from the temporary
+- Previously rebound the active runtime-provider contract from the temporary
   `k1s-core==0.1.8a1` candidate to the published exact-byte
   `k1s-core==1.0.0a3` artifact while preserving the `ae` compatibility imports.
 - Added exact provider filename, size, and SHA256 verification; mixed-provider

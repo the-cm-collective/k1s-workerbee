@@ -6,107 +6,80 @@ import `ae`.
 
 ## Current provider lane
 
-The WorkerBee 1.0 alpha lane requires the published `k1s-core==1.0.0a3`
-provider. The accepted wheel is
-`k1s_core-1.0.0a3-py3-none-any.whl`, size `1056823`, SHA256
-`f642244ebbd9bdfa22eea1b848b1f8a34f8ee69b233f1135dc63bf058c1c5ba1`.
+The WorkerBee `1.0.0rc1` lane requires the accepted sealed
+`k1s-core==1.0.0rc1` provider. Its source identity is commit
+`0827108aa2ee429de491de0842d33871e84b9eba`, tree
+`44b9aaab8073f5534f38655b29258b4eb1774f0c`. The exact wheel is
+`k1s_core-1.0.0rc1-py3-none-any.whl`, size `1057213`, SHA256
+`f341d21a2b0297aaa598826b694fccbc2e07aedc6a449b259010d9e07f520d20`.
+The normalized sdist is `k1s_core-1.0.0rc1.tar.gz`, size `977871`, SHA256
+`6af74da687aceb93f15d9057963edf2b03ced5ebf32d4a56e9230d2728d8f822`.
+The sealed R2 receipt records two byte-identical builds, two strict installed
+validations, and no network, provider, runtime, or protected-content action.
+
 The release contract in `pyproject.toml`, runtime provider guard, artifact
-audit, wheelhouse audit, and tests require that exact artifact to be the only
+audit, wheelhouse audit, and tests require that exact wheel to be the only
 installed distribution advertising the `ae` package. The legacy
-`k1s-workerbee-runtime` distribution is forbidden in the active lane.
+`k1s-workerbee-runtime` distribution is forbidden. The accepted artifact
+supplies `ae`, `ae.apishim`, `ae.cli`, and `ae.controller`; do not substitute a
+local rebuild or an index-resolved wheel.
+
 The MCP SDK remains on `mcp>=1.8,<2` because WorkerBee's current server contract
-uses the 1.x `FastMCP` API; a 2.x migration must be a separate compatibility
+uses the 1.x `FastMCP` API. A 2.x migration must be a separate compatibility
 change rather than an implicit dependency upgrade.
 
-The accepted artifact supplies the required compatibility imports: `ae`,
-`ae.apishim`, `ae.cli`, and `ae.controller`. PyPI and TestPyPI serve the same
-wheel bytes. The K1s version tag is `v1.0.0a3`, and the final production
-workflow correction is tagged `v1.0.0a3-publish1`; the exact index artifact
-identity above is authoritative for WorkerBee's release contract. Do not
-substitute a local rebuild.
+This is sealed local candidate authority, not evidence that the K1s RC wheel is
+published on a package index. Its release-contract publication status is
+`temporary-nonpublished`. WorkerBee remains locally qualifiable and taggable,
+but `verify-publication-ready` and both OIDC publishing jobs fail closed until
+separate root authority proves published bytes with the same identity. The
+contract continues to record `0.1.7` as the immutable already-published
+WorkerBee baseline.
 
-Its release-contract publication status is `published`, and the contract still
-records `0.1.7` as the immutable already-published WorkerBee baseline.
-WorkerBee's candidate version is `1.0.0a2`. The GitHub publishing jobs call
-`verify-publication-ready` immediately before trusted publishing and fail
-closed if a future provider is temporary or the WorkerBee version regresses to
-the published baseline.
+### Accepted `k1s-core==1.0.0rc1` checkpoint
 
-The dependency integration and future rebind points are `[project].dependencies` together with
-`[tool.workerbee.release]` in `pyproject.toml` and the constants in
-`src/workerbee/runtime_provider.py`, the wheelhouse builder, release artifact
-auditor, contract tests, and this document. Before the final RC1 artifact
-freeze, stop and obtain explicit confirmation that the accepted K1s baseline
-has not been superseded. If it has, update every rebind point and rerun all
-affected build, wheelhouse, offline-install, and compatibility gates. Never
-leave both providers active.
+The accepted dependency checkpoint updates these version-bearing paths:
 
-### Future `k1s-core==1.0.0rc1` rebind inventory
+- `pyproject.toml` and `src/workerbee/runtime_provider.py` bind the exact pin,
+  filename, size, SHA256, and nonpublished status;
+- `scripts/build_wheelhouse.sh` emits the exact provider and WorkerBee RC pins;
+- `CHANGELOG.md`, `docs/release-foundation.md`, `docs/releasing.md`, and
+  `docs/v1-contract.md` record current authority and claim boundaries; and
+- `tests/test_installer.py`, `tests/test_package_entrypoints.py`,
+  `tests/test_profile_evidence.py`, `tests/test_release_artifacts.py`,
+  `tests/test_runtime_provider.py`, and `tests/test_v1_contract_docs.py` enforce
+  the exact contract.
 
-The `1.0.0rc1` name is an intended future dependency checkpoint, not an
-accepted artifact. Do not edit the active lock until the root release authority
-supplies an immutable source commit/tree plus the exact published wheel
-filename, byte size, SHA256, publication status, and accepted provenance. A
-local rebuild, index resolution, inferred filename, or provisional digest is
-not a substitute.
-
-Once those inputs are accepted, the provider-only rebind changes exactly these
-version-bearing repository paths:
-
-- `pyproject.toml`: `[project].dependencies` and every
-  `[tool.workerbee.release]` provider identity field;
-- `src/workerbee/runtime_provider.py`: provider version, requirement, artifact
-  filename, size, and SHA256 constants;
-- `scripts/build_wheelhouse.sh`: the human-readable accepted provider pin in
-  usage and generated `INSTALL.txt` output;
-- `CHANGELOG.md`, `docs/releasing.md`, and `docs/v1-contract.md`: current
-  provider and compatibility statements;
-- `docs/release-foundation.md`: append the new accepted checkpoint without
-  rewriting the immutable C0/C4 historical receipts; and
-- `tests/test_installer.py`, `tests/test_profile_evidence.py`,
-  `tests/test_release_artifacts.py`, `tests/test_runtime_provider.py`, and
-  `tests/test_v1_contract_docs.py`: exact pin, artifact, capability-readiness,
-  and documentation assertions. Deliberate negative fixtures that represent a
-  mismatched provider remain mismatches rather than being mechanically updated.
-
-These consumers are intentionally contract-driven and normally require no
-version-specific source edit: `scripts/audit_release_artifacts.py`,
+The contract-driven `scripts/audit_release_artifacts.py`,
 `scripts/install-workerbee.sh`, `src/workerbee/profile_evidence.py`, and
-`README.md`. Review them after the rebind and change them only if the accepted
-artifact changes a public contract. The four workflow files
+`README.md` require no version-specific source edit. The version-neutral
 `.gitea/workflows/integration.yml`, `.github/workflows/promote-main.yml`,
 `.github/workflows/release-testpypi.yml`, and
-`.github/workflows/release-pypi.yml` also remain version-neutral; rerun their
-contract checks, but do not add a provider-specific workflow path or index
-fallback.
+`.github/workflows/release-pypi.yml` remain unchanged and retain their existing
+authority split and no-index/fail-closed gates.
 
-The rebind invalidates every previous WorkerBee candidate bundle even when the
-WorkerBee package version is unchanged. Rebuild and reseal both deterministic
-candidate copies and both wheelhouses, including:
+Every previous WorkerBee candidate bundle is superseded. Rebuild and reseal:
 
-- `k1s_workerbee-1.0.0a2-py3-none-any.whl` and
-  `k1s_workerbee-1.0.0a2.tar.gz`;
+- `k1s_workerbee-1.0.0rc1-py3-none-any.whl` and
+  `k1s_workerbee-1.0.0rc1.tar.gz`;
 - candidate `SBOM.cdx.json` and `RELEASE-MANIFEST.json`;
-- the accepted `k1s_core-1.0.0rc1-py3-none-any.whl` and every exact transitive
-  dependency wheel;
+- the accepted `k1s_core-1.0.0rc1-py3-none-any.whl` plus exact transitive
+  dependency wheels;
 - wheelhouse `INSTALL.txt`, `SBOM.cdx.json`, and `RELEASE-MANIFEST.json`; and
 - normalized `workerbee-wheelhouse.tar.gz` plus external `SHA256SUMS` covering
   the archive and installer.
 
-Before accepting the rebind, require two byte-identity builds, Twine and archive
-hygiene checks, complete manifest/SBOM/SHA256 verification, exactly-one-`ae`
-provider checks, mixed legacy-provider rejection, and two clean installs with
-`PIP_NO_INDEX=1`, `PIP_CONFIG_FILE=/dev/null`, and explicit `--no-index`. Each
-install must pass `pip check`, `workerbee`/MCP/import/`ae` smoke checks, runtime
-provider discovery, and the five-operation K1s profile-evidence contract plus
-the internal pure bootstrap projection. Rerun focused provider, installer,
-profile-evidence, release-artifact, workflow, and documentation tests; the full
-safe suite; Ruff/format/compile; shell and workflow-YAML checks; protected-file
-archive exclusions; and final clean Git checks.
+Acceptance requires two byte-identity builds, Twine and archive hygiene checks,
+complete manifest/SBOM/SHA256 verification, exactly-one-`ae` provider checks,
+mixed legacy-provider rejection, and two clean installs with
+`PIP_NO_INDEX=1`, `PIP_CONFIG_FILE=/dev/null`, and explicit `--no-index`.
+Each install must pass `pip check`, `workerbee`/MCP/import/`ae` smoke checks,
+runtime-provider discovery, and the five-operation K1s profile-evidence
+contract plus the internal pure bootstrap projection.
 
-This dependency rebind does not by itself create `k1s-workerbee==1.0.0rc1`.
-Changing the WorkerBee package version, creating a tag, or publishing is a
-separate reviewed release decision.
+Creating or pushing the reviewed `v1.0.0rc1` source tag does not publish either
+Python distribution. Package-index publication remains a separate, gated OIDC
+decision.
 
 ## Build and local validation
 

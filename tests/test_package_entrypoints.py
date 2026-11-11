@@ -37,7 +37,7 @@ def test_module_cli_entry_point_smoke() -> None:
     )
 
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == "workerbee 1.0.0a2"
+    assert proc.stdout.strip() == "workerbee 1.0.0rc1"
 
 
 def test_mcp_serve_cli_entry_point_smoke() -> None:

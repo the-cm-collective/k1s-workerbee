@@ -14,7 +14,7 @@ usage: scripts/build_wheelhouse.sh --k1s-core-wheel PATH
                                     [--out PATH] [--python PYTHON]
 
 Build a local wheelhouse containing:
-  - the exact release-contract k1s-core==1.0.0a3 wheel
+  - the exact release-contract k1s-core==1.0.0rc1 wheel
   - k1s-workerbee
 
 All transitive wheels must already be present in --dependency-wheelhouse.
@@ -115,7 +115,7 @@ rm -rf "$VERIFY_DIR"
   --no-index \
   --find-links "$OUT_DIR" \
   --target "$VERIFY_DIR" \
-  "k1s-workerbee==1.0.0a2"
+  "k1s-workerbee==1.0.0rc1"
 rm -rf "$VERIFY_DIR"
 
 cat >"${OUT_DIR}/INSTALL.txt" <<EOF
@@ -124,7 +124,7 @@ Install WorkerBee from this wheelhouse:
   python -m pip install --no-index --find-links <wheelhouse> k1s-workerbee
 
 Accepted runtime provider:
-  k1s-core==1.0.0a3
+  k1s-core==1.0.0rc1
 
 Runtime requirements not bundled in wheels:
   - Podman or Docker available on PATH

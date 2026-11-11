@@ -69,6 +69,25 @@ C4 later fulfills that deferred gate by binding the exact published
 single-provider, deterministic-build, and offline-install checks. The C0
 receipts above remain immutable historical evidence.
 
+## RC1 R3 provider checkpoint
+
+R3 advances WorkerBee to `1.0.0rc1` and binds the accepted sealed
+`k1s-core==1.0.0rc1` candidate from source commit
+`0827108aa2ee429de491de0842d33871e84b9eba`, tree
+`44b9aaab8073f5534f38655b29258b4eb1774f0c`. The exact provider wheel is
+`k1s_core-1.0.0rc1-py3-none-any.whl`, size `1057213`, SHA256
+`f341d21a2b0297aaa598826b694fccbc2e07aedc6a449b259010d9e07f520d20`.
+Its normalized source distribution is `k1s_core-1.0.0rc1.tar.gz`, size
+`977871`, SHA256
+`6af74da687aceb93f15d9057963edf2b03ced5ebf32d4a56e9230d2728d8f822`.
+
+The K1s R2 seal records two byte-identical build lanes and two strict installed
+validations. This is accepted local candidate authority, not evidence of a
+published package-index artifact. The WorkerBee release contract therefore
+uses `temporary-nonpublished`, and trusted publication remains fail-closed.
+The legacy provider remains forbidden, `ae` compatibility remains required,
+and wheelhouse installation remains no-index and exactly-one-provider.
+
 ## Host-safety boundary
 
 The Gitea integration and GitHub promotion gates run source-only tests. They do

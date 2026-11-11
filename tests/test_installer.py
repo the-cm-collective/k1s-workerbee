@@ -172,7 +172,7 @@ def test_failed_offline_install_preserves_links_and_cleans_final_release(
 
     release_files = tmp_path / "release-files"
     release_files.mkdir()
-    wheel = release_files / "k1s_workerbee-1.0.0a2-py3-none-any.whl"
+    wheel = release_files / "k1s_workerbee-1.0.0rc1-py3-none-any.whl"
     wheel.write_bytes(b"intentionally invalid wheel")
     sbom = release_files / "SBOM.cdx.json"
     sbom.write_text("{}\n", encoding="utf-8")
@@ -271,17 +271,17 @@ def test_runtime_provider_pin_and_artifact_identity_are_exact() -> None:
     release = pyproject["tool"]["workerbee"]["release"]
     runtime_pin = next(dep for dep in project["dependencies"] if dep.startswith("k1s-core=="))
 
-    assert runtime_pin == "k1s-core==1.0.0a3"
+    assert runtime_pin == "k1s-core==1.0.0rc1"
     assert release["published-baseline-version"] == "0.1.7"
     assert release["runtime-provider-lane"] == "k1s-core"
     assert release["runtime-provider-requirement"] == runtime_pin
-    assert release["runtime-provider-artifact"] == "k1s_core-1.0.0a3-py3-none-any.whl"
-    assert release["runtime-provider-size"] == 1056823
+    assert release["runtime-provider-artifact"] == "k1s_core-1.0.0rc1-py3-none-any.whl"
+    assert release["runtime-provider-size"] == 1057213
     assert (
         release["runtime-provider-sha256"]
-        == "f642244ebbd9bdfa22eea1b848b1f8a34f8ee69b233f1135dc63bf058c1c5ba1"
+        == "f341d21a2b0297aaa598826b694fccbc2e07aedc6a449b259010d9e07f520d20"
     )
-    assert release["runtime-provider-publication-status"] == "published"
+    assert release["runtime-provider-publication-status"] == "temporary-nonpublished"
     assert release["forbidden-runtime-provider"] == "k1s-workerbee-runtime"
     assert not any(dep.startswith("k1s-workerbee-runtime") for dep in project["dependencies"])
 
