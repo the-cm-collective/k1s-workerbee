@@ -3,15 +3,57 @@
 All notable WorkerBee changes are documented here. Earlier entries are best
 effort summaries reconstructed from release notes and git history.
 
-## Unreleased - 1.0.0a1
+## v1.0.0 - 2026-11-11
 
-- Rebound the active runtime-provider contract from the temporary
+- Promoted the qualified WorkerBee package, CLI, MCP, runtime-provider,
+  installer, wheelhouse, profile-evidence, and public documentation contracts
+  to the stable `1.0.0` identity.
+- Bound the release to the published exact-byte `k1s-core==1.0.0` provider from
+  source commit `047c601c0c8426f1dc4c6da579a80ccd175c55cb`; the accepted wheel is
+  `1057377` bytes with SHA256
+  `1208552881446eb7b4fdefd27a22ca2f79f70fb851445bebf0a17273a507724f`.
+- Canonicalized wheel member order, timestamps, modes, and RECORD content, and
+  canonicalized sdist member modes so equivalent trusted-workstation source
+  modes produce byte-identical publication artifacts.
+- Switched README images to PyPI-portable Markdown with absolute public URLs.
+
+## v1.0.0rc2 - 2026-11-11
+
+- Rebound WorkerBee to the published exact-byte `k1s-core==1.0.0rc2`
+  provider from source commit `4d91576326105fbe8a62c1dc5c01c6d5cfdca460`.
+- Recorded the provider wheel filename, size, and SHA256 served identically by
+  PyPI and TestPyPI, and opened the fail-closed WorkerBee publication gate.
+- Advanced the package, wheelhouse, installed-consumer qualification, and
+  public documentation contracts to `1.0.0rc2` while preserving RC1 as an
+  immutable local review checkpoint.
+- Canonicalized release-builder permissions across caller umasks and allowed
+  the sealed wheelhouse to reuse the audited WorkerBee candidate byte-for-byte.
+
+## v1.0.0rc1 - 2026-11-11
+
+- Rebound the release contract to the sealed exact-byte
+  `k1s-core==1.0.0rc1` provider while keeping package publication fail-closed
+  until that provider has separate published-index authority.
+- Added the bounded, metadata-safe K1s profile-evidence consumer with an
+  unambiguous `workerbee k1s-evidence` CLI, read-only MCP projection, exact
+  same-runtime provider binding, and versioned capability readback.
+- Previously rebound the active runtime-provider contract from the temporary
   `k1s-core==0.1.8a1` candidate to the published exact-byte
   `k1s-core==1.0.0a3` artifact while preserving the `ae` compatibility imports.
 - Added exact provider filename, size, and SHA256 verification; mixed-provider
   rejection; and local-only, no-index wheelhouse construction.
 - Added the public v1 MCP, readiness, controlled-run, native-direct,
   deterministic release, transactional installer, and rollback contracts.
+- Added a versioned public K1s consumer descriptor for the portable profile
+  catalog, bootstrap projection boundary, strict-CRI transaction boundary, and
+  explicit advanced `ae` fallback rule.
+- Added deterministic installed-artifact qualification that performs two fresh
+  strict no-index installs outside both source checkouts and proves exact
+  package, entry-point, provider, and source-isolation identity without starting
+  profiles, providers, or workloads.
+- Aligned the public direct-pip, transactional installer, release, wiki, and
+  evidence-level guidance. Runtime- and host-dependent D2/D3 scenarios remain
+  explicitly deferred rather than being described as live-qualified.
 
 ## v0.1.7 - 2026-08-27
 

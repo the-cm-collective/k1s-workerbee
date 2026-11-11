@@ -27,6 +27,7 @@ MCP_TOOL_NAMES = [
     "workerbee_v1_project_stop",
     "workerbee_v1_project_reset",
     "workerbee_v1_profile_list",
+    "workerbee_v1_k1s_profile_evidence",
     "workerbee_v1_profile_start",
     "workerbee_v1_profile_status",
     "workerbee_v1_profile_stop",

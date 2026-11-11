@@ -1,18 +1,18 @@
 # K1S WorkerBee MCP
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/the-cm-collective/k1s-workerbee/dev/docs/assets/k1s-workerbee-hero.jpg" alt="K1S WorkerBee" width="640">
-</p>
+![K1S WorkerBee](https://raw.githubusercontent.com/the-cm-collective/k1s-workerbee/v1.0.0/docs/assets/k1s-workerbee-hero.jpg)
 
 WorkerBee is a local MCP workbench that gives coding agents a project-scoped
 k1s-powered app engine for building, deploying, probing, and exporting
 cloud-native applications on a developer machine.
 
-WorkerBee v1 alpha uses the exact accepted `k1s-core` wheel or a sibling
-`../k1s` checkout without modifying k1s. The default workflow uses Podman or
-Docker for ordinary app validation. Advanced k1s controller/runtime development
-uses explicit direct containerd mode, where every k1s profile component is
-containerized and scoped under WorkerBee-owned namespaces.
+WorkerBee `1.0.0` uses the exact published `k1s-core==1.0.0` wheel for its
+release lane. An explicitly selected sibling `../k1s` checkout remains a source
+development option and is never substituted into release qualification. The
+default workflow uses Podman or Docker for ordinary app validation. Advanced
+k1s controller/runtime development uses explicit direct containerd mode, where
+every k1s profile component is containerized and scoped under WorkerBee-owned
+namespaces.
 
 ## What WorkerBee Does
 
@@ -25,9 +25,7 @@ basic security posture, and export handoff artifacts.
 The short version: you keep editing in your repo, and WorkerBee gives the agent
 a bounded build-deploy-check-export workbench around that repo.
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/the-cm-collective/k1s-workerbee/dev/docs/assets/how-workerbee-works-v0.png" alt="How WorkerBee works" width="760">
-</p>
+![How WorkerBee works](https://raw.githubusercontent.com/the-cm-collective/k1s-workerbee/v1.0.0/docs/assets/how-workerbee-works-v0.png)
 
 ## Capabilities
 
@@ -48,6 +46,9 @@ a bounded build-deploy-check-export workbench around that repo.
   image metadata.
 - Advanced direct containerd profiles for k1s development, including sqlite,
   etcd, direct containerd workload, and HA-min profile shapes.
+- Bounded K1s profile-evidence readback through `workerbee k1s-evidence` and
+  `workerbee_v1_k1s_profile_evidence`, without exposing raw source, logs,
+  credentials, endpoints, runtime paths, or bootstrap authority.
 - End-to-end profile workload validation with a realtime frontend/backend/db
   stack, dashboard/docs/API health checks, HTTPS ingress probes, WebSocket
   validation, logs/status, and exported handoff artifacts.
@@ -61,6 +62,41 @@ a bounded build-deploy-check-export workbench around that repo.
 
 ## Quickstart
 
+WorkerBee `1.0.0` is the current stable release. Its exact
+`k1s-core==1.0.0` dependency is published on PyPI and TestPyPI with bytes
+matching the reviewed K1s artifact.
+
+Install the stable release from PyPI:
+
+```bash
+python3.11 -m venv .venv
+. .venv/bin/activate
+python -m pip install 'k1s-workerbee==1.0.0'
+workerbee doctor
+```
+
+### Direct pip install from a sealed wheelhouse
+
+Direct pip installation is a supported, environment-local path when you have
+the complete verified release wheelhouse. It is intentionally offline and
+does not resolve or replace the exact provider:
+
+```bash
+python3.11 -m venv .venv
+. .venv/bin/activate
+PIP_NO_INDEX=1 PIP_CONFIG_FILE=/dev/null \
+  python -m pip install --no-index \
+  --find-links /path/to/workerbee-wheelhouse \
+  'k1s-workerbee==1.0.0'
+python -m pip check
+workerbee doctor
+```
+
+Use the transactional installer below when you want an atomically switched
+standalone launcher, a retained previous environment, and the documented
+rollback path. Direct pip deliberately changes only the active virtual
+environment and does not provide that standalone rollback layer.
+
 ### One-line install
 
 The `latest` URL tracks the latest stable GitHub Release. Use it for ordinary
@@ -73,7 +109,7 @@ curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/latest/do
 To pin this stable release directly, use the release tag:
 
 ```bash
-curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/download/v0.1.7/install-workerbee.sh | sh
+curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/download/v1.0.0/install-workerbee.sh | sh
 ```
 
 Dev-channel candidates should also use an explicit tag so the installer does
@@ -142,6 +178,8 @@ versioning, migration, and optional Agent PBX boundaries are in
 [`docs/v1-contract.md`](docs/v1-contract.md).
 The installed command surface and its OSS/native-direct safety boundaries are
 summarized in [`docs/cli-reference.md`](docs/cli-reference.md).
+The repository-hosted [`WorkerBee v1 wiki candidate`](docs/wiki/WorkerBee-v1.md)
+is a concise public entry point to the same evidence-qualified contracts.
 
 The public one-line installer expects each GitHub release to include these
 assets:
@@ -440,6 +478,12 @@ The typed source/execution boundary, native binding receipt, Agent PBX access
 profile authority, and private ownership of snapshot-import and managed-clone
 are documented in
 [`docs/native-direct-interoperability.md`](docs/native-direct-interoperability.md).
+
+K1s profile evidence is a separate read-only, local-state, non-networked
+surface. Its public operations are exactly `list`, `doctor`, `plan`, `status`,
+and `logs`; bootstrap is available only as an internal pure projection of an
+already selected public K1s result. See the
+[`workerbee k1s-evidence` CLI reference](docs/cli-reference.md#k1s-profile-evidence).
 
 App ingress is also loopback-only by default. For an explicit local-network dev
 session, start or restart MCP with LAN ingress:
@@ -782,7 +826,10 @@ workerbee --runtime containerd containerd-privilege stop-helper
 
 Shared host containerd is still a privileged development mode. WorkerBee avoids broad prune operations and cleanup is constrained to WorkerBee state-hash namespaces, but Podman or Docker remains the safer default for ordinary users.
 
-Other MCP clients can connect to the same Streamable HTTP endpoint if they support HTTP MCP. For example, Claude Code documents `claude mcp add --transport http workerbee http://127.0.0.1:8765/mcp`; Codex is the tested target for WorkerBee v1 alpha.
+Other MCP clients can connect to the same Streamable HTTP endpoint if they
+support HTTP MCP. For example, Claude Code documents
+`claude mcp add --transport http workerbee http://127.0.0.1:8765/mcp`; Codex is
+the currently tested target for the WorkerBee v1 stable lane.
 
 Uninstall standalone WorkerBee:
 
@@ -794,9 +841,10 @@ If installed into an active venv, uninstall with `python -m pip uninstall k1s-wo
 
 ## macOS Notes
 
-macOS support is best effort for v1 alpha, with Docker Desktop as the recommended
-runtime for the default WorkerBee app workflow. Install Python 3.11 or newer,
-install Docker Desktop, start Docker Desktop, and confirm the Docker CLI works:
+macOS support is best effort for the v1 stable lane, with Docker
+Desktop as the recommended runtime for the default WorkerBee app workflow.
+Install Python 3.11 or newer, install Docker Desktop, start Docker Desktop, and
+confirm the Docker CLI works:
 
 ```bash
 python3.11 --version
@@ -813,7 +861,7 @@ workerbee doctor
 
 To pin a specific release or dev-channel candidate, replace
 `/releases/latest/download/` with an explicit release tag path, such as
-`/releases/download/v0.1.7/`.
+`/releases/download/v1.0.0/`.
 
 The installer uses an active virtual environment when one is enabled. Without an
 active venv, it uses the same validated, versioned release layout under

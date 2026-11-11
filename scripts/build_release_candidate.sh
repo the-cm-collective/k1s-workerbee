@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Build archives with public, deterministic member modes regardless of the
+# caller's local shell policy. Setuptools otherwise copies a restrictive umask
+# into generated wheel and sdist metadata, producing different release bytes.
+umask 022
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${ROOT_DIR}/dist/pypi"
 PYTHON_BIN="${PYTHON_BIN:-python3.11}"
@@ -47,6 +52,10 @@ export PYTHONDONTWRITEBYTECODE=1
 
 "${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" verify-project
 "${PYTHON_BIN}" -m build --no-isolation --sdist --wheel --outdir "$OUT_DIR" "$ROOT_DIR"
+"${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" \
+  normalize-wheel \
+  --epoch "$SOURCE_DATE_EPOCH" \
+  "$OUT_DIR"/*.whl
 "${PYTHON_BIN}" "${ROOT_DIR}/scripts/audit_release_artifacts.py" \
   normalize-sdist \
   --epoch "$SOURCE_DATE_EPOCH" \

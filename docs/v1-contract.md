@@ -30,10 +30,11 @@ operator, access-profile, or instruction-injection behavior.
 ## Compatibility
 
 WorkerBee v1 requires Python 3.11 or newer and `mcp>=1.8,<2`. The current
-provider contract is exactly `k1s-core==1.0.0a3`, while the compatibility
+provider contract is exactly `k1s-core==1.0.0`, while the compatibility
 import remains `ae`. That published provider artifact is bound by filename,
-size, and SHA256 in the release contract; a future K1s rebind requires another
-reviewed compatibility checkpoint.
+size, and SHA256 in the release contract. PyPI and TestPyPI serve the same
+reviewed wheel bytes; a later provider rebind requires another coordinated
+release checkpoint.
 
 Exactly one installed distribution may own `ae`. Startup and `workerbee doctor`
 fail closed when `k1s-core` and legacy `k1s-workerbee-runtime` coexist, when the
@@ -70,6 +71,20 @@ Installation into an already active virtual environment remains an explicit
 environment-local operation. Set `WORKERBEE_FORCE_STANDALONE=1` to require the
 transactional standalone layout even when `VIRTUAL_ENV` is set.
 
+A direct pip install from a complete sealed wheelhouse is supported for an
+environment-local installation:
+
+```bash
+PIP_NO_INDEX=1 PIP_CONFIG_FILE=/dev/null \
+  python -m pip install --no-index \
+  --find-links /path/to/workerbee-wheelhouse \
+  'k1s-workerbee==1.0.0'
+```
+
+This path does not provide the standalone installer's atomic launcher switch or
+retained rollback target. It does retain the same exact-provider, no-index, and
+single-`ae`-owner requirements.
+
 ## Operations and readiness
 
 Start the direct MCP daemon with `workerbee mcp start`, inspect it with
@@ -96,6 +111,67 @@ different or expired generation is rejected rather than silently reused.
 advertised tool. Each descriptor states mutation intent, risk, state scope,
 network scope, confirmation posture, and evidence provenance. Conditional
 controlled-run tools appear only when their strict capability gate is usable.
+
+`workerbee_v1_k1s_profile_evidence(operation, profile, component)` and the
+matching `workerbee k1s-evidence` CLI expose metadata-safe evidence for exactly
+`list`, `doctor`, `plan`, `status`, and `logs`. WorkerBee resolves one
+`K1sRuntime`, uses that same Python and `PYTHONPATH` for fixed K1s source
+acquisition and `ae.kctl.profile_adapter` projection, and bounds subprocess
+time and output. The tool policy is read-only, local-state, and non-networked.
+Capability schema `workerbee.k1s-profile-evidence-capabilities/v1` reports the
+adapter/evidence versions, exact operation lists, provider readiness and
+version, pure-projection-only bootstrap mode, and
+`source-validated/unqualified` posture. Public output excludes source JSON,
+raw logs, stderr, paths, environment, executable and socket identities,
+credentials, endpoints, and raw run IDs. Bootstrap creation is never public;
+only pure adaptation of an already-selected public bootstrap projection is
+available internally for qualification.
+
+The [K1s v1 consumer contract](k1s-consumer-contract.md) inventories the
+portable `core`, `edge-gateway`, and `node` roles, bootstrap creation boundary,
+strict-CRI host plan/prepare/rollback authority, and the narrow rule for using
+advanced `ae` entry points only when the compact `k1s` CLI has no equivalent.
+The C2 installed-artifact receipt qualifies the exact package pair, source
+isolation, entry points, provider ownership, and non-live `list`, `doctor`, and
+`plan` projections. The inventory does not claim live runtime,
+host-transaction, deployment, or production qualification.
+
+## Claim and evidence boundary
+
+Public documentation distinguishes implemented OSS behavior from negotiated or
+environment-dependent capability:
+
+| Surface | Public claim | Evidence boundary |
+| --- | --- | --- |
+| Native/direct lifecycle | Implemented by WorkerBee OSS; the ordinary local MCP and CLI surface operates against the trusted caller checkout. | Source, parser/contract tests, and runtime-policy descriptors establish the contract. A particular container runtime or deployed workload is ready only when measured by that environment. |
+| K1s profile evidence | Implemented metadata-safe consumer and same-runtime bridge for `list`, `doctor`, `plan`, `status`, and `logs`. | Capability posture remains `source-validated/unqualified`; a capability descriptor is not proof that a particular profile is running or healthy. Raw log content and private source data are intentionally not evidence fields. |
+| Controlled runs | The five schemas, validation rules, state machine, receipts, and capability gate are implemented in OSS. | Usability is not claimed unless an explicit policy and a strict private adapter satisfy the gate. Native/direct mode is never appliance evidence. |
+| Agent PBX integration | Optional composition that may consume public WorkerBee receipts and capabilities. | Agent PBX campaign, access-profile, and private-adapter authority is outside the WorkerBee OSS product boundary. |
+| Snapshot, clone, trusted binding, and strict appliance modes | Stable vocabulary only. | These modes are reported as unsupported and adapter-owned; their presence in a schema is not an OSS implementation or availability claim. |
+
+## Scenario matrix
+
+Stable IDs keep package defects separate from work that is intentionally
+deferred to an environment-qualified campaign. A deferred scenario is not a
+passing result and is not a known package/consumer defect.
+
+| Scenario ID | Surface | Evidence class | Reason and owner | Prerequisites | Classification |
+| --- | --- | --- | --- | --- | --- |
+| `WB-C2-INSTALL-001` | Exact WorkerBee/K1s installed consumer, entry points, `list`/`doctor`/`plan` | Installed-artifact qualified | WorkerBee C2 produced two byte-identical strict no-index receipts outside both source checkouts. Owner: WorkerBee OSS. | Exact sealed wheels and complete wheelhouse. | Complete; no package/consumer defect. |
+| `WB-D2-PROFILE-STATE-001` | Metadata-safe profile `status` and `logs` against owned local state | Source validated | Adapter shape and redaction are tested, but C2 started no profile and read no live state. Owner: K1s/WorkerBee qualification. | Terminal exact K1s D0/D1 compatibility receipt accepted by the release coordinator, plus a separately authorized local-state lane. | Deferred live; no known package/consumer defect. |
+| `WB-D2-STRICT-CRI-001` | Strict-CRI plan/prepare/rollback transaction boundary | Reference contract | WorkerBee consumes the public planning contract but owns no host-mutation authority. Owner: K1s host qualification. | Terminal exact K1s D0/D1 compatibility receipt, approved helper, host facts, transaction identity, and rollback evidence. | Deferred live; no known package/consumer defect. |
+| `WB-D3-CONTROLLED-RUN-001` | Five-tool controlled-run lifecycle | Source validated contract | OSS implements schemas, gating, journals, and receipts; strict enforcement is private adapter-owned. Owner: private platform-debug adapter. | Explicit policy, strict adapter capability, fixed recipe, tool manifest, and appliance evidence. | Deferred private qualification; not an OSS availability claim. |
+| `WB-D3-AGENT-PBX-001` | Optional Agent PBX composition | Reference contract | Agent PBX may consume public receipts but owns campaigns and access profiles. Owner: Agent PBX. | Terminal integration receipt and separately authorized campaign. | Deferred integration; no generic instruction injection. |
+
+A start receipt is coordination evidence only. Working evidence is likewise not
+terminal D0/D1 behavior authority, so C3 adds no D2/D3 behavior implementation
+or live-qualified claim.
+
+Examples and future plans are not readiness receipts. Public release claims
+must be supported by repository tests and exact artifact evidence; live runtime,
+host-platform, or private-adapter claims require separate environment-qualified
+receipts. No public receipt should contain protected local configuration,
+credentials, private paths, endpoints, or private authority.
 
 ## Security
 
@@ -151,4 +227,6 @@ WorkerBee `AGENTS.md` generation into campaign-specific instruction injection.
 
 See [controlled-runs.md](controlled-runs.md),
 [native-direct-interoperability.md](native-direct-interoperability.md), and
-[releasing.md](releasing.md) for the detailed subcontracts.
+[releasing.md](releasing.md) for the detailed subcontracts. The
+[repository-hosted WorkerBee v1 wiki candidate](wiki/WorkerBee-v1.md) provides a
+concise public index without changing these authority boundaries.

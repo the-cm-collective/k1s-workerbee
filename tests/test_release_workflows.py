@@ -10,6 +10,10 @@ RELEASE_WORKFLOWS = (
 PROMOTION_WORKFLOW = Path(".github/workflows/promote-main.yml")
 GITEA_WORKFLOW = Path(".gitea/workflows/integration.yml")
 ALL_WORKFLOWS = (*RELEASE_WORKFLOWS, PROMOTION_WORKFLOW, GITEA_WORKFLOW)
+RELEASE_BUILDERS = (
+    Path("scripts/build_release_candidate.sh"),
+    Path("scripts/build_wheelhouse.sh"),
+)
 
 
 def test_gitea_integration_lane_cannot_publish() -> None:
@@ -60,6 +64,23 @@ def test_testpypi_workflow_builds_twice_and_publishes_only_verified_bytes() -> N
     assert "if: ${{ inputs.publish }}" in text
     assert "https://test.pypi.org/legacy/" in text
     assert "fetch-index" in text
+
+
+def test_release_builders_canonicalize_the_caller_umask() -> None:
+    for builder in RELEASE_BUILDERS:
+        text = builder.read_text(encoding="utf-8")
+        canonical_umask = text.index("umask 022")
+        first_output_creation = text.index("mkdir -p")
+        assert canonical_umask < first_output_creation
+
+
+def test_release_candidate_normalizes_both_publishable_archives() -> None:
+    text = RELEASE_BUILDERS[0].read_text(encoding="utf-8")
+    wheel = text.index("normalize-wheel")
+    sdist = text.index("normalize-sdist")
+    twine = text.index("twine check")
+    assert wheel < twine
+    assert sdist < twine
 
 
 def test_production_workflow_promotes_without_rebuilding() -> None:

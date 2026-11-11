@@ -65,9 +65,64 @@ check rejected the candidate while its version remained the already-published
 `0.1.7` baseline.
 
 C4 later fulfills that deferred gate by binding the exact published
-`k1s-core==1.0.0a3` wheel, advancing WorkerBee to `1.0.0a1`, and rerunning the
+`k1s-core==1.0.0a3` wheel, advancing WorkerBee to `1.0.0a2`, and rerunning the
 single-provider, deterministic-build, and offline-install checks. The C0
 receipts above remain immutable historical evidence.
+
+## RC1 R3 provider checkpoint
+
+R3 advances WorkerBee to `1.0.0rc1` and binds the accepted sealed
+`k1s-core==1.0.0rc1` candidate from source commit
+`0827108aa2ee429de491de0842d33871e84b9eba`, tree
+`44b9aaab8073f5534f38655b29258b4eb1774f0c`. The exact provider wheel is
+`k1s_core-1.0.0rc1-py3-none-any.whl`, size `1057213`, SHA256
+`f341d21a2b0297aaa598826b694fccbc2e07aedc6a449b259010d9e07f520d20`.
+Its normalized source distribution is `k1s_core-1.0.0rc1.tar.gz`, size
+`977871`, SHA256
+`6af74da687aceb93f15d9057963edf2b03ced5ebf32d4a56e9230d2728d8f822`.
+
+The K1s R2 seal records two byte-identical build lanes and two strict installed
+validations. This is accepted local candidate authority, not evidence of a
+published package-index artifact. The WorkerBee release contract therefore
+uses `temporary-nonpublished`, and trusted publication remains fail-closed.
+The legacy provider remains forbidden, `ae` compatibility remains required,
+and wheelhouse installation remains no-index and exactly-one-provider.
+
+## RC2 published-provider checkpoint
+
+RC2 advances WorkerBee to `1.0.0rc2` and binds the published
+`k1s-core==1.0.0rc2` provider from source commit
+`4d91576326105fbe8a62c1dc5c01c6d5cfdca460`, tree
+`ba22d40066f0cade372e0105fff1ec0f6fd5e953`. The exact provider wheel is
+`k1s_core-1.0.0rc2-py3-none-any.whl`, size `1057577`, SHA256
+`2affbd3fbb086a847a01327c29c77c582b37d44b447e689f8b2ed9e5a5480699`.
+Its normalized source distribution is `k1s_core-1.0.0rc2.tar.gz`, size
+`978593`, SHA256
+`2628101ee4269ee465bdacce1d254680df86fad17f714fb501c0f283f855922b`.
+
+K1s TestPyPI run `43108928300` built, verified, attested, and published the
+canonical bundle. Production run `43109495393` downloaded that successful
+run's artifact and promoted the exact same wheel and source distribution to
+PyPI without rebuilding. Both indexes report the identities above. WorkerBee's
+provider status is therefore `published`; its own publication still requires
+independent deterministic builds, installed-consumer qualification, protected
+environment review, and exact-byte TestPyPI-to-PyPI promotion.
+
+## Stable 1.0 published-provider checkpoint
+
+Stable WorkerBee `1.0.0` binds the published `k1s-core==1.0.0` provider from
+source commit `047c601c0c8426f1dc4c6da579a80ccd175c55cb`, tree
+`2ef5e79791e9779180629e51db3974bba47e29b1`. The exact provider wheel is
+`k1s_core-1.0.0-py3-none-any.whl`, size `1057377`, SHA256
+`1208552881446eb7b4fdefd27a22ca2f79f70fb851445bebf0a17273a507724f`.
+Its normalized source distribution is `k1s_core-1.0.0.tar.gz`, size `978158`,
+SHA256 `92744149ac25625f627db7b06ce75853eb3da274f82a6135e8f36d89adfceba6`.
+
+K1s TestPyPI run `43119549839` built, verified, attested, and published the
+canonical bundle. Production run `43119935798` promoted those exact bytes to
+PyPI without rebuilding. Stable WorkerBee preserves all RC2 live-evidence
+limits and runs its own independent deterministic, installed-consumer, and
+exact-promotion gates before publication.
 
 ## Host-safety boundary
 
