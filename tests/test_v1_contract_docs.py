@@ -1,4 +1,5 @@
 import argparse
+import re
 from pathlib import Path
 
 from workerbee.agent import agent_instructions_markdown
@@ -64,6 +65,10 @@ def test_readme_and_sdist_expose_the_public_v1_contract() -> None:
     assert "docs/cli-reference.md" in readme
     assert "include docs/cli-reference.md" in manifest
     assert "workerbee-install/releases" in readme
+    assert "docs/wiki/WorkerBee-v1.md" in readme
+    assert "v1 alpha" not in readme.lower()
+    assert "'k1s-workerbee==1.0.0rc1'" in readme
+    assert "PIP_NO_INDEX=1 PIP_CONFIG_FILE=/dev/null" in readme
 
     for image in (
         "docs/assets/k1s-workerbee-hero.jpg",
@@ -225,3 +230,79 @@ def test_release_docs_record_exact_accepted_k1s_rc1_checkpoint() -> None:
         "does not publish either Python distribution",
     ):
         assert gate in normalized
+
+
+def test_installed_consumer_qualification_is_copyable_and_evidence_bounded() -> None:
+    text = Path("docs/k1s-consumer-contract.md").read_text(encoding="utf-8")
+    normalized = " ".join(text.split())
+
+    for command_field in (
+        "scripts/qualify_installed_consumer.py",
+        "--workerbee-size 798087",
+        "--workerbee-sha256 78cde1ddbadaed962fc8514a7388024d464e6d3b1f3c7c016e5d115a10321ff9",
+        "--workerbee-source-commit a51aeaace39f85d42076aaef0b28f7a92b4cf054",
+        "--workerbee-source-tree 171a5f7f5ce744fc64a1e3b574a7aa98925850e7",
+        "--k1s-size 1057213",
+        "--k1s-sha256 f341d21a2b0297aaa598826b694fccbc2e07aedc6a449b259010d9e07f520d20",
+        "--k1s-source-commit 0827108aa2ee429de491de0842d33871e84b9eba",
+        "--k1s-source-tree 44b9aaab8073f5534f38655b29258b4eb1774f0c",
+        "--runs 2",
+    ):
+        assert command_field in text
+    for boundary in (
+        "148e925de97e8131ff7f5d58be514c1c1aea6825fde0bd110f6e86db3715fac8",
+        "0b33c0d9a28c093991e36c3962ce55de7b6f9b010ca950ba89ef906f15fedc59",
+        "does not qualify live runtime behavior",
+        "status` and `logs` remain source-validated",
+        "strict-CRI prepare/rollback",
+    ):
+        assert boundary in normalized
+
+
+def test_wiki_and_scenario_matrix_preserve_public_private_boundaries() -> None:
+    contract = Path("docs/v1-contract.md").read_text(encoding="utf-8")
+    wiki = Path("docs/wiki/WorkerBee-v1.md").read_text(encoding="utf-8")
+    combined = " ".join((contract + "\n" + wiki).split())
+
+    for scenario_id in (
+        "WB-C2-INSTALL-001",
+        "WB-D2-PROFILE-STATE-001",
+        "WB-D2-STRICT-CRI-001",
+        "WB-D3-CONTROLLED-RUN-001",
+        "WB-D3-AGENT-PBX-001",
+    ):
+        assert scenario_id in contract
+        assert scenario_id in wiki
+    for boundary in (
+        "Installed-artifact qualified",
+        "Deferred live",
+        "Deferred private qualification",
+        "no package/consumer defect",
+        "start receipt is coordination evidence only",
+        "disabled by default",
+        "private platform-debug",
+        "not implemented or advertised as available by OSS",
+    ):
+        assert boundary.lower() in combined.lower()
+
+
+def test_changed_public_docs_have_valid_repository_links_and_no_host_paths() -> None:
+    paths = (
+        Path("README.md"),
+        Path("docs/k1s-consumer-contract.md"),
+        Path("docs/releasing.md"),
+        Path("docs/v1-contract.md"),
+        Path("docs/wiki/WorkerBee-v1.md"),
+    )
+    link_pattern = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
+
+    for source in paths:
+        text = source.read_text(encoding="utf-8")
+        assert "/home/" not in text
+        for target in link_pattern.findall(text):
+            if target.startswith(("http://", "https://", "#", "mailto:")):
+                continue
+            relative = target.split("#", 1)[0]
+            if not relative:
+                continue
+            assert (source.parent / relative).resolve().is_file(), (source, target)

@@ -77,6 +77,16 @@ Each install must pass `pip check`, `workerbee`/MCP/import/`ae` smoke checks,
 runtime-provider discovery, and the five-operation K1s profile-evidence
 contract plus the internal pure bootstrap projection.
 
+The public consumer qualification is a separate non-live receipt. Run
+`scripts/qualify_installed_consumer.py` with the exact candidate and provider
+filename, size, SHA256, source commit, source tree, source roots, sealed
+wheelhouse, and a new owner-private output root as documented in
+[`k1s-consumer-contract.md`](k1s-consumer-contract.md). It must perform at least
+two fresh strict no-index installs, reject either source checkout on `sys.path`,
+and produce byte-identical canonical run receipts. This proves installed
+consumer compatibility only; it does not qualify profiles, providers,
+strict-CRI host mutation, or production fitness.
+
 Creating or pushing the reviewed `v1.0.0rc1` source tag does not publish either
 Python distribution. Package-index publication remains a separate, gated OIDC
 decision.
@@ -99,6 +109,22 @@ python3.11 scripts/audit_release_artifacts.py verify-manifest \
 For reproducibility, build twice from the same commit with the same
 `SOURCE_DATE_EPOCH` and verify the first manifest against the second directory.
 The wheel and sdist filenames, sizes, and SHA256 values must match exactly.
+
+For an already sealed complete wheelhouse, direct pip installation is the
+supported environment-local path:
+
+```bash
+python3.11 -m venv /path/to/fresh-venv
+/path/to/fresh-venv/bin/python -m pip install \
+  --no-index --find-links /path/to/workerbee-wheelhouse \
+  'k1s-workerbee==1.0.0rc1'
+/path/to/fresh-venv/bin/python -m pip check
+```
+
+Set `PIP_NO_INDEX=1` and `PIP_CONFIG_FILE=/dev/null` in release validation as a
+second fail-closed layer. Use `scripts/install-workerbee.sh` instead when
+validating the versioned standalone layout, atomic `current` switch, retained
+`previous` target, wrapper, or rollback behavior.
 
 The wheelhouse builder accepts the exact verified `k1s-core` wheel plus a local
 directory containing all transitive wheels. It sets `PIP_NO_INDEX=1` and

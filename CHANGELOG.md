@@ -18,6 +18,16 @@ effort summaries reconstructed from release notes and git history.
   rejection; and local-only, no-index wheelhouse construction.
 - Added the public v1 MCP, readiness, controlled-run, native-direct,
   deterministic release, transactional installer, and rollback contracts.
+- Added a versioned public K1s consumer descriptor for the portable profile
+  catalog, bootstrap projection boundary, strict-CRI transaction boundary, and
+  explicit advanced `ae` fallback rule.
+- Added deterministic installed-artifact qualification that performs two fresh
+  strict no-index installs outside both source checkouts and proves exact
+  package, entry-point, provider, and source-isolation identity without starting
+  profiles, providers, or workloads.
+- Aligned the public direct-pip, transactional installer, release, wiki, and
+  evidence-level guidance. Runtime- and host-dependent D2/D3 scenarios remain
+  explicitly deferred rather than being described as live-qualified.
 
 ## v0.1.7 - 2026-08-27
 
