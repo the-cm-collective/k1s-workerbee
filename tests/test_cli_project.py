@@ -570,7 +570,7 @@ def test_ingress_ca_regenerate_dispatches_to_daemon(
     assert rc == 0
     assert payload["regenerated"] is True
     assert captured["state_root"] == tmp_path
-    assert captured["runtime"] == "docker"
+    assert captured["runtime"] == "auto"
     assert captured["confirm"] is True
 
 
