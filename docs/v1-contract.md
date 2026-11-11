@@ -113,6 +113,13 @@ credentials, endpoints, and raw run IDs. Bootstrap creation is never public;
 only pure adaptation of an already-selected public bootstrap projection is
 available internally for qualification.
 
+The [K1s v1 consumer contract](k1s-consumer-contract.md) inventories the
+portable `core`, `edge-gateway`, and `node` roles, bootstrap creation boundary,
+strict-CRI host plan/prepare/rollback authority, and the narrow rule for using
+advanced `ae` entry points only when the compact `k1s` CLI has no equivalent.
+The inventory records public compatibility and evidence level; it does not
+claim live runtime, host-transaction, deployment, or production qualification.
+
 ## Claim and evidence boundary
 
 Public documentation distinguishes implemented OSS behavior from negotiated or
