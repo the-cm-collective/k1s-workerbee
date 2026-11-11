@@ -35,7 +35,7 @@ def test_mixed_ae_providers_fail_closed() -> None:
         "expected": "k1s-core",
         "forbidden": "k1s-workerbee-runtime",
         "import_package": "ae",
-        "requirement": "k1s-core==1.0.0rc1",
+        "requirement": "k1s-core==1.0.0rc2",
     }
 
 

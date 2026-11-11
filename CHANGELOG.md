@@ -3,6 +3,18 @@
 All notable WorkerBee changes are documented here. Earlier entries are best
 effort summaries reconstructed from release notes and git history.
 
+## v1.0.0rc2 - 2026-11-11
+
+- Rebound WorkerBee to the published exact-byte `k1s-core==1.0.0rc2`
+  provider from source commit `4d91576326105fbe8a62c1dc5c01c6d5cfdca460`.
+- Recorded the provider wheel filename, size, and SHA256 served identically by
+  PyPI and TestPyPI, and opened the fail-closed WorkerBee publication gate.
+- Advanced the package, wheelhouse, installed-consumer qualification, and
+  public documentation contracts to `1.0.0rc2` while preserving RC1 as an
+  immutable local review checkpoint.
+- Canonicalized release-builder permissions across caller umasks and allowed
+  the sealed wheelhouse to reuse the audited WorkerBee candidate byte-for-byte.
+
 ## v1.0.0rc1 - 2026-11-11
 
 - Rebound the release contract to the sealed exact-byte

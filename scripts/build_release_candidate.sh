@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Build archives with public, deterministic member modes regardless of the
+# caller's local shell policy. Setuptools otherwise copies a restrictive umask
+# into generated wheel and sdist metadata, producing different release bytes.
+umask 022
+
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${ROOT_DIR}/dist/pypi"
 PYTHON_BIN="${PYTHON_BIN:-python3.11}"

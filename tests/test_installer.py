@@ -172,7 +172,7 @@ def test_failed_offline_install_preserves_links_and_cleans_final_release(
 
     release_files = tmp_path / "release-files"
     release_files.mkdir()
-    wheel = release_files / "k1s_workerbee-1.0.0rc1-py3-none-any.whl"
+    wheel = release_files / "k1s_workerbee-1.0.0rc2-py3-none-any.whl"
     wheel.write_bytes(b"intentionally invalid wheel")
     sbom = release_files / "SBOM.cdx.json"
     sbom.write_text("{}\n", encoding="utf-8")
@@ -254,6 +254,9 @@ def test_wheelhouse_build_is_local_only_and_has_no_index_resolution() -> None:
     text = Path("scripts/build_wheelhouse.sh").read_text(encoding="utf-8")
     assert "--dependency-wheelhouse" in text
     assert "--k1s-core-wheel" in text
+    assert "--workerbee-wheel" in text
+    assert "WORKERBEE_RELEASE_WHEEL" in text
+    assert 'cp "$WORKERBEE_WHEEL" "$OUT_DIR/"' in text
     assert "verify-runtime-artifact" in text
     assert "PIP_NO_INDEX=1" in text
     assert "PIP_CONFIG_FILE=/dev/null" in text
@@ -271,17 +274,17 @@ def test_runtime_provider_pin_and_artifact_identity_are_exact() -> None:
     release = pyproject["tool"]["workerbee"]["release"]
     runtime_pin = next(dep for dep in project["dependencies"] if dep.startswith("k1s-core=="))
 
-    assert runtime_pin == "k1s-core==1.0.0rc1"
+    assert runtime_pin == "k1s-core==1.0.0rc2"
     assert release["published-baseline-version"] == "0.1.7"
     assert release["runtime-provider-lane"] == "k1s-core"
     assert release["runtime-provider-requirement"] == runtime_pin
-    assert release["runtime-provider-artifact"] == "k1s_core-1.0.0rc1-py3-none-any.whl"
-    assert release["runtime-provider-size"] == 1057213
+    assert release["runtime-provider-artifact"] == "k1s_core-1.0.0rc2-py3-none-any.whl"
+    assert release["runtime-provider-size"] == 1057577
     assert (
         release["runtime-provider-sha256"]
-        == "f341d21a2b0297aaa598826b694fccbc2e07aedc6a449b259010d9e07f520d20"
+        == "2affbd3fbb086a847a01327c29c77c582b37d44b447e689f8b2ed9e5a5480699"
     )
-    assert release["runtime-provider-publication-status"] == "temporary-nonpublished"
+    assert release["runtime-provider-publication-status"] == "published"
     assert release["forbidden-runtime-provider"] == "k1s-workerbee-runtime"
     assert not any(dep.startswith("k1s-workerbee-runtime") for dep in project["dependencies"])
 

@@ -29,8 +29,8 @@ def _write_workerbee_wheel(path: Path, *, extra_member: tuple[str, str] | None =
         (
             "Metadata-Version: 2.4",
             "Name: k1s-workerbee",
-            "Version: 1.0.0rc1",
-            "Requires-Dist: k1s-core==1.0.0rc1",
+            "Version: 1.0.0rc2",
+            "Requires-Dist: k1s-core==1.0.0rc2",
             "Requires-Dist: mcp>=1.8,<2",
             "",
         )
@@ -44,9 +44,9 @@ def _write_workerbee_wheel(path: Path, *, extra_member: tuple[str, str] | None =
             "workerbee/runtime_provider.py",
         ):
             archive.writestr(member, "")
-        archive.writestr("k1s_workerbee-1.0.0rc1.dist-info/METADATA", metadata)
+        archive.writestr("k1s_workerbee-1.0.0rc2.dist-info/METADATA", metadata)
         archive.writestr(
-            "k1s_workerbee-1.0.0rc1.dist-info/entry_points.txt",
+            "k1s_workerbee-1.0.0rc2.dist-info/entry_points.txt",
             "[console_scripts]\nworkerbee = workerbee.cli:main\n",
         )
         if extra_member is not None:
@@ -57,7 +57,7 @@ def _write_runtime_wheel(
     path: Path,
     *,
     distribution: str = "k1s-core",
-    version: str = "1.0.0rc1",
+    version: str = "1.0.0rc2",
 ) -> None:
     dist_info = distribution.replace("-", "_")
     metadata = "\n".join(
@@ -83,21 +83,19 @@ def test_project_release_contract_is_consistent() -> None:
     assert release.validate_project() == []
 
 
-def test_sealed_rc_provider_keeps_publication_fail_closed(capsys) -> None:
+def test_published_rc_provider_is_publication_ready(capsys) -> None:
     contract = release.load_contract()[0]
-    assert contract.version == "1.0.0rc1"
-    assert contract.runtime_provider_publication_status == "temporary-nonpublished"
+    assert contract.version == "1.0.0rc2"
+    assert contract.runtime_provider_publication_status == "published"
     assert contract.published_baseline_version == "0.1.7"
-    assert release.validate_publication_ready() == [
-        "runtime provider is temporary-nonpublished; refusing WorkerBee publication"
-    ]
+    assert release.validate_publication_ready() == []
 
-    assert release.main(["verify-publication-ready"]) == 1
-    assert "runtime provider is temporary-nonpublished" in capsys.readouterr().err
+    assert release.main(["verify-publication-ready"]) == 0
+    assert capsys.readouterr().err == ""
 
 
 def test_clean_wheel_passes_identity_and_hygiene_audit(tmp_path: Path) -> None:
-    wheel = tmp_path / "k1s_workerbee-1.0.0rc1-py3-none-any.whl"
+    wheel = tmp_path / "k1s_workerbee-1.0.0rc2-py3-none-any.whl"
     _write_workerbee_wheel(wheel)
 
     assert release.audit_artifacts([wheel]) == []
@@ -106,7 +104,7 @@ def test_clean_wheel_passes_identity_and_hygiene_audit(tmp_path: Path) -> None:
 def test_exact_runtime_artifact_identity_and_imports_are_enforced(
     tmp_path: Path, monkeypatch
 ) -> None:
-    wheel = tmp_path / "k1s_core-1.0.0rc1-py3-none-any.whl"
+    wheel = tmp_path / "k1s_core-1.0.0rc2-py3-none-any.whl"
     _write_runtime_wheel(wheel)
     contract, project = release.load_contract()
     fixture_contract = replace(
@@ -125,8 +123,8 @@ def test_exact_runtime_artifact_identity_and_imports_are_enforced(
 
 
 def test_wheelhouse_rejects_legacy_or_mixed_ae_providers(tmp_path: Path, monkeypatch) -> None:
-    workerbee = tmp_path / "k1s_workerbee-1.0.0rc1-py3-none-any.whl"
-    runtime = tmp_path / "k1s_core-1.0.0rc1-py3-none-any.whl"
+    workerbee = tmp_path / "k1s_workerbee-1.0.0rc2-py3-none-any.whl"
+    runtime = tmp_path / "k1s_core-1.0.0rc2-py3-none-any.whl"
     _write_workerbee_wheel(workerbee)
     _write_runtime_wheel(runtime)
     contract, project = release.load_contract()
@@ -147,7 +145,7 @@ def test_wheelhouse_rejects_legacy_or_mixed_ae_providers(tmp_path: Path, monkeyp
 
 
 def test_wheel_secret_pattern_fails_audit(tmp_path: Path) -> None:
-    wheel = tmp_path / "k1s_workerbee-1.0.0rc1-py3-none-any.whl"
+    wheel = tmp_path / "k1s_workerbee-1.0.0rc2-py3-none-any.whl"
     _write_workerbee_wheel(
         wheel,
         extra_member=("workerbee/leak.txt", "pypi-" + "abcdefghijklmnopqrstuvwxyz012345"),
@@ -206,7 +204,7 @@ def test_manifest_can_verify_a_second_candidate_directory(tmp_path: Path) -> Non
 
 
 def test_deterministic_sbom_binds_exact_artifact_bytes(tmp_path: Path) -> None:
-    wheel = tmp_path / "k1s_workerbee-1.0.0rc1-py3-none-any.whl"
+    wheel = tmp_path / "k1s_workerbee-1.0.0rc2-py3-none-any.whl"
     _write_workerbee_wheel(wheel)
     first = tmp_path / "first.cdx.json"
     second = tmp_path / "second.cdx.json"
@@ -220,7 +218,7 @@ def test_deterministic_sbom_binds_exact_artifact_bytes(tmp_path: Path) -> None:
     assert first_payload["specVersion"] == "1.5"
     component = first_payload["components"][0]
     assert component["name"] == wheel.name
-    assert component["version"] == "1.0.0rc1"
+    assert component["version"] == "1.0.0rc2"
     assert component["hashes"] == [{"alg": "SHA-256", "content": release.sha256_file(wheel)}]
 
 
@@ -359,7 +357,7 @@ def test_sdist_normalization_is_deterministic(tmp_path: Path) -> None:
 
 
 def test_json_audit_output_does_not_contain_secret_value(tmp_path: Path, capsys) -> None:
-    wheel = tmp_path / "k1s_workerbee-1.0.0rc1-py3-none-any.whl"
+    wheel = tmp_path / "k1s_workerbee-1.0.0rc2-py3-none-any.whl"
     secret = "pypi-" + "abcdefghijklmnopqrstuvwxyz012345"  # noqa: S105 - synthetic fixture
     _write_workerbee_wheel(wheel, extra_member=("workerbee/leak.txt", secret))
 

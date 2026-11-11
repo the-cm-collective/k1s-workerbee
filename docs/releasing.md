@@ -6,16 +6,19 @@ import `ae`.
 
 ## Current provider lane
 
-The WorkerBee `1.0.0rc1` lane requires the accepted sealed
-`k1s-core==1.0.0rc1` provider. Its source identity is commit
-`0827108aa2ee429de491de0842d33871e84b9eba`, tree
-`44b9aaab8073f5534f38655b29258b4eb1774f0c`. The exact wheel is
-`k1s_core-1.0.0rc1-py3-none-any.whl`, size `1057213`, SHA256
-`f341d21a2b0297aaa598826b694fccbc2e07aedc6a449b259010d9e07f520d20`.
-The normalized sdist is `k1s_core-1.0.0rc1.tar.gz`, size `977871`, SHA256
-`6af74da687aceb93f15d9057963edf2b03ced5ebf32d4a56e9230d2728d8f822`.
-The sealed R2 receipt records two byte-identical builds, two strict installed
-validations, and no network, provider, runtime, or protected-content action.
+The WorkerBee `1.0.0rc2` lane requires the published exact-byte
+`k1s-core==1.0.0rc2` provider. Its source identity is commit
+`4d91576326105fbe8a62c1dc5c01c6d5cfdca460`, tree
+`ba22d40066f0cade372e0105fff1ec0f6fd5e953`. The exact wheel is
+`k1s_core-1.0.0rc2-py3-none-any.whl`, size `1057577`, SHA256
+`2affbd3fbb086a847a01327c29c77c582b37d44b447e689f8b2ed9e5a5480699`.
+The normalized sdist is `k1s_core-1.0.0rc2.tar.gz`, size `978593`, SHA256
+`2628101ee4269ee465bdacce1d254680df86fad17f714fb501c0f283f855922b`.
+The K1s RC2 evidence records two byte-identical local builds and strict
+installed validation. GitHub TestPyPI run `43108928300` built and attested the
+canonical bundle, and production run `43109495393` promoted those exact bytes
+without rebuilding. PyPI and TestPyPI expose the wheel and source distribution
+with the identities above.
 
 The release contract in `pyproject.toml`, runtime provider guard, artifact
 audit, wheelhouse audit, and tests require that exact wheel to be the only
@@ -28,20 +31,18 @@ The MCP SDK remains on `mcp>=1.8,<2` because WorkerBee's current server contract
 uses the 1.x `FastMCP` API. A 2.x migration must be a separate compatibility
 change rather than an implicit dependency upgrade.
 
-This is sealed local candidate authority, not evidence that the K1s RC wheel is
-published on a package index. Its release-contract publication status is
-`temporary-nonpublished`. WorkerBee remains locally qualifiable and taggable,
-but `verify-publication-ready` and both OIDC publishing jobs fail closed until
-separate root authority proves published bytes with the same identity. The
-contract continues to record `0.1.7` as the immutable already-published
-WorkerBee baseline.
+The K1s provider publication status is `published`. WorkerBee's
+`verify-publication-ready` gate can therefore advance only after every local
+contract and artifact check also passes; a future temporary provider would
+close the gate again. The contract continues to record `0.1.7` as the immutable
+already-published WorkerBee baseline.
 
-### Accepted `k1s-core==1.0.0rc1` checkpoint
+### Accepted `k1s-core==1.0.0rc2` checkpoint
 
 The accepted dependency checkpoint updates these version-bearing paths:
 
 - `pyproject.toml` and `src/workerbee/runtime_provider.py` bind the exact pin,
-  filename, size, SHA256, and nonpublished status;
+  filename, size, SHA256, and published status;
 - `scripts/build_wheelhouse.sh` emits the exact provider and WorkerBee RC pins;
 - `CHANGELOG.md`, `docs/release-foundation.md`, `docs/releasing.md`, and
   `docs/v1-contract.md` record current authority and claim boundaries; and
@@ -51,8 +52,9 @@ The accepted dependency checkpoint updates these version-bearing paths:
   the exact contract.
 
 The contract-driven `scripts/audit_release_artifacts.py`,
-`scripts/install-workerbee.sh`, `src/workerbee/profile_evidence.py`, and
-`README.md` require no version-specific source edit. The version-neutral
+`scripts/install-workerbee.sh`, and `src/workerbee/profile_evidence.py` require
+no version-specific source edit. README and release documentation are aligned
+to the current candidate. The version-neutral
 `.gitea/workflows/integration.yml`, `.github/workflows/promote-main.yml`,
 `.github/workflows/release-testpypi.yml`, and
 `.github/workflows/release-pypi.yml` remain unchanged and retain their existing
@@ -60,10 +62,10 @@ authority split and no-index/fail-closed gates.
 
 Every previous WorkerBee candidate bundle is superseded. Rebuild and reseal:
 
-- `k1s_workerbee-1.0.0rc1-py3-none-any.whl` and
-  `k1s_workerbee-1.0.0rc1.tar.gz`;
+- `k1s_workerbee-1.0.0rc2-py3-none-any.whl` and
+  `k1s_workerbee-1.0.0rc2.tar.gz`;
 - candidate `SBOM.cdx.json` and `RELEASE-MANIFEST.json`;
-- the accepted `k1s_core-1.0.0rc1-py3-none-any.whl` plus exact transitive
+- the accepted `k1s_core-1.0.0rc2-py3-none-any.whl` plus exact transitive
   dependency wheels;
 - wheelhouse `INSTALL.txt`, `SBOM.cdx.json`, and `RELEASE-MANIFEST.json`; and
 - normalized `workerbee-wheelhouse.tar.gz` plus external `SHA256SUMS` covering
@@ -77,6 +79,20 @@ Each install must pass `pip check`, `workerbee`/MCP/import/`ae` smoke checks,
 runtime-provider discovery, and the five-operation K1s profile-evidence
 contract plus the internal pure bootstrap projection.
 
+After the two candidate builds agree, construct the release wheelhouse from
+that exact WorkerBee wheel rather than rebuilding it through a second frontend:
+
+```bash
+scripts/build_wheelhouse.sh \
+  --workerbee-wheel "$WORKERBEE_WHEEL" \
+  --k1s-core-wheel "$K1S_CORE_WHEEL" \
+  --dependency-wheelhouse "$DEPENDENCY_WHEELHOUSE" \
+  --out "$WHEELHOUSE_OUT"
+```
+
+Omitting `--workerbee-wheel` remains supported for source-checkout development,
+but it is not the release path because source mtimes can change wheel bytes.
+
 The public consumer qualification is a separate non-live receipt. Run
 `scripts/qualify_installed_consumer.py` with the exact candidate and provider
 filename, size, SHA256, source commit, source tree, source roots, sealed
@@ -87,7 +103,7 @@ and produce byte-identical canonical run receipts. This proves installed
 consumer compatibility only; it does not qualify profiles, providers,
 strict-CRI host mutation, or production fitness.
 
-Creating or pushing the reviewed `v1.0.0rc1` source tag does not publish either
+Creating or pushing the reviewed `v1.0.0rc2` source tag does not publish either
 Python distribution. Package-index publication remains a separate, gated OIDC
 decision.
 
@@ -117,7 +133,7 @@ supported environment-local path:
 python3.11 -m venv /path/to/fresh-venv
 /path/to/fresh-venv/bin/python -m pip install \
   --no-index --find-links /path/to/workerbee-wheelhouse \
-  'k1s-workerbee==1.0.0rc1'
+  'k1s-workerbee==1.0.0rc2'
 /path/to/fresh-venv/bin/python -m pip check
 ```
 

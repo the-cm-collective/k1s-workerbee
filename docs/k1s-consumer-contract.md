@@ -3,7 +3,7 @@
 WorkerBee consumes the installed public contract of the exact declared
 `k1s-core` distribution. It does not copy K1s implementation, discover an
 ambient checkout, or infer behavior from an uncommitted K1s tree. The current
-release contract is `k1s-core==1.0.0rc1`; changing that identity is a separate
+release contract is `k1s-core==1.0.0rc2`; changing that identity is a separate
 coordinated release decision.
 
 The WorkerBee-owned descriptor is
@@ -122,26 +122,26 @@ checkout is importable from the fresh environments:
 python3.11 scripts/qualify_installed_consumer.py \
   --python "$(command -v python3.11)" \
   --wheelhouse "$WHEELHOUSE" \
-  --workerbee-wheel "$WHEELHOUSE/k1s_workerbee-1.0.0rc1-py3-none-any.whl" \
-  --workerbee-size 798087 \
-  --workerbee-sha256 78cde1ddbadaed962fc8514a7388024d464e6d3b1f3c7c016e5d115a10321ff9 \
-  --workerbee-source-commit a51aeaace39f85d42076aaef0b28f7a92b4cf054 \
-  --workerbee-source-tree 171a5f7f5ce744fc64a1e3b574a7aa98925850e7 \
-  --k1s-wheel "$WHEELHOUSE/k1s_core-1.0.0rc1-py3-none-any.whl" \
-  --k1s-size 1057213 \
-  --k1s-sha256 f341d21a2b0297aaa598826b694fccbc2e07aedc6a449b259010d9e07f520d20 \
-  --k1s-source-commit 0827108aa2ee429de491de0842d33871e84b9eba \
-  --k1s-source-tree 44b9aaab8073f5534f38655b29258b4eb1774f0c \
+  --workerbee-wheel "$WHEELHOUSE/k1s_workerbee-1.0.0rc2-py3-none-any.whl" \
+  --workerbee-size "$WORKERBEE_SIZE" \
+  --workerbee-sha256 "$WORKERBEE_SHA256" \
+  --workerbee-source-commit "$WORKERBEE_SOURCE_COMMIT" \
+  --workerbee-source-tree "$WORKERBEE_SOURCE_TREE" \
+  --k1s-wheel "$WHEELHOUSE/k1s_core-1.0.0rc2-py3-none-any.whl" \
+  --k1s-size 1057577 \
+  --k1s-sha256 2affbd3fbb086a847a01327c29c77c582b37d44b447e689f8b2ed9e5a5480699 \
+  --k1s-source-commit 4d91576326105fbe8a62c1dc5c01c6d5cfdca460 \
+  --k1s-source-tree ba22d40066f0cade372e0105fff1ec0f6fd5e953 \
   --workerbee-source-root "$WORKERBEE_SOURCE_ROOT" \
   --k1s-source-root "$K1S_SOURCE_ROOT" \
   --run-root "$OWNER_PRIVATE_RUN_ROOT" \
   --runs 2
 ```
 
-Those WorkerBee artifact fields describe the accepted C2 qualification input,
-which was built from the C1 consumer commit. Rebuilds from later commits must
-substitute their own exact filename, size, digest, commit, and tree rather than
-reusing this receipt. The accepted aggregate receipt uses schema
+Set the four `WORKERBEE_*` values from the exact candidate manifest and Git
+objects being qualified. Rebuilds must use their own exact filename, size,
+digest, commit, and tree rather than reusing an earlier receipt. The historical
+RC1 C2 aggregate receipt uses schema
 `workerbee.installed-consumer-qualification-set/v1`, status `qualified`, two
 byte-identical canonical receipts, receipt digest
 `148e925de97e8131ff7f5d58be514c1c1aea6825fde0bd110f6e86db3715fac8`, and

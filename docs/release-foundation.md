@@ -88,6 +88,26 @@ uses `temporary-nonpublished`, and trusted publication remains fail-closed.
 The legacy provider remains forbidden, `ae` compatibility remains required,
 and wheelhouse installation remains no-index and exactly-one-provider.
 
+## RC2 published-provider checkpoint
+
+RC2 advances WorkerBee to `1.0.0rc2` and binds the published
+`k1s-core==1.0.0rc2` provider from source commit
+`4d91576326105fbe8a62c1dc5c01c6d5cfdca460`, tree
+`ba22d40066f0cade372e0105fff1ec0f6fd5e953`. The exact provider wheel is
+`k1s_core-1.0.0rc2-py3-none-any.whl`, size `1057577`, SHA256
+`2affbd3fbb086a847a01327c29c77c582b37d44b447e689f8b2ed9e5a5480699`.
+Its normalized source distribution is `k1s_core-1.0.0rc2.tar.gz`, size
+`978593`, SHA256
+`2628101ee4269ee465bdacce1d254680df86fad17f714fb501c0f283f855922b`.
+
+K1s TestPyPI run `43108928300` built, verified, attested, and published the
+canonical bundle. Production run `43109495393` downloaded that successful
+run's artifact and promoted the exact same wheel and source distribution to
+PyPI without rebuilding. Both indexes report the identities above. WorkerBee's
+provider status is therefore `published`; its own publication still requires
+independent deterministic builds, installed-consumer qualification, protected
+environment review, and exact-byte TestPyPI-to-PyPI promotion.
+
 ## Host-safety boundary
 
 The Gitea integration and GitHub promotion gates run source-only tests. They do

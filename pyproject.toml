@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "k1s-workerbee"
-version = "1.0.0rc1"
+version = "1.0.0rc2"
 description = "Local MCP workbench for k1s-powered cloud-native agent testing"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -12,7 +12,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{name = "k1s contributors"}]
 dependencies = [
-    "k1s-core==1.0.0rc1",
+    "k1s-core==1.0.0rc2",
     "mcp>=1.8,<2",
 ]
 
@@ -35,11 +35,11 @@ cli-entry-point = "workerbee.cli:main"
 mcp-entry-point = "workerbee.mcp_server:serve_mcp"
 runtime-import = "ae"
 runtime-provider-lane = "k1s-core"
-runtime-provider-requirement = "k1s-core==1.0.0rc1"
-runtime-provider-artifact = "k1s_core-1.0.0rc1-py3-none-any.whl"
-runtime-provider-size = 1057213
-runtime-provider-sha256 = "f341d21a2b0297aaa598826b694fccbc2e07aedc6a449b259010d9e07f520d20"
-runtime-provider-publication-status = "temporary-nonpublished"
+runtime-provider-requirement = "k1s-core==1.0.0rc2"
+runtime-provider-artifact = "k1s_core-1.0.0rc2-py3-none-any.whl"
+runtime-provider-size = 1057577
+runtime-provider-sha256 = "2affbd3fbb086a847a01327c29c77c582b37d44b447e689f8b2ed9e5a5480699"
+runtime-provider-publication-status = "published"
 forbidden-runtime-provider = "k1s-workerbee-runtime"
 
 [tool.setuptools]

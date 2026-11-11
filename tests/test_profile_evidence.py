@@ -142,7 +142,7 @@ def _fixture(operation: str) -> dict[str, object]:
         "provenance": {
             "adapterApiVersion": ADAPTER_API_VERSION,
             "distribution": "k1s-core",
-            "distributionVersion": "1.0.0rc1",
+            "distributionVersion": "1.0.0rc2",
             "sourceApiVersion": source_api,
             "sourceExitCode": 0,
             "sourceKind": source_kind,
@@ -176,7 +176,7 @@ def _provider_status(state: str = "exact") -> dict[str, object]:
         "expected": "k1s-core",
         "forbidden": "k1s-workerbee-runtime",
         "import_package": "ae",
-        "requirement": "k1s-core==1.0.0rc1",
+        "requirement": "k1s-core==1.0.0rc2",
     }
 
 
@@ -187,7 +187,7 @@ def _installed_runtime() -> K1sRuntime:
         k1s_root=None,
         pythonpath=None,
         ae_origin="/opt/workerbee/site-packages/ae/__init__.py",
-        ae_version="1.0.0rc1",
+        ae_version="1.0.0rc2",
         provider_status=_provider_status(),
     )
 
@@ -293,7 +293,7 @@ def test_consumer_rejects_digest_drift_raw_metadata_and_noncanonical_bytes() -> 
 
 
 def test_capability_contract_is_versioned_bounded_and_excludes_bootstrap_creation() -> None:
-    capability = profile_evidence_capabilities(ready=True, provider_version="1.0.0rc1")
+    capability = profile_evidence_capabilities(ready=True, provider_version="1.0.0rc2")
     encoded = json.dumps(capability, sort_keys=True, separators=(",", ":")).encode()
 
     assert len(encoded) < 4096
@@ -355,7 +355,7 @@ def test_explicit_checkout_bridge_pins_pythonpath_for_both_subprocesses(tmp_path
         k1s_root=root,
         pythonpath=str(root / "src"),
         ae_origin=str(root / "src/ae/__init__.py"),
-        ae_version="1.0.0rc1",
+        ae_version="1.0.0rc2",
         provider_status=_provider_status("source-checkout"),
     )
     runner = _FakeRunner()
@@ -454,7 +454,7 @@ def test_one_session_retains_w4_six_operation_same_runtime_qualification() -> No
             k1s_root=None,
             pythonpath=None,
             ae_origin="/site/ae/__init__.py",
-            ae_version="1.0.0rc1",
+            ae_version="1.0.0rc2",
             provider_status={**_provider_status(), "ok": False, "state": "mixed"},
         ),
     ],
@@ -698,7 +698,7 @@ def test_capability_and_policy_readback_are_exact_and_nonmutating(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    capability = profile_evidence_capabilities(ready=True, provider_version="1.0.0rc1")
+    capability = profile_evidence_capabilities(ready=True, provider_version="1.0.0rc2")
 
     class FakeBridge:
         def collect(self, *_args: object, **_kwargs: object) -> dict[str, Any]:

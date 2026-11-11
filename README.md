@@ -8,7 +8,7 @@ WorkerBee is a local MCP workbench that gives coding agents a project-scoped
 k1s-powered app engine for building, deploying, probing, and exporting
 cloud-native applications on a developer machine.
 
-WorkerBee `1.0.0rc1` uses the exact accepted `k1s-core==1.0.0rc1` wheel for its
+WorkerBee `1.0.0rc2` uses the exact published `k1s-core==1.0.0rc2` wheel for its
 release lane. An explicitly selected sibling `../k1s` checkout remains a source
 development option and is never substituted into release qualification. The
 default workflow uses Podman or Docker for ordinary app validation. Advanced
@@ -66,10 +66,19 @@ a bounded build-deploy-check-export workbench around that repo.
 
 ## Quickstart
 
-WorkerBee `1.0.0rc1` and its exact `k1s-core==1.0.0rc1` dependency are currently
-qualified from sealed local artifacts. They are not yet claimed as published
-package-index files. The `latest` GitHub Release therefore remains the stable
-`0.1.7` lane until publication is separately authorized.
+WorkerBee `1.0.0rc2` is the current release candidate. Its exact
+`k1s-core==1.0.0rc2` dependency is published on PyPI and TestPyPI with bytes
+matching the reviewed K1s artifact. The `latest` GitHub Release remains the
+stable `0.1.7` lane until WorkerBee RC2 publication and release review finish.
+
+Install the release candidate from PyPI with an explicit prerelease pin:
+
+```bash
+python3.11 -m venv .venv
+. .venv/bin/activate
+python -m pip install 'k1s-workerbee==1.0.0rc2'
+workerbee doctor
+```
 
 ### Direct pip install from a sealed wheelhouse
 
@@ -83,7 +92,7 @@ python3.11 -m venv .venv
 PIP_NO_INDEX=1 PIP_CONFIG_FILE=/dev/null \
   python -m pip install --no-index \
   --find-links /path/to/workerbee-wheelhouse \
-  'k1s-workerbee==1.0.0rc1'
+  'k1s-workerbee==1.0.0rc2'
 python -m pip check
 workerbee doctor
 ```
