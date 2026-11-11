@@ -557,6 +557,8 @@ def test_ingress_ca_regenerate_dispatches_to_daemon(
     rc = cli.main(
         [
             "--json",
+            "--runtime",
+            "auto",
             "--state-root",
             str(tmp_path),
             "ingress",
