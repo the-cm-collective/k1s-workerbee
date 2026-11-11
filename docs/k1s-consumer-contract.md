@@ -83,3 +83,32 @@ Optional Agent PBX integration may consume the same bounded receipts, but it
 does not change WorkerBee's authority. A campaign receipt, capability object,
 or source-level test is never a substitute for the evidence level named by the
 claim.
+
+## Installed-artifact qualification
+
+`scripts/qualify_installed_consumer.py` is the non-live qualification lane for
+an exact WorkerBee wheel and its exact `k1s-core` provider wheel. It creates at
+least two fresh virtual environments beneath a new owner-private run root and
+installs with `PIP_NO_INDEX=1`, `PIP_CONFIG_FILE=/dev/null`, explicit
+`--no-index` and `--find-links`, and binary-only inputs from a sealed local
+wheelhouse. The artifact filenames, sizes, SHA-256 values, source commits, and
+source trees are bound into the receipt.
+
+Each run starts from a scrubbed working directory outside both source
+checkouts. `PYTHONPATH`, `PYTHONHOME`, user-site packages, and ambient package
+configuration are absent. Qualification fails unless neither source checkout appears on
+`sys.path`, all WorkerBee, `ae`, and distribution metadata origins
+are inside the new environment, the exact dependency is installed, and
+`k1s-core` is the sole owner of `ae`.
+
+The lane exercises installed `workerbee`, `k1s`, and `ae` entry points. Its
+profile checks are limited to the non-mutating public `list`, `doctor`, and
+`plan` contracts and the corresponding metadata-safe WorkerBee consumer. It
+does not start a profile, bind a socket, probe an engine, deploy a workload, or
+qualify provider, transport, host-transaction, or production behavior. Any
+live qualification remains a separate, explicit, opt-in campaign.
+
+The two canonical run receipts must be byte-identical before the aggregate
+receipt reports `qualified`. Absolute environment paths are normalized or
+represented only by digests, so deterministic identity does not depend on the
+temporary directory name.
