@@ -74,6 +74,15 @@ def test_release_builders_canonicalize_the_caller_umask() -> None:
         assert canonical_umask < first_output_creation
 
 
+def test_release_candidate_normalizes_both_publishable_archives() -> None:
+    text = RELEASE_BUILDERS[0].read_text(encoding="utf-8")
+    wheel = text.index("normalize-wheel")
+    sdist = text.index("normalize-sdist")
+    twine = text.index("twine check")
+    assert wheel < twine
+    assert sdist < twine
+
+
 def test_production_workflow_promotes_without_rebuilding() -> None:
     text = RELEASE_WORKFLOWS[1].read_text(encoding="utf-8")
     assert "candidate_run_id" in text

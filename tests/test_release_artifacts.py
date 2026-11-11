@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+import base64
+import csv
+import hashlib
 import importlib.util
 import io
 import json
+import stat
 import sys
 import tarfile
 import zipfile
@@ -22,6 +26,41 @@ def _load_release_module() -> ModuleType:
 
 
 release = _load_release_module()
+
+
+def _record_digest(payload: bytes) -> str:
+    encoded = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).rstrip(b"=")
+    return f"sha256={encoded.decode()}"
+
+
+def _write_normalizable_wheel(path: Path, *, mode: int, reverse: bool) -> None:
+    record_name = "demo-1.0.0.dist-info/RECORD"
+    payloads = {
+        "demo/__init__.py": b'__version__ = "1.0.0"\n',
+        "demo-1.0.0.dist-info/METADATA": (
+            b"Metadata-Version: 2.4\nName: demo\nVersion: 1.0.0\n\n"
+        ),
+        "demo-1.0.0.dist-info/WHEEL": (
+            b"Wheel-Version: 1.0\nTag: py3-none-any\nRoot-Is-Purelib: true\n\n"
+        ),
+    }
+    rows = [
+        (name, _record_digest(payload), str(len(payload)))
+        for name, payload in payloads.items()
+    ]
+    rows.append((record_name, "", ""))
+    record = io.StringIO(newline="")
+    csv.writer(record, lineterminator="\n").writerows(rows)
+    payloads[record_name] = record.getvalue().encode()
+    names = list(payloads)
+    if reverse:
+        names.reverse()
+    with zipfile.ZipFile(path, "w") as archive:
+        for name in names:
+            info = zipfile.ZipInfo(name, date_time=(2024, 1, 2, 3, 4, 4))
+            info.create_system = 3
+            info.external_attr = (stat.S_IFREG | mode) << 16
+            archive.writestr(info, payloads[name])
 
 
 def _write_workerbee_wheel(path: Path, *, extra_member: tuple[str, str] | None = None) -> None:
@@ -354,6 +393,73 @@ def test_sdist_normalization_is_deterministic(tmp_path: Path) -> None:
     release.normalize_sdist(second, 1_700_000_000)
 
     assert first.read_bytes() == second.read_bytes()
+
+
+def test_wheel_normalization_canonicalizes_modes_order_timestamp_and_record(
+    tmp_path: Path,
+) -> None:
+    first = tmp_path / "first.whl"
+    second = tmp_path / "second.whl"
+    _write_normalizable_wheel(first, mode=0o664, reverse=False)
+    _write_normalizable_wheel(second, mode=0o644, reverse=True)
+
+    release.normalize_wheel(first, 1_700_000_001)
+    release.normalize_wheel(second, 1_700_000_001)
+
+    assert first.read_bytes() == second.read_bytes()
+    with zipfile.ZipFile(first) as archive:
+        assert archive.namelist() == sorted(archive.namelist(), key=str.encode)
+        assert all(
+            stat.S_IMODE(info.external_attr >> 16) == 0o644
+            for info in archive.infolist()
+        )
+        assert all(info.create_system == 3 for info in archive.infolist())
+        assert len({info.date_time for info in archive.infolist()}) == 1
+        rows = list(
+            csv.reader(
+                io.StringIO(
+                    archive.read("demo-1.0.0.dist-info/RECORD").decode("utf-8")
+                )
+            )
+        )
+        assert [row[0] for row in rows[:-1]] == sorted(
+            (row[0] for row in rows[:-1]), key=str.encode
+        )
+        assert rows[-1] == ["demo-1.0.0.dist-info/RECORD", "", ""]
+
+
+def test_sdist_normalization_canonicalizes_equivalent_source_modes(tmp_path: Path) -> None:
+    def write(path: Path, *, regular_mode: int, executable_mode: int) -> None:
+        with tarfile.open(path, "w:gz") as archive:
+            directory = tarfile.TarInfo("demo-1.0.0/scripts")
+            directory.type = tarfile.DIRTYPE
+            directory.mode = executable_mode
+            archive.addfile(directory)
+            for name, payload, mode in (
+                ("demo-1.0.0/data.txt", b"data\n", regular_mode),
+                ("demo-1.0.0/scripts/run.sh", b"#!/bin/sh\n", executable_mode),
+            ):
+                info = tarfile.TarInfo(name)
+                info.size = len(payload)
+                info.mode = mode
+                archive.addfile(info, io.BytesIO(payload))
+
+    first = tmp_path / "first.tar.gz"
+    second = tmp_path / "second.tar.gz"
+    write(first, regular_mode=0o664, executable_mode=0o775)
+    write(second, regular_mode=0o644, executable_mode=0o755)
+
+    release.normalize_sdist(first, 1_700_000_001)
+    release.normalize_sdist(second, 1_700_000_001)
+
+    assert first.read_bytes() == second.read_bytes()
+    with tarfile.open(first, "r:gz") as archive:
+        modes = {member.name: member.mode for member in archive.getmembers()}
+    assert modes == {
+        "demo-1.0.0/data.txt": 0o644,
+        "demo-1.0.0/scripts": 0o755,
+        "demo-1.0.0/scripts/run.sh": 0o755,
+    }
 
 
 def test_json_audit_output_does_not_contain_secret_value(tmp_path: Path, capsys) -> None:

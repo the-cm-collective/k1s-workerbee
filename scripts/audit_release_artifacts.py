@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import configparser
+import csv
 import email
 import gzip
 import hashlib
+import io
 import json
 import re
 import stat
@@ -19,6 +22,7 @@ import uuid
 import zipfile
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
@@ -266,6 +270,88 @@ def _archive_names(path: Path) -> tuple[str, ...]:
     return (path.name,)
 
 
+def _wheel_record_digest(payload: bytes) -> str:
+    digest = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).rstrip(b"=")
+    return f"sha256={digest.decode('ascii')}"
+
+
+def _canonical_wheel_record(payloads: dict[str, bytes], record_name: str) -> bytes:
+    output = io.StringIO(newline="")
+    writer = csv.writer(output, lineterminator="\n")
+    for name in sorted((name for name in payloads if name != record_name), key=str.encode):
+        payload = payloads[name]
+        writer.writerow((name, _wheel_record_digest(payload), str(len(payload))))
+    writer.writerow((record_name, "", ""))
+    return output.getvalue().encode("utf-8")
+
+
+def normalize_wheel(path: Path, epoch: int) -> None:
+    """Rewrite a wheel with canonical order, metadata, modes, and RECORD."""
+
+    payloads: dict[str, bytes] = {}
+    try:
+        with zipfile.ZipFile(path) as source:
+            if source.comment:
+                raise ValueError("wheel archive comments are unsupported")
+            for info in source.infolist():
+                if not _safe_member(info.filename) or info.filename in payloads:
+                    raise ValueError(f"unsafe or duplicate wheel member: {info.filename}")
+                if info.is_dir() or info.flag_bits & 0x1:
+                    raise ValueError(f"unsupported wheel member: {info.filename}")
+                mode_type = stat.S_IFMT(info.external_attr >> 16)
+                if mode_type not in {0, stat.S_IFREG}:
+                    raise ValueError(f"non-regular wheel member: {info.filename}")
+                payloads[info.filename] = source.read(info)
+            source.testzip()
+    except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise ValueError(f"invalid wheel: {path}") from exc
+
+    record_names = [name for name in payloads if name.endswith(".dist-info/RECORD")]
+    if len(record_names) != 1:
+        raise ValueError(f"expected one wheel RECORD, found {record_names!r}")
+    record_name = record_names[0]
+    payloads[record_name] = _canonical_wheel_record(payloads, record_name)
+
+    zip_epoch = epoch - (epoch % 2)
+    timestamp = datetime.fromtimestamp(zip_epoch, tz=UTC)
+    if not 1980 <= timestamp.year <= 2107:
+        raise ValueError("wheel epoch is outside the ZIP timestamp range")
+    date_time = (
+        timestamp.year,
+        timestamp.month,
+        timestamp.day,
+        timestamp.hour,
+        timestamp.minute,
+        timestamp.second,
+    )
+    temporary = path.with_name(f".{path.name}.normalized")
+    try:
+        with zipfile.ZipFile(
+            temporary,
+            "w",
+            compression=zipfile.ZIP_DEFLATED,
+            compresslevel=9,
+            strict_timestamps=True,
+        ) as target:
+            for name in sorted(payloads, key=str.encode):
+                info = zipfile.ZipInfo(name, date_time=date_time)
+                info.create_system = 3
+                info.compress_type = zipfile.ZIP_DEFLATED
+                info.external_attr = (stat.S_IFREG | 0o644) << 16
+                info.internal_attr = 0
+                info.extra = b""
+                info.comment = b""
+                target.writestr(
+                    info,
+                    payloads[name],
+                    compress_type=zipfile.ZIP_DEFLATED,
+                    compresslevel=9,
+                )
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def normalize_sdist(path: Path, epoch: int) -> None:
     """Rewrite a setuptools sdist with stable tar and gzip metadata."""
 
@@ -287,6 +373,7 @@ def normalize_sdist(path: Path, epoch: int) -> None:
             member.uname = ""
             member.gname = ""
             member.pax_headers = {}
+            member.mode = 0o755 if member.isdir() or member.mode & 0o111 else 0o644
             stream = source.extractfile(member) if member.isfile() else None
             target.addfile(member, stream)
     temporary.replace(path)
@@ -776,6 +863,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     normalize = subparsers.add_parser("normalize-sdist")
     normalize.add_argument("--epoch", required=True, type=int)
     normalize.add_argument("sdist", type=Path)
+    normalize_wheel_parser = subparsers.add_parser("normalize-wheel")
+    normalize_wheel_parser.add_argument("--epoch", required=True, type=int)
+    normalize_wheel_parser.add_argument("wheel", type=Path)
     verify = subparsers.add_parser("verify-manifest")
     verify.add_argument("--manifest", required=True, type=Path)
     verify.add_argument("--directory", required=True, type=Path)
@@ -839,6 +929,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "normalize-sdist":
         normalize_sdist(args.sdist, args.epoch)
         print(args.sdist)
+        return 0
+    if args.command == "normalize-wheel":
+        normalize_wheel(args.wheel, args.epoch)
+        print(args.wheel)
         return 0
     if args.command == "verify-manifest":
         return _print_errors(verify_manifest(args.manifest, args.directory))
