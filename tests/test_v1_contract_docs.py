@@ -33,7 +33,7 @@ def test_consolidated_v1_contract_covers_public_operator_surface() -> None:
         'source_mode="native-direct"',
         'execution_lane="native-local"',
         "mcp>=1.8,<2",
-        "k1s-core==1.0.0rc2",
+        "k1s-core==1.0.0",
         "published provider artifact",
         "workerbee_v1_readiness_receipt",
         "configured, measured, and unknown",
@@ -67,7 +67,7 @@ def test_readme_and_sdist_expose_the_public_v1_contract() -> None:
     assert "workerbee-install/releases" in readme
     assert "docs/wiki/WorkerBee-v1.md" in readme
     assert "v1 alpha" not in readme.lower()
-    assert "'k1s-workerbee==1.0.0rc2'" in readme
+    assert "'k1s-workerbee==1.0.0'" in readme
     assert "PIP_NO_INDEX=1 PIP_CONFIG_FILE=/dev/null" in readme
 
     for image in (
@@ -76,7 +76,7 @@ def test_readme_and_sdist_expose_the_public_v1_contract() -> None:
     ):
         assert (
             "https://raw.githubusercontent.com/the-cm-collective/"
-            f"k1s-workerbee/dev/{image}" in readme
+                f"k1s-workerbee/v1.0.0/{image}" in readme
         )
     assert 'src="docs/assets/' not in readme
 
@@ -185,18 +185,18 @@ def test_public_claim_boundaries_distinguish_contract_from_qualification() -> No
         assert contract in normalized
 
 
-def test_release_docs_record_exact_published_k1s_rc2_checkpoint() -> None:
+def test_release_docs_record_exact_published_k1s_stable_checkpoint() -> None:
     text = Path("docs/releasing.md").read_text(encoding="utf-8")
     normalized = " ".join(text.split())
 
-    assert "### Accepted `k1s-core==1.0.0rc2` checkpoint" in text
+    assert "### Accepted stable `k1s-core==1.0.0` checkpoint" in text
     assert '--workerbee-wheel "$WORKERBEE_WHEEL"' in text
     for identity in (
-        "4d91576326105fbe8a62c1dc5c01c6d5cfdca460",
-        "ba22d40066f0cade372e0105fff1ec0f6fd5e953",
-        "k1s_core-1.0.0rc2-py3-none-any.whl",
-        "1057577",
-        "2affbd3fbb086a847a01327c29c77c582b37d44b447e689f8b2ed9e5a5480699",
+        "047c601c0c8426f1dc4c6da579a80ccd175c55cb",
+        "2ef5e79791e9779180629e51db3974bba47e29b1",
+        "k1s_core-1.0.0-py3-none-any.whl",
+        "1057377",
+        "1208552881446eb7b4fdefd27a22ca2f79f70fb851445bebf0a17273a507724f",
         "published",
     ):
         assert identity in normalized
@@ -243,10 +243,10 @@ def test_installed_consumer_qualification_is_copyable_and_evidence_bounded() -> 
         '--workerbee-sha256 "$WORKERBEE_SHA256"',
         '--workerbee-source-commit "$WORKERBEE_SOURCE_COMMIT"',
         '--workerbee-source-tree "$WORKERBEE_SOURCE_TREE"',
-        "--k1s-size 1057577",
-        "--k1s-sha256 2affbd3fbb086a847a01327c29c77c582b37d44b447e689f8b2ed9e5a5480699",
-        "--k1s-source-commit 4d91576326105fbe8a62c1dc5c01c6d5cfdca460",
-        "--k1s-source-tree ba22d40066f0cade372e0105fff1ec0f6fd5e953",
+        "--k1s-size 1057377",
+        "--k1s-sha256 1208552881446eb7b4fdefd27a22ca2f79f70fb851445bebf0a17273a507724f",
+        "--k1s-source-commit 047c601c0c8426f1dc4c6da579a80ccd175c55cb",
+        "--k1s-source-tree 2ef5e79791e9779180629e51db3974bba47e29b1",
         "--runs 2",
     ):
         assert command_field in text

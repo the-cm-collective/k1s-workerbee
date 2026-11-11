@@ -145,7 +145,7 @@ def test_command_summaries_require_read_only_and_same_runtime() -> None:
             "evidence": {"kind": "WorkerBeeProfileEvidence", "operation": "list"},
             "diagnostics": {
                 "provider_distribution": "k1s-core",
-                "provider_version": "1.0.0rc2",
+                "provider_version": "1.0.0",
                 "same_runtime": True,
             },
         },
@@ -163,7 +163,7 @@ def test_command_summaries_require_read_only_and_same_runtime() -> None:
                 "evidence": {"operation": "list"},
                 "diagnostics": {
                     "provider_distribution": "k1s-core",
-                    "provider_version": "1.0.0rc2",
+                    "provider_version": "1.0.0",
                     "same_runtime": False,
                 },
             },

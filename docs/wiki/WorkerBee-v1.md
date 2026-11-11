@@ -7,11 +7,11 @@ contract remains [the WorkerBee v1 public contract](../v1-contract.md).
 
 ## Release status
 
-The current candidate is `k1s-workerbee==1.0.0rc1` with the exact dependency
-`k1s-core==1.0.0rc1`. The accepted artifacts have deterministic local and
-strict-offline qualification, but the release contract still marks the provider
-`temporary-nonpublished`. The stable public installer therefore remains on
-WorkerBee `0.1.7` until package-index publication is separately authorized.
+The stable release is `k1s-workerbee==1.0.0` with the exact published
+dependency `k1s-core==1.0.0`. The release contract binds the provider wheel by
+filename, size, and SHA-256 and requires deterministic artifact construction,
+strict offline installation, and exactly one installed owner of the `ae`
+package.
 
 ## Install choices
 
@@ -24,7 +24,7 @@ python3.11 -m venv .venv
 PIP_NO_INDEX=1 PIP_CONFIG_FILE=/dev/null \
   python -m pip install --no-index \
   --find-links /path/to/workerbee-wheelhouse \
-  'k1s-workerbee==1.0.0rc1'
+  'k1s-workerbee==1.0.0'
 python -m pip check
 workerbee doctor
 ```
@@ -56,7 +56,7 @@ legacy `k1s-workerbee-runtime` provider or fall back to a package index. See the
 
 ## Evidence boundary
 
-The accepted C2 lane installed the exact WorkerBee and K1s RC wheels twice from
+The accepted C2 lane installed the exact WorkerBee and K1s release wheels twice from
 one sealed 46-wheel set with `PIP_NO_INDEX=1`, `PIP_CONFIG_FILE=/dev/null`, and
 explicit `--no-index`. Both runs occurred outside the source checkouts, proved
 that neither checkout was importable, resolved package metadata and imports

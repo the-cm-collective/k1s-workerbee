@@ -3,7 +3,7 @@
 WorkerBee consumes the installed public contract of the exact declared
 `k1s-core` distribution. It does not copy K1s implementation, discover an
 ambient checkout, or infer behavior from an uncommitted K1s tree. The current
-release contract is `k1s-core==1.0.0rc2`; changing that identity is a separate
+release contract is `k1s-core==1.0.0`; changing that identity is a separate
 coordinated release decision.
 
 The WorkerBee-owned descriptor is
@@ -122,16 +122,16 @@ checkout is importable from the fresh environments:
 python3.11 scripts/qualify_installed_consumer.py \
   --python "$(command -v python3.11)" \
   --wheelhouse "$WHEELHOUSE" \
-  --workerbee-wheel "$WHEELHOUSE/k1s_workerbee-1.0.0rc2-py3-none-any.whl" \
+  --workerbee-wheel "$WHEELHOUSE/k1s_workerbee-1.0.0-py3-none-any.whl" \
   --workerbee-size "$WORKERBEE_SIZE" \
   --workerbee-sha256 "$WORKERBEE_SHA256" \
   --workerbee-source-commit "$WORKERBEE_SOURCE_COMMIT" \
   --workerbee-source-tree "$WORKERBEE_SOURCE_TREE" \
-  --k1s-wheel "$WHEELHOUSE/k1s_core-1.0.0rc2-py3-none-any.whl" \
-  --k1s-size 1057577 \
-  --k1s-sha256 2affbd3fbb086a847a01327c29c77c582b37d44b447e689f8b2ed9e5a5480699 \
-  --k1s-source-commit 4d91576326105fbe8a62c1dc5c01c6d5cfdca460 \
-  --k1s-source-tree ba22d40066f0cade372e0105fff1ec0f6fd5e953 \
+  --k1s-wheel "$WHEELHOUSE/k1s_core-1.0.0-py3-none-any.whl" \
+  --k1s-size 1057377 \
+  --k1s-sha256 1208552881446eb7b4fdefd27a22ca2f79f70fb851445bebf0a17273a507724f \
+  --k1s-source-commit 047c601c0c8426f1dc4c6da579a80ccd175c55cb \
+  --k1s-source-tree 2ef5e79791e9779180629e51db3974bba47e29b1 \
   --workerbee-source-root "$WORKERBEE_SOURCE_ROOT" \
   --k1s-source-root "$K1S_SOURCE_ROOT" \
   --run-root "$OWNER_PRIVATE_RUN_ROOT" \

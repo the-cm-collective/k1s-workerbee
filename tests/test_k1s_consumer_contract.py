@@ -24,7 +24,7 @@ def test_contract_is_versioned_bounded_and_matches_exact_provider() -> None:
 
     assert contract["schema"] == CONTRACT_SCHEMA
     assert contract["version"] == 1
-    assert contract["provider_requirement"] == "k1s-core==1.0.0rc2"
+    assert contract["provider_requirement"] == "k1s-core==1.0.0"
     assert contract["qualification_posture"] == "source-validated/unqualified"
     assert len(encoded) < 16 * 1024
     assert not ({"environment", "executable", "path", "credential"} & set(contract))

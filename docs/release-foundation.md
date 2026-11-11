@@ -108,6 +108,22 @@ provider status is therefore `published`; its own publication still requires
 independent deterministic builds, installed-consumer qualification, protected
 environment review, and exact-byte TestPyPI-to-PyPI promotion.
 
+## Stable 1.0 published-provider checkpoint
+
+Stable WorkerBee `1.0.0` binds the published `k1s-core==1.0.0` provider from
+source commit `047c601c0c8426f1dc4c6da579a80ccd175c55cb`, tree
+`2ef5e79791e9779180629e51db3974bba47e29b1`. The exact provider wheel is
+`k1s_core-1.0.0-py3-none-any.whl`, size `1057377`, SHA256
+`1208552881446eb7b4fdefd27a22ca2f79f70fb851445bebf0a17273a507724f`.
+Its normalized source distribution is `k1s_core-1.0.0.tar.gz`, size `978158`,
+SHA256 `92744149ac25625f627db7b06ce75853eb3da274f82a6135e8f36d89adfceba6`.
+
+K1s TestPyPI run `43119549839` built, verified, attested, and published the
+canonical bundle. Production run `43119935798` promoted those exact bytes to
+PyPI without rebuilding. Stable WorkerBee preserves all RC2 live-evidence
+limits and runs its own independent deterministic, installed-consumer, and
+exact-promotion gates before publication.
+
 ## Host-safety boundary
 
 The Gitea integration and GitHub promotion gates run source-only tests. They do

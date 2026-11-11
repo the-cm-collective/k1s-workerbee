@@ -24,12 +24,12 @@ from typing import Any, NoReturn
 
 RECEIPT_SCHEMA = "workerbee.installed-consumer-qualification/v1"
 AGGREGATE_SCHEMA = "workerbee.installed-consumer-qualification-set/v1"
-WORKERBEE_VERSION = "1.0.0rc2"
-K1S_VERSION = "1.0.0rc2"
-WORKERBEE_WHEEL_NAME = "k1s_workerbee-1.0.0rc2-py3-none-any.whl"
-K1S_WHEEL_NAME = "k1s_core-1.0.0rc2-py3-none-any.whl"
+WORKERBEE_VERSION = "1.0.0"
+K1S_VERSION = "1.0.0"
+WORKERBEE_WHEEL_NAME = "k1s_workerbee-1.0.0-py3-none-any.whl"
+K1S_WHEEL_NAME = "k1s_core-1.0.0-py3-none-any.whl"
 K1S_WHEEL_SIZE = 1_057_577
-K1S_WHEEL_SHA256 = "2affbd3fbb086a847a01327c29c77c582b37d44b447e689f8b2ed9e5a5480699"
+K1S_WHEEL_SHA256 = "1208552881446eb7b4fdefd27a22ca2f79f70fb851445bebf0a17273a507724f"
 MAX_WHEEL_BYTES = 128 * 1024 * 1024
 MAX_STDOUT_BYTES = 256 * 1024
 MAX_STDERR_BYTES = 16 * 1024
@@ -314,11 +314,11 @@ owners = sorted(metadata.packages_distributions().get("ae", []))
 if owners != ["k1s-core"]:
     raise SystemExit("unexpected-ae-provider")
 requirements = sorted(metadata.requires("k1s-workerbee") or [])
-if "k1s-core==1.0.0rc2" not in requirements:
+if "k1s-core==1.0.0" not in requirements:
     raise SystemExit("inexact-provider-requirement")
 
 contract = k1s_v1_consumer_contract()
-if contract["provider_requirement"] != "k1s-core==1.0.0rc2":
+if contract["provider_requirement"] != "k1s-core==1.0.0":
     raise SystemExit("consumer-provider-mismatch")
 if contract["workerbee_profile_evidence"]["public_operations"] != list(PUBLIC_OPERATIONS):
     raise SystemExit("consumer-operation-mismatch")

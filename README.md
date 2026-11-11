@@ -1,14 +1,12 @@
 # K1S WorkerBee MCP
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/the-cm-collective/k1s-workerbee/dev/docs/assets/k1s-workerbee-hero.jpg" alt="K1S WorkerBee" width="640">
-</p>
+![K1S WorkerBee](https://raw.githubusercontent.com/the-cm-collective/k1s-workerbee/v1.0.0/docs/assets/k1s-workerbee-hero.jpg)
 
 WorkerBee is a local MCP workbench that gives coding agents a project-scoped
 k1s-powered app engine for building, deploying, probing, and exporting
 cloud-native applications on a developer machine.
 
-WorkerBee `1.0.0rc2` uses the exact published `k1s-core==1.0.0rc2` wheel for its
+WorkerBee `1.0.0` uses the exact published `k1s-core==1.0.0` wheel for its
 release lane. An explicitly selected sibling `../k1s` checkout remains a source
 development option and is never substituted into release qualification. The
 default workflow uses Podman or Docker for ordinary app validation. Advanced
@@ -27,9 +25,7 @@ basic security posture, and export handoff artifacts.
 The short version: you keep editing in your repo, and WorkerBee gives the agent
 a bounded build-deploy-check-export workbench around that repo.
 
-<p align="center">
-  <img src="https://raw.githubusercontent.com/the-cm-collective/k1s-workerbee/dev/docs/assets/how-workerbee-works-v0.png" alt="How WorkerBee works" width="760">
-</p>
+![How WorkerBee works](https://raw.githubusercontent.com/the-cm-collective/k1s-workerbee/v1.0.0/docs/assets/how-workerbee-works-v0.png)
 
 ## Capabilities
 
@@ -66,17 +62,16 @@ a bounded build-deploy-check-export workbench around that repo.
 
 ## Quickstart
 
-WorkerBee `1.0.0rc2` is the current release candidate. Its exact
-`k1s-core==1.0.0rc2` dependency is published on PyPI and TestPyPI with bytes
-matching the reviewed K1s artifact. The `latest` GitHub Release remains the
-stable `0.1.7` lane until WorkerBee RC2 publication and release review finish.
+WorkerBee `1.0.0` is the current stable release. Its exact
+`k1s-core==1.0.0` dependency is published on PyPI and TestPyPI with bytes
+matching the reviewed K1s artifact.
 
-Install the release candidate from PyPI with an explicit prerelease pin:
+Install the stable release from PyPI:
 
 ```bash
 python3.11 -m venv .venv
 . .venv/bin/activate
-python -m pip install 'k1s-workerbee==1.0.0rc2'
+python -m pip install 'k1s-workerbee==1.0.0'
 workerbee doctor
 ```
 
@@ -92,7 +87,7 @@ python3.11 -m venv .venv
 PIP_NO_INDEX=1 PIP_CONFIG_FILE=/dev/null \
   python -m pip install --no-index \
   --find-links /path/to/workerbee-wheelhouse \
-  'k1s-workerbee==1.0.0rc2'
+  'k1s-workerbee==1.0.0'
 python -m pip check
 workerbee doctor
 ```
@@ -114,7 +109,7 @@ curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/latest/do
 To pin this stable release directly, use the release tag:
 
 ```bash
-curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/download/v0.1.7/install-workerbee.sh | sh
+curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/download/v1.0.0/install-workerbee.sh | sh
 ```
 
 Dev-channel candidates should also use an explicit tag so the installer does
@@ -834,7 +829,7 @@ Shared host containerd is still a privileged development mode. WorkerBee avoids 
 Other MCP clients can connect to the same Streamable HTTP endpoint if they
 support HTTP MCP. For example, Claude Code documents
 `claude mcp add --transport http workerbee http://127.0.0.1:8765/mcp`; Codex is
-the currently tested target for the WorkerBee v1 release-candidate lane.
+the currently tested target for the WorkerBee v1 stable lane.
 
 Uninstall standalone WorkerBee:
 
@@ -846,7 +841,7 @@ If installed into an active venv, uninstall with `python -m pip uninstall k1s-wo
 
 ## macOS Notes
 
-macOS support is best effort for the v1 release-candidate lane, with Docker
+macOS support is best effort for the v1 stable lane, with Docker
 Desktop as the recommended runtime for the default WorkerBee app workflow.
 Install Python 3.11 or newer, install Docker Desktop, start Docker Desktop, and
 confirm the Docker CLI works:
@@ -866,7 +861,7 @@ workerbee doctor
 
 To pin a specific release or dev-channel candidate, replace
 `/releases/latest/download/` with an explicit release tag path, such as
-`/releases/download/v0.1.7/`.
+`/releases/download/v1.0.0/`.
 
 The installer uses an active virtual environment when one is enabled. Without an
 active venv, it uses the same validated, versioned release layout under

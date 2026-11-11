@@ -6,17 +6,17 @@ import `ae`.
 
 ## Current provider lane
 
-The WorkerBee `1.0.0rc2` lane requires the published exact-byte
-`k1s-core==1.0.0rc2` provider. Its source identity is commit
-`4d91576326105fbe8a62c1dc5c01c6d5cfdca460`, tree
-`ba22d40066f0cade372e0105fff1ec0f6fd5e953`. The exact wheel is
-`k1s_core-1.0.0rc2-py3-none-any.whl`, size `1057577`, SHA256
-`2affbd3fbb086a847a01327c29c77c582b37d44b447e689f8b2ed9e5a5480699`.
-The normalized sdist is `k1s_core-1.0.0rc2.tar.gz`, size `978593`, SHA256
-`2628101ee4269ee465bdacce1d254680df86fad17f714fb501c0f283f855922b`.
-The K1s RC2 evidence records two byte-identical local builds and strict
-installed validation. GitHub TestPyPI run `43108928300` built and attested the
-canonical bundle, and production run `43109495393` promoted those exact bytes
+The WorkerBee `1.0.0` lane requires the published exact-byte
+`k1s-core==1.0.0` provider. Its source identity is commit
+`047c601c0c8426f1dc4c6da579a80ccd175c55cb`, tree
+`2ef5e79791e9779180629e51db3974bba47e29b1`. The exact wheel is
+`k1s_core-1.0.0-py3-none-any.whl`, size `1057377`, SHA256
+`1208552881446eb7b4fdefd27a22ca2f79f70fb851445bebf0a17273a507724f`.
+The normalized sdist is `k1s_core-1.0.0.tar.gz`, size `978158`, SHA256
+`92744149ac25625f627db7b06ce75853eb3da274f82a6135e8f36d89adfceba6`.
+The K1s stable source passed the full suite and retained the qualified RC2 live
+evidence boundary. GitHub TestPyPI run `43119549839` built and attested the
+canonical bundle, and production run `43119935798` promoted those exact bytes
 without rebuilding. PyPI and TestPyPI expose the wheel and source distribution
 with the identities above.
 
@@ -37,13 +37,13 @@ contract and artifact check also passes; a future temporary provider would
 close the gate again. The contract continues to record `0.1.7` as the immutable
 already-published WorkerBee baseline.
 
-### Accepted `k1s-core==1.0.0rc2` checkpoint
+### Accepted stable `k1s-core==1.0.0` checkpoint
 
 The accepted dependency checkpoint updates these version-bearing paths:
 
 - `pyproject.toml` and `src/workerbee/runtime_provider.py` bind the exact pin,
   filename, size, SHA256, and published status;
-- `scripts/build_wheelhouse.sh` emits the exact provider and WorkerBee RC pins;
+- `scripts/build_wheelhouse.sh` emits the exact provider and WorkerBee stable pins;
 - `CHANGELOG.md`, `docs/release-foundation.md`, `docs/releasing.md`, and
   `docs/v1-contract.md` record current authority and claim boundaries; and
 - `tests/test_installer.py`, `tests/test_package_entrypoints.py`,
@@ -54,7 +54,7 @@ The accepted dependency checkpoint updates these version-bearing paths:
 The contract-driven `scripts/audit_release_artifacts.py`,
 `scripts/install-workerbee.sh`, and `src/workerbee/profile_evidence.py` require
 no version-specific source edit. README and release documentation are aligned
-to the current candidate. The version-neutral
+to the stable release. The version-neutral
 `.gitea/workflows/integration.yml`, `.github/workflows/promote-main.yml`,
 `.github/workflows/release-testpypi.yml`, and
 `.github/workflows/release-pypi.yml` remain unchanged and retain their existing
@@ -62,10 +62,10 @@ authority split and no-index/fail-closed gates.
 
 Every previous WorkerBee candidate bundle is superseded. Rebuild and reseal:
 
-- `k1s_workerbee-1.0.0rc2-py3-none-any.whl` and
-  `k1s_workerbee-1.0.0rc2.tar.gz`;
+- `k1s_workerbee-1.0.0-py3-none-any.whl` and
+  `k1s_workerbee-1.0.0.tar.gz`;
 - candidate `SBOM.cdx.json` and `RELEASE-MANIFEST.json`;
-- the accepted `k1s_core-1.0.0rc2-py3-none-any.whl` plus exact transitive
+- the accepted `k1s_core-1.0.0-py3-none-any.whl` plus exact transitive
   dependency wheels;
 - wheelhouse `INSTALL.txt`, `SBOM.cdx.json`, and `RELEASE-MANIFEST.json`; and
 - normalized `workerbee-wheelhouse.tar.gz` plus external `SHA256SUMS` covering
@@ -103,7 +103,7 @@ and produce byte-identical canonical run receipts. This proves installed
 consumer compatibility only; it does not qualify profiles, providers,
 strict-CRI host mutation, or production fitness.
 
-Creating or pushing the reviewed `v1.0.0rc2` source tag does not publish either
+Creating or pushing the reviewed `v1.0.0` source tag does not publish either
 Python distribution. Package-index publication remains a separate, gated OIDC
 decision.
 
@@ -133,7 +133,7 @@ supported environment-local path:
 python3.11 -m venv /path/to/fresh-venv
 /path/to/fresh-venv/bin/python -m pip install \
   --no-index --find-links /path/to/workerbee-wheelhouse \
-  'k1s-workerbee==1.0.0rc2'
+  'k1s-workerbee==1.0.0'
 /path/to/fresh-venv/bin/python -m pip check
 ```
 

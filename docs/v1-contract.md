@@ -30,7 +30,7 @@ operator, access-profile, or instruction-injection behavior.
 ## Compatibility
 
 WorkerBee v1 requires Python 3.11 or newer and `mcp>=1.8,<2`. The current
-provider contract is exactly `k1s-core==1.0.0rc2`, while the compatibility
+provider contract is exactly `k1s-core==1.0.0`, while the compatibility
 import remains `ae`. That published provider artifact is bound by filename,
 size, and SHA256 in the release contract. PyPI and TestPyPI serve the same
 reviewed wheel bytes; a later provider rebind requires another coordinated
@@ -78,7 +78,7 @@ environment-local installation:
 PIP_NO_INDEX=1 PIP_CONFIG_FILE=/dev/null \
   python -m pip install --no-index \
   --find-links /path/to/workerbee-wheelhouse \
-  'k1s-workerbee==1.0.0rc2'
+  'k1s-workerbee==1.0.0'
 ```
 
 This path does not provide the standalone installer's atomic launcher switch or
