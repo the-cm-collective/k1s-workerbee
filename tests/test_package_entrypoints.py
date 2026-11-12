@@ -30,9 +30,7 @@ def test_distribution_import_cli_and_mcp_identity_contract() -> None:
         "Repository": "https://github.com/the-cm-collective/k1s-workerbee",
         "Documentation": "https://github.com/the-cm-collective/k1s-workerbee/wiki",
         "Issues": "https://github.com/the-cm-collective/k1s-workerbee/issues",
-        "Changelog": (
-            "https://github.com/the-cm-collective/k1s-workerbee/blob/main/CHANGELOG.md"
-        ),
+        "Changelog": ("https://github.com/the-cm-collective/k1s-workerbee/blob/main/CHANGELOG.md"),
     }
 
 
@@ -46,7 +44,7 @@ def test_module_cli_entry_point_smoke() -> None:
     )
 
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == "workerbee 1.0.1"
+    assert proc.stdout.strip() == "workerbee 1.0.2"
 
 
 def test_mcp_serve_cli_entry_point_smoke() -> None:

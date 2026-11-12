@@ -3,6 +3,16 @@
 All notable WorkerBee changes are documented here. Earlier entries are best
 effort summaries reconstructed from release notes and git history.
 
+## v1.0.2 - 2026-11-12
+
+- Qualified the public Python package contract in parallel on Python 3.11,
+  3.12, and 3.13 in both Gitea integration and GitHub main-promotion checks.
+- Added matching Python Trove classifiers and release guards that reject a
+  built wheel when `Requires-Python` or the advertised classifier set drifts
+  from the qualified interpreter matrix.
+- Retained the exact `k1s-core==1.0.0` provider, package identities, runtime
+  behavior, MCP surface, installer, and offline wheelhouse contracts unchanged.
+
 ## v1.0.1 - 2026-11-12
 
 - Added public PyPI, repository, documentation, issue, and changelog links to
