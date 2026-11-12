@@ -67,8 +67,10 @@ def test_readme_and_sdist_expose_the_public_v1_contract() -> None:
     assert "workerbee-install/releases" in readme
     assert "docs/wiki/WorkerBee-v1.md" in readme
     assert "v1 alpha" not in readme.lower()
-    assert "'k1s-workerbee==1.0.0'" in readme
+    assert "'k1s-workerbee==1.0.1'" in readme
     assert "PIP_NO_INDEX=1 PIP_CONFIG_FILE=/dev/null" in readme
+    assert "https://pypi.org/project/k1s-workerbee/" in readme
+    assert "https://img.shields.io/pypi/v/k1s-workerbee.svg" in readme
 
     for image in (
         "docs/assets/k1s-workerbee-hero.jpg",

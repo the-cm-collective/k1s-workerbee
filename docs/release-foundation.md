@@ -124,6 +124,15 @@ PyPI without rebuilding. Stable WorkerBee preserves all RC2 live-evidence
 limits and runs its own independent deterministic, installed-consumer, and
 exact-promotion gates before publication.
 
+## Patch 1.0.1 metadata checkpoint
+
+WorkerBee `1.0.1` is a package-metadata and documentation-only forward patch.
+It adds public project links and PyPI badges while retaining the exact
+`k1s-core==1.0.0` provider identity, dependency closure, runtime behavior, MCP
+surface, installer contract, and release-artifact construction established by
+the stable 1.0 checkpoint. Its qualification lane remains deterministic and
+exact-byte, but it does not repeat deferred live runtime or host qualification.
+
 ## Host-safety boundary
 
 The Gitea integration and GitHub promotion gates run source-only tests. They do

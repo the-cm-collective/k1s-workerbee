@@ -78,7 +78,7 @@ environment-local installation:
 PIP_NO_INDEX=1 PIP_CONFIG_FILE=/dev/null \
   python -m pip install --no-index \
   --find-links /path/to/workerbee-wheelhouse \
-  'k1s-workerbee==1.0.0'
+  'k1s-workerbee==1.0.1'
 ```
 
 This path does not provide the standalone installer's atomic launcher switch or

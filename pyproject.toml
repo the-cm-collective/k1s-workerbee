@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "k1s-workerbee"
-version = "1.0.0"
+version = "1.0.1"
 description = "Local MCP workbench for k1s-powered cloud-native agent testing"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,6 +15,13 @@ dependencies = [
     "k1s-core==1.0.0",
     "mcp>=1.8,<2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/the-cm-collective/k1s-workerbee"
+Repository = "https://github.com/the-cm-collective/k1s-workerbee"
+Documentation = "https://github.com/the-cm-collective/k1s-workerbee/wiki"
+Issues = "https://github.com/the-cm-collective/k1s-workerbee/issues"
+Changelog = "https://github.com/the-cm-collective/k1s-workerbee/blob/main/CHANGELOG.md"
 
 [project.optional-dependencies]
 dev = [

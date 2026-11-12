@@ -122,7 +122,7 @@ checkout is importable from the fresh environments:
 python3.11 scripts/qualify_installed_consumer.py \
   --python "$(command -v python3.11)" \
   --wheelhouse "$WHEELHOUSE" \
-  --workerbee-wheel "$WHEELHOUSE/k1s_workerbee-1.0.0-py3-none-any.whl" \
+  --workerbee-wheel "$WHEELHOUSE/k1s_workerbee-1.0.1-py3-none-any.whl" \
   --workerbee-size "$WORKERBEE_SIZE" \
   --workerbee-sha256 "$WORKERBEE_SHA256" \
   --workerbee-source-commit "$WORKERBEE_SOURCE_COMMIT" \
