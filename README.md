@@ -1,12 +1,15 @@
 # K1S WorkerBee MCP
 
+[![PyPI](https://img.shields.io/pypi/v/k1s-workerbee.svg?label=PyPI)](https://pypi.org/project/k1s-workerbee/)
+[![Python](https://img.shields.io/pypi/pyversions/k1s-workerbee.svg)](https://pypi.org/project/k1s-workerbee/)
+
 ![K1S WorkerBee](https://raw.githubusercontent.com/the-cm-collective/k1s-workerbee/v1.0.0/docs/assets/k1s-workerbee-hero.jpg)
 
 WorkerBee is a local MCP workbench that gives coding agents a project-scoped
 k1s-powered app engine for building, deploying, probing, and exporting
 cloud-native applications on a developer machine.
 
-WorkerBee `1.0.0` uses the exact published `k1s-core==1.0.0` wheel for its
+WorkerBee `1.0.1` uses the exact published `k1s-core==1.0.0` wheel for its
 release lane. An explicitly selected sibling `../k1s` checkout remains a source
 development option and is never substituted into release qualification. The
 default workflow uses Podman or Docker for ordinary app validation. Advanced
@@ -62,7 +65,7 @@ a bounded build-deploy-check-export workbench around that repo.
 
 ## Quickstart
 
-WorkerBee `1.0.0` is the current stable release. Its exact
+WorkerBee `1.0.1` is the current stable release. Its exact
 `k1s-core==1.0.0` dependency is published on PyPI and TestPyPI with bytes
 matching the reviewed K1s artifact.
 
@@ -71,7 +74,7 @@ Install the stable release from PyPI:
 ```bash
 python3.11 -m venv .venv
 . .venv/bin/activate
-python -m pip install 'k1s-workerbee==1.0.0'
+python -m pip install 'k1s-workerbee==1.0.1'
 workerbee doctor
 ```
 
@@ -87,7 +90,7 @@ python3.11 -m venv .venv
 PIP_NO_INDEX=1 PIP_CONFIG_FILE=/dev/null \
   python -m pip install --no-index \
   --find-links /path/to/workerbee-wheelhouse \
-  'k1s-workerbee==1.0.0'
+  'k1s-workerbee==1.0.1'
 python -m pip check
 workerbee doctor
 ```
@@ -109,7 +112,7 @@ curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/latest/do
 To pin this stable release directly, use the release tag:
 
 ```bash
-curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/download/v1.0.0/install-workerbee.sh | sh
+curl -fsSL https://github.com/the-cm-collective/k1s-workerbee/releases/download/v1.0.1/install-workerbee.sh | sh
 ```
 
 Dev-channel candidates should also use an explicit tag so the installer does
@@ -861,7 +864,7 @@ workerbee doctor
 
 To pin a specific release or dev-channel candidate, replace
 `/releases/latest/download/` with an explicit release tag path, such as
-`/releases/download/v1.0.0/`.
+`/releases/download/v1.0.1/`.
 
 The installer uses an active virtual environment when one is enabled. Without an
 active venv, it uses the same validated, versioned release layout under

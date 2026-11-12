@@ -7,7 +7,7 @@ contract remains [the WorkerBee v1 public contract](../v1-contract.md).
 
 ## Release status
 
-The stable release is `k1s-workerbee==1.0.0` with the exact published
+The stable release is `k1s-workerbee==1.0.1` with the exact published
 dependency `k1s-core==1.0.0`. The release contract binds the provider wheel by
 filename, size, and SHA-256 and requires deterministic artifact construction,
 strict offline installation, and exactly one installed owner of the `ae`
@@ -24,7 +24,7 @@ python3.11 -m venv .venv
 PIP_NO_INDEX=1 PIP_CONFIG_FILE=/dev/null \
   python -m pip install --no-index \
   --find-links /path/to/workerbee-wheelhouse \
-  'k1s-workerbee==1.0.0'
+  'k1s-workerbee==1.0.1'
 python -m pip check
 workerbee doctor
 ```

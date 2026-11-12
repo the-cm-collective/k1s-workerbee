@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 import sys
+import tomllib
 from pathlib import Path
 from types import ModuleType
 
@@ -25,6 +26,16 @@ def _load_module() -> ModuleType:
 
 
 qualification = _load_module()
+
+
+def test_accepted_k1s_artifact_matches_release_contract() -> None:
+    release = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+        "tool"
+    ]["workerbee"]["release"]
+
+    assert release["runtime-provider-artifact"] == qualification.K1S_WHEEL_NAME
+    assert release["runtime-provider-size"] == qualification.K1S_WHEEL_SIZE
+    assert release["runtime-provider-sha256"] == qualification.K1S_WHEEL_SHA256
 
 
 def test_clean_environment_is_allowlisted_and_forces_offline_install(tmp_path: Path) -> None:

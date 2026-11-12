@@ -3,6 +3,14 @@
 All notable WorkerBee changes are documented here. Earlier entries are best
 effort summaries reconstructed from release notes and git history.
 
+## v1.0.1 - 2026-11-12
+
+- Added public PyPI, repository, documentation, issue, and changelog links to
+  the package metadata.
+- Added PyPI version and Python support badges to the packaged README.
+- Retained the exact `k1s-core==1.0.0` runtime provider and all v1.0.0 runtime,
+  MCP, installer, wheelhouse, and compatibility behavior unchanged.
+
 ## v1.0.0 - 2026-11-11
 
 - Promoted the qualified WorkerBee package, CLI, MCP, runtime-provider,
