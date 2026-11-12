@@ -24,9 +24,9 @@ from typing import Any, NoReturn
 
 RECEIPT_SCHEMA = "workerbee.installed-consumer-qualification/v1"
 AGGREGATE_SCHEMA = "workerbee.installed-consumer-qualification-set/v1"
-WORKERBEE_VERSION = "1.0.1"
+WORKERBEE_VERSION = "1.0.2"
 K1S_VERSION = "1.0.0"
-WORKERBEE_WHEEL_NAME = "k1s_workerbee-1.0.1-py3-none-any.whl"
+WORKERBEE_WHEEL_NAME = "k1s_workerbee-1.0.2-py3-none-any.whl"
 K1S_WHEEL_NAME = "k1s_core-1.0.0-py3-none-any.whl"
 K1S_WHEEL_SIZE = 1_057_377
 K1S_WHEEL_SHA256 = "1208552881446eb7b4fdefd27a22ca2f79f70fb851445bebf0a17273a507724f"

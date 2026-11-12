@@ -6,7 +6,7 @@ import `ae`.
 
 ## Current provider lane
 
-The WorkerBee `1.0.1` lane requires the published exact-byte
+The WorkerBee `1.0.2` lane requires the published exact-byte
 `k1s-core==1.0.0` provider. Its source identity is commit
 `047c601c0c8426f1dc4c6da579a80ccd175c55cb`, tree
 `2ef5e79791e9779180629e51db3974bba47e29b1`. The exact wheel is
@@ -30,6 +30,13 @@ local rebuild or an index-resolved wheel.
 The MCP SDK remains on `mcp>=1.8,<2` because WorkerBee's current server contract
 uses the 1.x `FastMCP` API. A 2.x migration must be a separate compatibility
 change rather than an implicit dependency upgrade.
+
+WorkerBee requires Python 3.11 or newer. Gitea integration and the GitHub
+dev-to-main review gate qualify Python 3.11, 3.12, and 3.13 in parallel. The
+project's Python Trove classifiers must name exactly those three versions; the
+workflow contract tests reject matrix/classifier drift, and the artifact audit
+checks both `Requires-Python` and those exact classifiers in built-wheel
+`METADATA` before publication.
 
 The K1s provider publication status is `published`. WorkerBee's
 `verify-publication-ready` gate can therefore advance only after every local
@@ -62,8 +69,8 @@ authority split and no-index/fail-closed gates.
 
 Every previous WorkerBee candidate bundle is superseded. Rebuild and reseal:
 
-- `k1s_workerbee-1.0.1-py3-none-any.whl` and
-  `k1s_workerbee-1.0.1.tar.gz`;
+- `k1s_workerbee-1.0.2-py3-none-any.whl` and
+  `k1s_workerbee-1.0.2.tar.gz`;
 - candidate `SBOM.cdx.json` and `RELEASE-MANIFEST.json`;
 - the accepted `k1s_core-1.0.0-py3-none-any.whl` plus exact transitive
   dependency wheels;
@@ -103,7 +110,7 @@ and produce byte-identical canonical run receipts. This proves installed
 consumer compatibility only; it does not qualify profiles, providers,
 strict-CRI host mutation, or production fitness.
 
-Creating or pushing the reviewed `v1.0.1` source tag does not publish either
+Creating or pushing the reviewed `v1.0.2` source tag does not publish either
 Python distribution. Package-index publication remains a separate, gated OIDC
 decision.
 
@@ -133,7 +140,7 @@ supported environment-local path:
 python3.11 -m venv /path/to/fresh-venv
 /path/to/fresh-venv/bin/python -m pip install \
   --no-index --find-links /path/to/workerbee-wheelhouse \
-  'k1s-workerbee==1.0.1'
+  'k1s-workerbee==1.0.2'
 /path/to/fresh-venv/bin/python -m pip check
 ```
 

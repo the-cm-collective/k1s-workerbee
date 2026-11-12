@@ -133,6 +133,16 @@ surface, installer contract, and release-artifact construction established by
 the stable 1.0 checkpoint. Its qualification lane remains deterministic and
 exact-byte, but it does not repeat deferred live runtime or host qualification.
 
+## Patch 1.0.2 Python metadata checkpoint
+
+WorkerBee `1.0.2` corrects public Python-version metadata without changing
+runtime behavior. The package continues to require Python 3.11 or newer and is
+qualified on Python 3.11, 3.12, and 3.13. The Trove classifiers, Gitea
+integration matrix, GitHub dev-to-main matrix, and built-wheel `METADATA` audit
+are one contract and are tested against drift. The release retains the exact
+published `k1s-core==1.0.0` provider and the existing deterministic,
+no-index, exactly-one-provider, and installed-consumer qualification gates.
+
 ## Host-safety boundary
 
 The Gitea integration and GitHub promotion gates run source-only tests. They do
