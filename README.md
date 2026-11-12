@@ -1,7 +1,7 @@
 # K1S WorkerBee MCP
 
-[![PyPI](https://img.shields.io/pypi/v/k1s-workerbee.svg?label=PyPI)](https://pypi.org/project/k1s-workerbee/)
-[![Python](https://img.shields.io/pypi/pyversions/k1s-workerbee.svg)](https://pypi.org/project/k1s-workerbee/)
+[![PyPI](https://img.shields.io/pypi/v/k1s-workerbee.svg?label=PyPI&cacheSeconds=300&release=1.0.2)](https://pypi.org/project/k1s-workerbee/)
+[![Python](https://img.shields.io/pypi/pyversions/k1s-workerbee.svg?cacheSeconds=300&release=1.0.2)](https://pypi.org/project/k1s-workerbee/)
 
 ![K1S WorkerBee](https://raw.githubusercontent.com/the-cm-collective/k1s-workerbee/v1.0.0/docs/assets/k1s-workerbee-hero.jpg)
 

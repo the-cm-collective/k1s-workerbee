@@ -196,6 +196,27 @@ Do not add API tokens, index passwords, `skip-existing`, automatic tag/release
 triggers, or a secondary dependency index. Repository environments and trusted
 publisher configuration are operator-managed and outside this source change.
 
+## Post-publication badge cache verification
+
+After the stable version's PyPI metadata is live, complete these public badge
+checks before declaring the release page verified:
+
+1. Change the `release=<version>` cache key on both README Shields image URLs
+   (PyPI version and Python versions), retaining `cacheSeconds=300`, the badge
+   labels, and the existing PyPI destinations.
+2. Fetch the two direct Shields URLs and require the published version and the
+   advertised Python versions to match the accepted PyPI metadata.
+3. From GitHub's rendered README, record the two superseded Camo object URLs.
+   Purge exactly those two objects through the authorized host lane; do not
+   perform a broad Camo purge or treat a source edit as a purge.
+4. Reload the rendered README on the green `main` commit and require both badge
+   values to match the direct Shields responses. Record the URLs, responses,
+   commit, and verification timestamp in the release evidence.
+
+Every future stable release must advance the `release` cache key only after its
+PyPI metadata is visible, even when the underlying Shields endpoints and badge
+destinations are unchanged.
+
 ## Rollback
 
 Before publication, discard the candidate bundle and fix the source; no package
