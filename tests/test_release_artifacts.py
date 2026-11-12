@@ -37,16 +37,13 @@ def _write_normalizable_wheel(path: Path, *, mode: int, reverse: bool) -> None:
     record_name = "demo-1.0.0.dist-info/RECORD"
     payloads = {
         "demo/__init__.py": b'__version__ = "1.0.0"\n',
-        "demo-1.0.0.dist-info/METADATA": (
-            b"Metadata-Version: 2.4\nName: demo\nVersion: 1.0.0\n\n"
-        ),
+        "demo-1.0.0.dist-info/METADATA": (b"Metadata-Version: 2.4\nName: demo\nVersion: 1.0.0\n\n"),
         "demo-1.0.0.dist-info/WHEEL": (
             b"Wheel-Version: 1.0\nTag: py3-none-any\nRoot-Is-Purelib: true\n\n"
         ),
     }
     rows = [
-        (name, _record_digest(payload), str(len(payload)))
-        for name, payload in payloads.items()
+        (name, _record_digest(payload), str(len(payload))) for name, payload in payloads.items()
     ]
     rows.append((record_name, "", ""))
     record = io.StringIO(newline="")
@@ -63,12 +60,24 @@ def _write_normalizable_wheel(path: Path, *, mode: int, reverse: bool) -> None:
             archive.writestr(info, payloads[name])
 
 
-def _write_workerbee_wheel(path: Path, *, extra_member: tuple[str, str] | None = None) -> None:
+def _write_workerbee_wheel(
+    path: Path,
+    *,
+    extra_member: tuple[str, str] | None = None,
+    requires_python: str = ">=3.11",
+    python_classifiers: tuple[str, ...] = (
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+    ),
+) -> None:
     metadata = "\n".join(
         (
             "Metadata-Version: 2.4",
             "Name: k1s-workerbee",
-            "Version: 1.0.1",
+            "Version: 1.0.2",
+            f"Requires-Python: {requires_python}",
+            *(f"Classifier: {classifier}" for classifier in python_classifiers),
             "Requires-Dist: k1s-core==1.0.0",
             "Requires-Dist: mcp>=1.8,<2",
             "",
@@ -83,9 +92,9 @@ def _write_workerbee_wheel(path: Path, *, extra_member: tuple[str, str] | None =
             "workerbee/runtime_provider.py",
         ):
             archive.writestr(member, "")
-        archive.writestr("k1s_workerbee-1.0.1.dist-info/METADATA", metadata)
+        archive.writestr("k1s_workerbee-1.0.2.dist-info/METADATA", metadata)
         archive.writestr(
-            "k1s_workerbee-1.0.1.dist-info/entry_points.txt",
+            "k1s_workerbee-1.0.2.dist-info/entry_points.txt",
             "[console_scripts]\nworkerbee = workerbee.cli:main\n",
         )
         if extra_member is not None:
@@ -124,7 +133,13 @@ def test_project_release_contract_is_consistent() -> None:
 
 def test_published_rc_provider_is_publication_ready(capsys) -> None:
     contract = release.load_contract()[0]
-    assert contract.version == "1.0.1"
+    assert contract.version == "1.0.2"
+    assert contract.requires_python == ">=3.11"
+    assert contract.python_classifiers == (
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+    )
     assert contract.runtime_provider_publication_status == "published"
     assert contract.published_baseline_version == "0.1.7"
     assert release.validate_publication_ready() == []
@@ -134,10 +149,27 @@ def test_published_rc_provider_is_publication_ready(capsys) -> None:
 
 
 def test_clean_wheel_passes_identity_and_hygiene_audit(tmp_path: Path) -> None:
-    wheel = tmp_path / "k1s_workerbee-1.0.1-py3-none-any.whl"
+    wheel = tmp_path / "k1s_workerbee-1.0.2-py3-none-any.whl"
     _write_workerbee_wheel(wheel)
 
     assert release.audit_artifacts([wheel]) == []
+
+
+def test_wheel_metadata_requires_exact_python_contract(tmp_path: Path) -> None:
+    wheel = tmp_path / "k1s_workerbee-1.0.2-py3-none-any.whl"
+    _write_workerbee_wheel(
+        wheel,
+        requires_python=">=3.12",
+        python_classifiers=(
+            "Programming Language :: Python :: 3.11",
+            "Programming Language :: Python :: 3.12",
+        ),
+    )
+
+    findings = release.audit_artifacts([wheel])
+
+    assert any(item.kind == "requires-python" for item in findings)
+    assert any(item.kind == "python-classifiers" for item in findings)
 
 
 def test_exact_runtime_artifact_identity_and_imports_are_enforced(
@@ -162,7 +194,7 @@ def test_exact_runtime_artifact_identity_and_imports_are_enforced(
 
 
 def test_wheelhouse_rejects_legacy_or_mixed_ae_providers(tmp_path: Path, monkeypatch) -> None:
-    workerbee = tmp_path / "k1s_workerbee-1.0.1-py3-none-any.whl"
+    workerbee = tmp_path / "k1s_workerbee-1.0.2-py3-none-any.whl"
     runtime = tmp_path / "k1s_core-1.0.0-py3-none-any.whl"
     _write_workerbee_wheel(workerbee)
     _write_runtime_wheel(runtime)
@@ -184,7 +216,7 @@ def test_wheelhouse_rejects_legacy_or_mixed_ae_providers(tmp_path: Path, monkeyp
 
 
 def test_wheel_secret_pattern_fails_audit(tmp_path: Path) -> None:
-    wheel = tmp_path / "k1s_workerbee-1.0.1-py3-none-any.whl"
+    wheel = tmp_path / "k1s_workerbee-1.0.2-py3-none-any.whl"
     _write_workerbee_wheel(
         wheel,
         extra_member=("workerbee/leak.txt", "pypi-" + "abcdefghijklmnopqrstuvwxyz012345"),
@@ -243,7 +275,7 @@ def test_manifest_can_verify_a_second_candidate_directory(tmp_path: Path) -> Non
 
 
 def test_deterministic_sbom_binds_exact_artifact_bytes(tmp_path: Path) -> None:
-    wheel = tmp_path / "k1s_workerbee-1.0.1-py3-none-any.whl"
+    wheel = tmp_path / "k1s_workerbee-1.0.2-py3-none-any.whl"
     _write_workerbee_wheel(wheel)
     first = tmp_path / "first.cdx.json"
     second = tmp_path / "second.cdx.json"
@@ -257,7 +289,7 @@ def test_deterministic_sbom_binds_exact_artifact_bytes(tmp_path: Path) -> None:
     assert first_payload["specVersion"] == "1.5"
     component = first_payload["components"][0]
     assert component["name"] == wheel.name
-    assert component["version"] == "1.0.1"
+    assert component["version"] == "1.0.2"
     assert component["hashes"] == [{"alg": "SHA-256", "content": release.sha256_file(wheel)}]
 
 
@@ -409,18 +441,11 @@ def test_wheel_normalization_canonicalizes_modes_order_timestamp_and_record(
     assert first.read_bytes() == second.read_bytes()
     with zipfile.ZipFile(first) as archive:
         assert archive.namelist() == sorted(archive.namelist(), key=str.encode)
-        assert all(
-            stat.S_IMODE(info.external_attr >> 16) == 0o644
-            for info in archive.infolist()
-        )
+        assert all(stat.S_IMODE(info.external_attr >> 16) == 0o644 for info in archive.infolist())
         assert all(info.create_system == 3 for info in archive.infolist())
         assert len({info.date_time for info in archive.infolist()}) == 1
         rows = list(
-            csv.reader(
-                io.StringIO(
-                    archive.read("demo-1.0.0.dist-info/RECORD").decode("utf-8")
-                )
-            )
+            csv.reader(io.StringIO(archive.read("demo-1.0.0.dist-info/RECORD").decode("utf-8")))
         )
         assert [row[0] for row in rows[:-1]] == sorted(
             (row[0] for row in rows[:-1]), key=str.encode
@@ -463,7 +488,7 @@ def test_sdist_normalization_canonicalizes_equivalent_source_modes(tmp_path: Pat
 
 
 def test_json_audit_output_does_not_contain_secret_value(tmp_path: Path, capsys) -> None:
-    wheel = tmp_path / "k1s_workerbee-1.0.1-py3-none-any.whl"
+    wheel = tmp_path / "k1s_workerbee-1.0.2-py3-none-any.whl"
     secret = "pypi-" + "abcdefghijklmnopqrstuvwxyz012345"  # noqa: S105 - synthetic fixture
     _write_workerbee_wheel(wheel, extra_member=("workerbee/leak.txt", secret))
 

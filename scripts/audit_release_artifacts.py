@@ -67,6 +67,8 @@ PRIVATE_PATH_PATTERN = re.compile(
 class ReleaseContract:
     distribution: str
     version: str
+    requires_python: str
+    python_classifiers: tuple[str, ...]
     published_baseline_version: str
     import_package: str
     cli_entry_point: str
@@ -107,6 +109,12 @@ def load_contract() -> tuple[ReleaseContract, dict[str, Any]]:
     contract = ReleaseContract(
         distribution=release["distribution"],
         version=project["version"],
+        requires_python=project["requires-python"],
+        python_classifiers=tuple(
+            classifier
+            for classifier in project.get("classifiers", ())
+            if classifier.startswith("Programming Language :: Python :: ")
+        ),
         published_baseline_version=release["published-baseline-version"],
         import_package=release["import-package"],
         cli_entry_point=release["cli-entry-point"],
@@ -131,6 +139,14 @@ def validate_project() -> list[str]:
         errors.append("project.name does not match the release distribution")
     if contract.published_baseline_version != "0.1.7":
         errors.append("the published baseline version receipt must remain 0.1.7")
+    if contract.requires_python != ">=3.11":
+        errors.append("the supported Python floor must remain >=3.11")
+    if contract.python_classifiers != (
+        "Programming Language :: Python :: 3.11",
+        "Programming Language :: Python :: 3.12",
+        "Programming Language :: Python :: 3.13",
+    ):
+        errors.append("the Python classifiers must exactly match the qualified interpreter matrix")
     if contract.import_package != "workerbee":
         errors.append("the import package must remain workerbee")
     if contract.runtime_import != "ae":
@@ -500,6 +516,29 @@ def _audit_workerbee_wheel(path: Path, contract: ReleaseContract) -> list[Findin
         findings.append(Finding(str(path), "METADATA", "identity", "distribution name"))
     if metadata.get("Version") != contract.version:
         findings.append(Finding(str(path), "METADATA", "identity", "version"))
+    if metadata.get("Requires-Python") != contract.requires_python:
+        findings.append(
+            Finding(
+                str(path),
+                "METADATA",
+                "requires-python",
+                repr(metadata.get("Requires-Python")),
+            )
+        )
+    python_classifiers = tuple(
+        classifier
+        for classifier in metadata.get_all("Classifier", ())
+        if classifier.startswith("Programming Language :: Python :: ")
+    )
+    if python_classifiers != contract.python_classifiers:
+        findings.append(
+            Finding(
+                str(path),
+                "METADATA",
+                "python-classifiers",
+                repr(python_classifiers),
+            )
+        )
     requires = tuple(metadata.get_all("Requires-Dist", ()))
     mcp_requires = tuple(
         requirement.replace(" ", "")
@@ -800,9 +839,7 @@ def fetch_index_artifacts(
     # The version-specific Warehouse JSON endpoint exposes release files under
     # ``urls``. Keep the project-level ``releases`` shape as a compatibility
     # fallback for mirrors that return it from a version endpoint.
-    release_files = index_payload.get("urls") or index_payload.get("releases", {}).get(
-        version, []
-    )
+    release_files = index_payload.get("urls") or index_payload.get("releases", {}).get(version, [])
     by_name = {item["filename"]: item for item in release_files}
     output.mkdir(parents=True, exist_ok=True)
     errors: list[str] = []

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import tomllib
 from pathlib import Path
 
 RELEASE_WORKFLOWS = (
@@ -14,6 +15,25 @@ RELEASE_BUILDERS = (
     Path("scripts/build_release_candidate.sh"),
     Path("scripts/build_wheelhouse.sh"),
 )
+QUALIFICATION_WORKFLOWS = (GITEA_WORKFLOW, PROMOTION_WORKFLOW)
+SUPPORTED_PYTHON_VERSIONS = ("3.11", "3.12", "3.13")
+
+
+def _python_matrix(path: Path) -> tuple[str, ...]:
+    text = path.read_text(encoding="utf-8")
+    match = re.search(r"python-version:\s*\[([^]]+)\]", text)
+    assert match is not None, f"missing Python matrix in {path}"
+    return tuple(re.findall(r'"([0-9]+\.[0-9]+)"', match.group(1)))
+
+
+def _python_classifiers() -> tuple[str, ...]:
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+    prefix = "Programming Language :: Python :: "
+    return tuple(
+        classifier.removeprefix(prefix)
+        for classifier in project.get("classifiers", ())
+        if classifier.startswith(prefix)
+    )
 
 
 def test_gitea_integration_lane_cannot_publish() -> None:
@@ -34,6 +54,15 @@ def test_gitea_integration_lane_cannot_publish() -> None:
     assert "branches: [dev]" in text
     assert not re.search(r"^\s+[-\w]+:\s+write\s*$", text, re.MULTILINE)
     assert all(marker not in text for marker in forbidden)
+
+
+def test_python_qualification_matrix_matches_advertised_classifiers() -> None:
+    assert _python_classifiers() == SUPPORTED_PYTHON_VERSIONS
+    for workflow in QUALIFICATION_WORKFLOWS:
+        text = workflow.read_text(encoding="utf-8")
+        assert _python_matrix(workflow) == SUPPORTED_PYTHON_VERSIONS
+        assert "python-version: ${{ matrix.python-version }}" in text
+        assert "fail-fast: false" in text
 
 
 def test_release_actions_are_pinned_to_full_commit_shas() -> None:

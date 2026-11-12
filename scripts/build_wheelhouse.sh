@@ -142,7 +142,7 @@ rm -rf "$VERIFY_DIR"
   --no-index \
   --find-links "$OUT_DIR" \
   --target "$VERIFY_DIR" \
-  "k1s-workerbee==1.0.1"
+  "k1s-workerbee==1.0.2"
 rm -rf "$VERIFY_DIR"
 
 cat >"${OUT_DIR}/INSTALL.txt" <<EOF
