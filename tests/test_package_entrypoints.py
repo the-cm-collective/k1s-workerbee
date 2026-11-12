@@ -25,6 +25,15 @@ def test_distribution_import_cli_and_mcp_identity_contract() -> None:
     assert project["scripts"]["workerbee"] == "workerbee.cli:main"
     assert release["mcp-entry-point"] == "workerbee.mcp_server:serve_mcp"
     assert release["runtime-import"] == "ae"
+    assert project["urls"] == {
+        "Homepage": "https://github.com/the-cm-collective/k1s-workerbee",
+        "Repository": "https://github.com/the-cm-collective/k1s-workerbee",
+        "Documentation": "https://github.com/the-cm-collective/k1s-workerbee/wiki",
+        "Issues": "https://github.com/the-cm-collective/k1s-workerbee/issues",
+        "Changelog": (
+            "https://github.com/the-cm-collective/k1s-workerbee/blob/main/CHANGELOG.md"
+        ),
+    }
 
 
 def test_module_cli_entry_point_smoke() -> None:
@@ -37,7 +46,7 @@ def test_module_cli_entry_point_smoke() -> None:
     )
 
     assert proc.returncode == 0, proc.stderr
-    assert proc.stdout.strip() == "workerbee 1.0.0"
+    assert proc.stdout.strip() == "workerbee 1.0.1"
 
 
 def test_mcp_serve_cli_entry_point_smoke() -> None:
